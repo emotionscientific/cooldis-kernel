@@ -1,6 +1,5 @@
 //! The `tool` subcommand family, package fixtures, and tool registries.
 
-use crate::agent::agent_tool_router::AgentKernelToolProvider as _;
 use std::io::Write as _;
 #[cfg(test)]
 mod tests;
@@ -33,6 +32,7 @@ pub(crate) async fn tool_manual(
 
 pub(crate) async fn run_tool(
     mut args: Vec<std::ffi::OsString>,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
@@ -68,7 +68,7 @@ pub(crate) async fn run_tool(
         "publish" => tool_publish(args).await,
         "run" => tool_run(args).await,
         "manual" => tool_manual(args).await,
-        "source" => tool_source(args).await,
+        "source" => tool_source(args, client).await,
         _ => Err(crate::cli::usage_error(format!(
             "unknown tool subcommand {subcommand:?}"
         ))),
@@ -800,6 +800,7 @@ pub(crate) async fn tool_run(
 
 pub(crate) async fn tool_source(
     mut args: Vec<std::ffi::OsString>,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
@@ -828,20 +829,27 @@ pub(crate) async fn tool_source(
         }
         return Ok(());
     }
-    match subcommand.to_string_lossy().as_ref() {
-        "add" => tool_source_add(args).await,
-        "discover" => tool_source_discover(args).await,
-        "list" => tool_source_list(args).await,
-        "show" => tool_source_show(args).await,
-        "remove" => tool_source_remove(args).await,
+    let mut client = client.ok_or_else(|| {
+        crate::cli::usage_error("tool source command did not receive an instance connection")
+    })?;
+    let result = match subcommand.to_string_lossy().as_ref() {
+        "add" => tool_source_add(args, &mut client).await,
+        "discover" => tool_source_discover(args, &mut client).await,
+        "list" => tool_source_list(args, &mut client).await,
+        "show" => tool_source_show(args, &mut client).await,
+        "remove" => tool_source_remove(args, &mut client).await,
         _ => Err(crate::cli::usage_error(format!(
             "unknown tool source subcommand {subcommand:?}"
         ))),
-    }
+    };
+    let close = client.close().await;
+    result?;
+    close
 }
 
 pub(crate) async fn tool_source_add(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_add_args(args)?;
     if options.help {
@@ -857,29 +865,28 @@ pub(crate) async fn tool_source_add(
     let url = options
         .url
         .ok_or_else(|| crate::cli::usage_error("tool source add requires --url"))?;
-    let mut config = crate::adapters::mcp_client::McpRemoteServerConfig::new(name, transport, url)?;
-    if let Some(secret) = options.bearer_secret {
-        config = config.with_bearer_secret(secret)?;
-    }
-    for (name, value) in options.headers {
-        config = config.with_header(name, value);
-    }
-    if !options.include_tools.is_empty() {
-        config = config.with_include_tools(options.include_tools);
-    }
-    if let Some(timeout_ms) = options.timeout_ms {
-        config = config.with_timeout_ms(timeout_ms);
-    }
-    if let Some(max_output_bytes) = options.max_output_bytes {
-        config = config.with_max_output_bytes(max_output_bytes);
-    }
-    let registry = open_mcp_source_registry(options.state_home).await?;
-    let record = registry.upsert_source_async(config).await?;
-    println!("stored tool source {}", record.name);
-    let transport: &str = record.transport.as_ref();
+    let transport: &str = transport.as_ref();
+    let result = client
+        .mcp_source_upsert(serde_json::json!({
+            "name": name,
+            "transport": transport,
+            "url": url,
+            "bearerSecret": options.bearer_secret,
+            "headers": options.headers.into_iter().map(|(name, value)| serde_json::json!({
+                "name": name,
+                "value": value,
+            })).collect::<Vec<_>>(),
+            "includeTools": options.include_tools,
+            "timeoutMs": options.timeout_ms,
+            "maxOutputBytes": options.max_output_bytes,
+        }))
+        .await?;
+    let record = mcp_source_result(&result)?;
+    println!("stored tool source {}", source_string(record, "name")?);
+    let transport = source_string(record, "transport")?;
     println!("transport {transport}");
-    println!("url {}", record.url);
-    if let Some(secret) = record.bearer_secret {
+    println!("url {}", source_string(record, "url")?);
+    if let Some(secret) = source_bearer_secret(record) {
         println!("bearer_secret {secret}");
     }
     Ok(())
@@ -887,6 +894,7 @@ pub(crate) async fn tool_source_add(
 
 pub(crate) async fn tool_source_discover(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source discover")?;
     if options.help {
@@ -896,43 +904,31 @@ pub(crate) async fn tool_source_discover(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("tool source discover requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home.clone()).await?;
-    let record = registry
-        .get_source_async(&name)
-        .await?
-        .ok_or_else(|| crate::cli::usage_error(format!("tool source {name:?} was not found")))?;
-    let secret_store = crate::cli::secret::open_secret_store(options.state_home).await?;
-    let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
-        record.to_config(),
-        Some(std::sync::Arc::new(secret_store)),
-    )
-    .await?;
-    let tools = provider.tool_definitions().await;
-    let updated = registry.update_discovered_tools_async(&name, tools).await?;
-    println!("discovered tool source {}", updated.name);
-    for tool in &updated.discovered_tools {
-        println!("tool {}", tool.name);
+    let result = client.mcp_source_discover(&name).await?;
+    let record = mcp_source_result(&result)?;
+    println!("discovered tool source {}", source_string(record, "name")?);
+    for tool in source_discovered_tools(record)? {
+        println!("tool {}", source_string(tool, "name")?);
     }
     Ok(())
 }
 
 pub(crate) async fn tool_source_list(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_list_args(args, "tool source list")?;
     if options.help {
         print_tool_source_list_help();
         return Ok(());
     }
-    let registry = open_mcp_source_registry(options.state_home).await?;
-    let records = registry.list_sources_async().await?;
+    let result = client.mcp_source_list().await?;
+    let records = result
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| crate::cli::usage_error("mcpSource/list response did not include data"))?;
     if options.json {
-        let json = serde_json::Value::Array(
-            records
-                .iter()
-                .map(|record| record.redacted_json())
-                .collect(),
-        );
+        let json = serde_json::Value::Array(records.clone());
         println!(
             "{}",
             serde_json::to_string_pretty(&json).map_err(|err| {
@@ -948,12 +944,12 @@ pub(crate) async fn tool_source_list(
         return Ok(());
     }
     for record in records {
-        let transport: &str = record.transport.as_ref();
+        let transport = source_string(record, "transport")?;
         println!(
             "{} {} tools={}",
-            record.name,
+            source_string(record, "name")?,
             transport,
-            record.discovered_tools.len()
+            source_discovered_tools(record)?.len()
         );
     }
     Ok(())
@@ -961,6 +957,7 @@ pub(crate) async fn tool_source_list(
 
 pub(crate) async fn tool_source_show(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_show_args(args)?;
     if options.help {
@@ -970,15 +967,12 @@ pub(crate) async fn tool_source_show(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("tool source show requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home).await?;
-    let record = registry
-        .get_source_async(&name)
-        .await?
-        .ok_or_else(|| crate::cli::usage_error(format!("tool source {name:?} was not found")))?;
+    let result = client.mcp_source_read(&name).await?;
+    let record = mcp_source_result(&result)?;
     if options.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&record.redacted_json()).map_err(|err| {
+            serde_json::to_string_pretty(record).map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to encode tool source: {err}"
                 ))
@@ -986,22 +980,24 @@ pub(crate) async fn tool_source_show(
         );
         return Ok(());
     }
-    println!("name {}", record.name);
-    let transport: &str = record.transport.as_ref();
+    println!("name {}", source_string(record, "name")?);
+    let transport = source_string(record, "transport")?;
     println!("transport {transport}");
-    println!("url {}", record.url);
-    if let Some(secret) = record.bearer_secret {
+    println!("url {}", source_string(record, "url")?);
+    if let Some(secret) = source_bearer_secret(record) {
         println!("bearer_secret {secret}");
     }
-    println!("tools {}", record.discovered_tools.len());
-    for tool in &record.discovered_tools {
-        println!("tool {}", tool.name);
+    let tools = source_discovered_tools(record)?;
+    println!("tools {}", tools.len());
+    for tool in tools {
+        println!("tool {}", source_string(tool, "name")?);
     }
     Ok(())
 }
 
 pub(crate) async fn tool_source_remove(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_tool_source_name_args(args, "tool source remove")?;
     if options.help {
@@ -1011,13 +1007,51 @@ pub(crate) async fn tool_source_remove(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("tool source remove requires <name>"))?;
-    let registry = open_mcp_source_registry(options.state_home).await?;
-    if registry.delete_source_async(&name).await? {
+    let result = client.mcp_source_delete(&name).await?;
+    if result
+        .get("deleted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         println!("removed tool source {name}");
     } else {
         println!("tool source {name} was not found");
     }
     Ok(())
+}
+
+fn mcp_source_result(
+    result: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<&serde_json::Value> {
+    result
+        .get("source")
+        .ok_or_else(|| crate::cli::usage_error("mcpSource response did not include source"))
+}
+
+fn source_string<'a>(
+    source: &'a serde_json::Value,
+    field: &str,
+) -> crate::kernel::runtime_host::VerletResult<&'a str> {
+    source
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| crate::cli::usage_error(format!("MCP source response missing {field}")))
+}
+
+fn source_bearer_secret(source: &serde_json::Value) -> Option<&str> {
+    source
+        .get("auth")
+        .and_then(|auth| auth.get("secret"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn source_discovered_tools(
+    source: &serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<&Vec<serde_json::Value>> {
+    source
+        .get("discovered_tools")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| crate::cli::usage_error("MCP source response missing discovered_tools"))
 }
 
 #[derive(Debug)]
@@ -1085,20 +1119,17 @@ pub(crate) struct ToolSourceAddArgs {
     include_tools: std::collections::BTreeSet<String>,
     timeout_ms: Option<u64>,
     max_output_bytes: Option<u64>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct ToolSourceNameArgs {
     name: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct ToolSourceListArgs {
-    state_home: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -1106,7 +1137,6 @@ pub(crate) struct ToolSourceListArgs {
 #[derive(Debug)]
 pub(crate) struct ToolSourceShowArgs {
     name: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     json: bool,
     help: bool,
 }
@@ -1412,7 +1442,6 @@ pub(crate) fn parse_tool_source_add_args(
     let mut include_tools = std::collections::BTreeSet::new();
     let mut timeout_ms = None;
     let mut max_output_bytes = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -1452,7 +1481,9 @@ pub(crate) fn parse_tool_source_add_args(
                     &required_string_value(&mut iter, "--max-output-bytes")?,
                 )?);
             }
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                let _ = required_path_value(&mut iter, "--state-home")?;
+            }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown tool source add argument {other:?}"
@@ -1477,7 +1508,6 @@ pub(crate) fn parse_tool_source_add_args(
         include_tools,
         timeout_ms,
         max_output_bytes,
-        state_home,
         help,
     })
 }
@@ -1487,13 +1517,14 @@ pub(crate) fn parse_tool_source_name_args(
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceNameArgs> {
     let mut name = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                let _ = required_path_value(&mut iter, "--state-home")?;
+            }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown {command} argument {other:?}"
@@ -1509,18 +1540,13 @@ pub(crate) fn parse_tool_source_name_args(
             }
         }
     }
-    Ok(ToolSourceNameArgs {
-        name,
-        state_home,
-        help,
-    })
+    Ok(ToolSourceNameArgs { name, help })
 }
 
 pub(crate) fn parse_tool_source_list_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceListArgs> {
-    let mut state_home = None;
     let mut json = false;
     let mut help = false;
     let mut iter = args.into_iter();
@@ -1528,7 +1554,9 @@ pub(crate) fn parse_tool_source_list_args(
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--json" => json = true,
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                let _ = required_path_value(&mut iter, "--state-home")?;
+            }
             other => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown {command} argument {other:?}"
@@ -1536,18 +1564,13 @@ pub(crate) fn parse_tool_source_list_args(
             }
         }
     }
-    Ok(ToolSourceListArgs {
-        state_home,
-        json,
-        help,
-    })
+    Ok(ToolSourceListArgs { json, help })
 }
 
 pub(crate) fn parse_tool_source_show_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ToolSourceShowArgs> {
     let mut name = None;
-    let mut state_home = None;
     let mut json = false;
     let mut help = false;
     let mut iter = args.into_iter();
@@ -1555,7 +1578,9 @@ pub(crate) fn parse_tool_source_show_args(
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--json" => json = true,
-            "--state-home" => state_home = Some(required_path_value(&mut iter, "--state-home")?),
+            "--state-home" => {
+                let _ = required_path_value(&mut iter, "--state-home")?;
+            }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown tool source show argument {other:?}"
@@ -1571,12 +1596,7 @@ pub(crate) fn parse_tool_source_show_args(
             }
         }
     }
-    Ok(ToolSourceShowArgs {
-        name,
-        state_home,
-        json,
-        help,
-    })
+    Ok(ToolSourceShowArgs { name, json, help })
 }
 
 pub(crate) fn required_path_value(
@@ -1652,26 +1672,6 @@ pub(crate) fn parse_metadata_arg(
 
 pub(crate) fn default_registry_root() -> std::path::PathBuf {
     crate::agent::manifest::default_operations_registry_root()
-}
-
-pub(crate) async fn open_mcp_source_registry(
-    state_home: Option<std::path::PathBuf>,
-) -> crate::kernel::runtime_host::VerletResult<crate::adapters::mcp_client::SqliteMcpSourceRegistry>
-{
-    crate::adapters::mcp_client::SqliteMcpSourceRegistry::open_async(
-        crate::cli::secret::metadata_store_path_for_state_home(
-            state_home,
-            crate::cli::secret::default_project_state_home(),
-        ),
-    )
-    .await
-    .map_err(|err| {
-        if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
-            crate::adapters::app_server::instance::cross_process_database_guidance()
-        } else {
-            err
-        }
-    })
 }
 
 pub(crate) fn load_tool_config(

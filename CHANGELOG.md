@@ -4,6 +4,12 @@
 
 ### Compatibility paths removed
 
+- `verlet daemon run` was removed. Use the top-level `verlet serve` command;
+  daemon config validation and service management remain under `verlet daemon`.
+- `verlet chat` no longer starts a private app-server. It discovers the project
+  instance and uses the same detached, idle-bounded server startup as other
+  client commands when nothing is running.
+
 - Persisted `cooldis.agent-manifest` records and manifests that still carry
   grant-string authority payloads are rejected. Republish those records with
   the current Verlet version. Persisted agent records missing current required

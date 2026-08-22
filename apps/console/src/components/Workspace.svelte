@@ -30,8 +30,8 @@
           </div>
         {:else}
           <p>
-            Not connected. Start a daemon with
-            <span class="mono">verlet daemon run --config &lt;verlet.toml&gt;</span>
+            Not connected. Start a server with
+            <span class="mono">verlet serve --config &lt;verlet.toml&gt;</span>
             and it will be picked up automatically.
           </p>
         {/if}

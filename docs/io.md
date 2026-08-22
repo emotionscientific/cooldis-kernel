@@ -6,7 +6,7 @@ websocket TUI sessions, webhooks, cron ticks, GitHub events, email, product
 queues, and future event buses should all pass through the same conceptual
 surface.
 
-The V1 implementation lives inside `verlet daemon run`. The important split is
+The V1 implementation lives inside `verlet serve`. The important split is
 architectural:
 
 ```text

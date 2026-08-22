@@ -278,7 +278,7 @@ fn public_api_coverage_tracks_docs_and_man_page_gaps() {
         "verlet rpc",
         "verlet chat",
         "verlet debug rpc",
-        "verlet daemon run",
+        "verlet serve",
         "verlet daemon config validate",
         "verlet daemon service print",
         "verlet daemon service install",

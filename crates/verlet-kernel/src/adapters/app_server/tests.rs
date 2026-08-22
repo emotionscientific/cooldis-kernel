@@ -6007,6 +6007,8 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
+    // lexicon-allow: capsule - existing app-server config field
+    let operation_bindings = config.capsule_bindings.clone();
     let project_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
         .await
         .unwrap();
@@ -6063,7 +6065,7 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
         crate::adapters::app_server::runtime_factory_from_provider_parts_with_turn_endpoint_router(
             runtime_config,
             client.clone(),
-            crate::adapters::app_server::CapsuleBindingsConfig::default(),
+            operation_bindings,
             router.clone(),
         );
     let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_stores_and_router(
@@ -22856,4 +22858,35 @@ fn text_from_canonical_messages(messages: &[verlet_history::CanonicalMessage]) -
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_starts_at_zero_and_restarts_after_each_connection() {
+    let tracker = std::sync::Arc::new(crate::adapters::app_server::ClientConnectionTracker::new());
+    let first = tracker.enter();
+    let waiter = {
+        let tracker = std::sync::Arc::clone(&tracker);
+        tokio::spawn(async move {
+            tracker
+                .wait_for_idle_timeout(std::time::Duration::from_millis(100))
+                .await;
+        })
+    };
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(!waiter.is_finished());
+
+    drop(first);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(99)).await;
+    assert!(!waiter.is_finished());
+
+    let second = tracker.enter();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(!waiter.is_finished());
+
+    drop(second);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    waiter.await.unwrap();
 }

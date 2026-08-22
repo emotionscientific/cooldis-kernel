@@ -90,7 +90,9 @@ For the detailed repository map, see [docs/repository-map.md](docs/repository-ma
 ## The Console
 
 The web console lives in this repository at [apps/console](apps/console) and
-ships inside the kernel release: `verlet console`.
+ships inside the kernel release: `verlet console`. The foreground server is
+`verlet serve`. Auth, MCP source management, and terminal chat discover that
+shared instance and auto-start an idle-bounded server when needed.
 
 ## Current Status
 

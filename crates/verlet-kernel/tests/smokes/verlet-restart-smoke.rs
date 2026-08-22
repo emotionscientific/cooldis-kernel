@@ -170,8 +170,7 @@ impl Fixture {
         let mut command = tokio::process::Command::new(daemon_bin);
         model_catalog_test_support::disable_for_tokio_command(&mut command);
         command
-            .arg("daemon")
-            .arg("run")
+            .arg("serve")
             .arg("--config")
             .arg(&self.config_path)
             .stdin(std::process::Stdio::null())

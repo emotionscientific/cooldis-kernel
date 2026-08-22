@@ -296,7 +296,13 @@ async fn load_debug_bind_journal_events(
     let store = verlet_history_sqlite::SqliteSessionStore::open_read_only(journal)
         .await
         .map_err(|err| {
-            crate::cli::usage_error(format!("failed to open journal read-only: {err}"))
+            if crate::adapters::app_server::instance::turso_cross_process_lock_error(
+                &err.to_string(),
+            ) {
+                crate::adapters::app_server::instance::cross_process_database_guidance()
+            } else {
+                crate::cli::usage_error(format!("failed to open journal read-only: {err}"))
+            }
         })?;
     let events = store.list_thread_events(thread_id).await.map_err(|err| {
         crate::cli::usage_error(format!(

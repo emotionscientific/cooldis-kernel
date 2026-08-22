@@ -1,12 +1,17 @@
 # Verlet Daemon
 
-`verlet daemon` is the foreground shape for the future `verletd` service. It
-does not install launchd or systemd units implicitly; service files are printed
-or installed only through explicit user commands.
+`verlet serve` is the foreground server shape. `verlet daemon` retains config
+validation and explicit launchd or systemd service management. It never installs
+or starts a service implicitly.
 
 The daemon config format is TOML:
 
 ```toml
+[daemon]
+# Optional. Foreground serve has no idle timeout when this and the CLI flag are
+# absent. Auto-started client servers default to 10 minutes.
+idle_timeout = "10m"
+
 [daemon.runtime]
 cwd = "."
 runtime_home = ".verlet/runtime"
@@ -321,13 +326,13 @@ verlet daemon service uninstall --target launchd
 verlet daemon service print --target systemd --config verlet.toml
 verlet daemon service install --target systemd --config verlet.toml
 verlet daemon service uninstall --target systemd
-verlet daemon run --config verlet.toml
+verlet serve --config verlet.toml
 ```
 
 `daemon service install` writes a user-level launchd plist or systemd unit. It
 does not load, enable, start, or stop the service automatically.
 
-`daemon run` starts the Verlet app-server with the configured
+`serve` starts the Verlet app-server with the configured
 provider and starts enabled IO routes. Telegram routes bind the configured HTTP
 webhook listener, normalize updates through `verlet-io-telegram`, submit them
 to either the durable pgqrs/SQLite queue or the direct runtime bridge, and
@@ -354,27 +359,22 @@ notifications.
 The app-server runs in three shapes. They share one implementation; they
 differ in who owns the process, the socket, and the state directories.
 
-1. **Ephemeral, per-command** — `verlet chat` starts a private in-process
-   app-server on a throwaway Unix socket under `/tmp`
-   and tear it down on exit. Nothing outside the command should attach to
-   it; its socket path is not stable.
-2. **Standalone control plane** — `verlet rpc --listen ...` runs the
+1. **Foreground server**: `verlet serve` runs the configured provider and IO
+   routes. A user or service manager owns its process lifetime.
+2. **Browser console**: `verlet console` runs the same configured server and IO
+   routes with a loopback WebSocket UI listener and browser open in one process.
+3. **Standalone control plane**: `verlet rpc --listen ...` runs the
    app-server in the foreground on a user-chosen Unix socket or
    loopback WebSocket address, with no IO routes. This is the shape a local
    client (the workbench, a script, the smoke bins) attaches to during
    development. The process owns the socket for its lifetime; stopping it
    is `SIGINT`/`SIGTERM`, and there is no hot handoff.
-3. **Daemon** — `verlet daemon run` is the standalone shape plus the
-   configured provider and IO routes, with the socket defaulting to the
-   user-scoped run directory. This is the V1 long-lived local shape; the
-   service files from `daemon service install` wrap exactly this command.
 
 The boundary rules for V1:
 
 - **One writer per state home.** Exactly one app-server process may own a
   given runtime/state home at a time. Running two shapes against the same
-  state directories is unsupported; the ephemeral chat shape avoids this by
-  using isolated temp state.
+  state directories is refused with the existing process id and socket path.
 - **State outlives the process; subscriptions do not.** Threads, turns, and
   events persist in the state home (published agent records live in the
   separate agent registry root, `.verlet/agents` by default) and are
@@ -382,14 +382,11 @@ The boundary rules for V1:
   path. Live notification subscriptions are in-memory only: a reconnecting
   client must re-list state and re-subscribe; there is no notification
   replay.
-- **Lifecycle ownership is explicit.** Most local clients attach to a socket
-  that a user (or the OS service manager) already started. Connection
-  refused means "start the daemon", and those clients should say so rather
-  than spawning processes themselves. A desktop client may offer an explicit
-  user-level managed profile that starts `verlet daemon run`/`verlet rpc`
-  from the system-installed runtime, records that it owns that child process,
-  and stops only that process after asking or applying a remembered quit
-  preference. External local sockets and remote endpoints are attach-only.
+- **Client startup is bounded.** `auth`, `tool source`, and `chat` attach to a
+  discovered instance. When none is reachable they start `verlet serve`
+  detached with a 10 minute idle timeout by default, log to
+  `<state_root>/serve.log`, and wait up to 15 seconds for its endpoint record.
+  Explicit `--attach` endpoints remain attach-only.
 - **Loopback or Unix socket only.** TCP listen addresses must be loopback;
   there is no authentication layer in V1, so the OS user boundary is the
   security boundary.
@@ -412,7 +409,7 @@ cargo test daemon_io::tests::queue_worker_processes_envelope_after_queue_and_bri
 cargo test -p verlet clock_route
 ```
 
-The first smoke starts the real `verlet daemon run` binary on a configured
+The first smoke starts the real `verlet serve` binary on a configured
 Unix socket and drives it with the Verlet-owned operator client. The
 second queues an ingress envelope into SQLite, drops the first queue/bridge,
 reopens the queue, and proves the restarted worker can submit it into the

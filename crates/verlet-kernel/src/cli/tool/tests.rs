@@ -99,10 +99,6 @@ fn parse_tool_source_add_accepts_remote_mcp_contract_fields() {
     );
     assert_eq!(parsed.timeout_ms, Some(5000));
     assert_eq!(parsed.max_output_bytes, Some(32768));
-    assert_eq!(
-        parsed.state_home,
-        Some(std::path::PathBuf::from("/tmp/verlet-state"))
-    );
 }
 
 #[test]
@@ -116,8 +112,4 @@ fn parse_tool_source_show_accepts_json_and_state_home() {
 
     assert_eq!(parsed.name.as_deref(), Some("arcade"));
     assert!(parsed.json);
-    assert_eq!(
-        parsed.state_home,
-        Some(std::path::PathBuf::from("/tmp/verlet-state"))
-    );
 }

@@ -29,6 +29,8 @@ pub struct VerletProjectDiscovery {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerletDaemonConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<String>,
     #[serde(default)]
     pub identity: crate::daemon::identity::VerletDaemonIdentityConfig,
     #[serde(default)]
@@ -50,6 +52,7 @@ pub struct VerletDaemonConfig {
 impl Default for VerletDaemonConfig {
     fn default() -> Self {
         Self {
+            idle_timeout: None,
             identity: synthesized_local_daemon_identity_config(),
             runtime: VerletRuntimeConfig::default(),
             app_server: VerletDaemonAppServerConfig::default(),
@@ -76,6 +79,16 @@ impl VerletDaemonConfig {
 
     pub fn validation_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
+
+        if let Some(raw) = self.idle_timeout.as_deref() {
+            match humantime::parse_duration(raw) {
+                Ok(duration) if duration.is_zero() => {
+                    errors.push("idle_timeout must be greater than zero".to_string())
+                }
+                Ok(_) => {}
+                Err(error) => errors.push(format!("idle_timeout: {error}")),
+            }
+        }
 
         if let Err(err) = self.identity.validate() {
             errors.push(format!("identity: {err}"));
@@ -118,6 +131,28 @@ impl VerletDaemonConfig {
             errors.push(format!("sync: {err}"));
         }
         errors
+    }
+
+    pub fn idle_timeout(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<Option<std::time::Duration>> {
+        self.idle_timeout
+            .as_deref()
+            .map(|raw| {
+                let duration = humantime::parse_duration(raw).map_err(|error| {
+                    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                        "invalid Verlet daemon config idle_timeout: {error}"
+                    ))
+                })?;
+                if duration.is_zero() {
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        "invalid Verlet daemon config idle_timeout: must be greater than zero"
+                            .to_string(),
+                    ));
+                }
+                Ok(duration)
+            })
+            .transpose()
     }
 
     fn resolve_paths(&mut self, base: &std::path::Path) {
@@ -877,6 +912,7 @@ pub fn discover_verlet_project(
 
 #[derive(Default)]
 struct DaemonConfigPresence {
+    idle_timeout: bool,
     identity: bool,
     runtime: RuntimePresence,
     app_server: AppServerPresence,
@@ -950,6 +986,7 @@ fn daemon_config_presence(
         .unwrap_or(&root);
 
     Ok(DaemonConfigPresence {
+        idle_timeout: table.contains_key("idle_timeout"),
         identity: table.contains_key("identity"),
         runtime: RuntimePresence {
             cwd: section_has_key(table, "runtime", "cwd"),
@@ -1008,6 +1045,9 @@ fn merge_daemon_config_layer(
     mut layer: VerletDaemonConfig,
     presence: DaemonConfigPresence,
 ) {
+    if presence.idle_timeout {
+        config.idle_timeout = layer.idle_timeout.take();
+    }
     if presence.identity {
         config.identity = layer.identity;
         if config.identity.mode == crate::daemon::identity::IdentityMode::Local {
@@ -1297,8 +1337,7 @@ fn render_launchd_service(spec: &VerletDaemonServiceSpec) -> String {
             "    <key>ProgramArguments</key>\n",
             "    <array>\n",
             "        <string>{exe}</string>\n",
-            "        <string>daemon</string>\n",
-            "        <string>run</string>\n",
+            "        <string>serve</string>\n",
             "        <string>--config</string>\n",
             "        <string>{config}</string>\n",
             "    </array>\n",
@@ -1336,7 +1375,7 @@ After=network-online.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart={} daemon run --config {}\n\
+ExecStart={} serve --config {}\n\
 {}Restart=always\n\
 RestartSec=2\n\
 \n\

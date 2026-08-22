@@ -31,7 +31,7 @@ Start the bundled browser console on loopback and open it in the default
 browser.
 .TP
 .B verlet chat
-Start the bundled terminal console with a private local runtime.
+Start the bundled terminal console against the project instance.
 .TP
 .BI "verlet init " name
 Create a folder-first agent project.
@@ -41,7 +41,11 @@ Create a folder-first agent project.
 Run the browser console and its local RPC endpoint.
 .TP
 .B chat
-Run the terminal console, or attach it to an existing RPC endpoint.
+Run the terminal console as an endpoint-discovered client, or attach it to an
+explicit RPC endpoint.
+.TP
+.B serve
+Run the configured app-server and IO routes in the foreground.
 .TP
 .B init
 Create an agent project. This is the short form of
@@ -81,7 +85,7 @@ Run the public app-server control plane on a Unix socket or WebSocket
 listener.
 .TP
 .B daemon
-Run, validate, install, or remove the user-level daemon service.
+Validate config, or print, install, and remove the user-level server service.
 .TP
 .B debug
 Inspect the RPC protocol of a running daemon. These commands are intended for
@@ -114,10 +118,8 @@ Use a built console asset directory containing
 .I index.html
 instead of the assets bundled with a release.
 .PP
-Provider-specific environment variables and environment-file settings are
-described by
-.B verlet help chat
-and the daemon configuration documentation.
+Provider-specific environment variables are described by the server
+configuration documentation.
 .SH FILES
 .TP
 .I ~/.verlet/

@@ -390,6 +390,17 @@ where
             .await
     }
 
+    pub async fn model_provider_auth_status_for(
+        &mut self,
+        provider_id: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "modelProvider/auth/status",
+            serde_json::json!({ "providerId": provider_id }),
+        )
+        .await
+    }
+
     pub async fn model_provider_auth_status_typed(
         &mut self,
     ) -> crate::kernel::runtime_host::VerletResult<OperatorModelProviderAuthList> {
@@ -529,6 +540,43 @@ where
         serde_json::from_value::<OperatorModelProviderAuthResult>(value)
             .map(|result| result.auth)
             .map_err(|err| tui_error(format!("invalid modelProvider/auth/delete response: {err}")))
+    }
+
+    pub async fn mcp_source_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("mcpSource/list", serde_json::json!({})).await
+    }
+
+    pub async fn mcp_source_read(
+        &mut self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("mcpSource/read", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    pub async fn mcp_source_upsert(
+        &mut self,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("mcpSource/upsert", params).await
+    }
+
+    pub async fn mcp_source_discover(
+        &mut self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("mcpSource/discover", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    pub async fn mcp_source_delete(
+        &mut self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("mcpSource/delete", serde_json::json!({ "name": name }))
+            .await
     }
 
     pub async fn config_read(

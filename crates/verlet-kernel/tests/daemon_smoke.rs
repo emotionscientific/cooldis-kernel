@@ -2,7 +2,28 @@
 mod model_catalog_test_support;
 
 #[tokio::test]
-async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
+async fn serve_replaces_daemon_run_without_an_alias() {
+    let serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+        .args(["serve", "--help"])
+        .output()
+        .await
+        .unwrap();
+    assert!(serve.status.success());
+    assert!(String::from_utf8_lossy(&serve.stdout).contains("verlet serve"));
+
+    let daemon_run = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
+        .args(["daemon", "run"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!daemon_run.status.success());
+    assert!(
+        String::from_utf8_lossy(&daemon_run.stderr).contains("unknown daemon subcommand \"run\"")
+    );
+}
+
+#[tokio::test]
+async fn serve_serves_codex_remote_on_configured_unix_socket() {
     let smoke_id = uuid::Uuid::now_v7().simple().to_string();
     let root = std::path::Path::new("/tmp").join(format!("cdisd-{}", &smoke_id[..12]));
     std::fs::create_dir_all(&root).unwrap();
@@ -10,7 +31,7 @@ async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     let config_path = root.join("verlet.toml");
     write_daemon_config(&config_path, &root, &socket);
 
-    let daemon = DaemonChild::spawn(&config_path).await;
+    let server = ServeChild::spawn(&config_path).await;
     let mut client = connect_daemon_client(&socket).await;
 
     let account = client.account_read().await.unwrap();
@@ -41,13 +62,13 @@ async fn daemon_run_serves_codex_remote_on_configured_unix_socket() {
     );
 
     client.close().await.unwrap();
-    daemon.stop().await;
+    server.stop().await;
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill() {
+async fn console_endpoint_record_refuses_serve_then_becomes_stale_after_sigkill() {
     let smoke_id = uuid::Uuid::now_v7().simple().to_string();
     let root = std::path::Path::new("/tmp").join(format!("cdisep-{}", &smoke_id[..12]));
     let assets = root.join("console-assets");
@@ -105,13 +126,12 @@ async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill
             .is_some_and(|url| url.starts_with("ws://127.0.0.1:"))
     );
 
-    let mut daemon = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
-    model_catalog_test_support::disable_for_tokio_command(&mut daemon);
+    let mut serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut serve);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        daemon
-            .arg("daemon")
-            .arg("run")
+        serve
+            .arg("serve")
             .arg("--config")
             .arg(&config_path)
             .stdin(std::process::Stdio::null())
@@ -120,9 +140,9 @@ async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill
             .output(),
     )
     .await
-    .expect("daemon contention did not fail fast")
+    .expect("serve contention did not finish promptly")
     .unwrap();
-    assert!(!output.status.success());
+    assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected = format!(
         "instance already running for {}, pid {}, socket {}",
@@ -132,7 +152,7 @@ async fn console_endpoint_record_refuses_daemon_then_becomes_stale_after_sigkill
     );
     assert!(
         stderr.contains(&expected),
-        "expected {expected:?} in daemon stderr {stderr:?}"
+        "expected {expected:?} in serve stderr {stderr:?}"
     );
     assert!(!stderr.contains("File is locked"));
 
@@ -233,19 +253,22 @@ async fn wait_for_endpoint_record(
     );
 }
 
-struct DaemonChild {
+struct ServeChild {
     child: Option<tokio::process::Child>,
 }
 
-impl DaemonChild {
+impl ServeChild {
     async fn spawn(config_path: &std::path::Path) -> Self {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
         model_catalog_test_support::disable_for_tokio_command(&mut command);
         let child = command
-            .arg("daemon")
-            .arg("run")
+            .arg("serve")
             .arg("--config")
             .arg(config_path)
+            .env(
+                "VERLET_HOME",
+                config_path.parent().unwrap().join("user-home"),
+            )
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -262,7 +285,7 @@ impl DaemonChild {
     }
 }
 
-impl Drop for DaemonChild {
+impl Drop for ServeChild {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();

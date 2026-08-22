@@ -88,7 +88,8 @@ a user's ChatGPT plan,
 virtual bash, VFS-backed oversized-output spill receipts,
 skill-package resources with bind-time name pinning, witnessed workspace skill
 discovery without a second mount, bind-plane local host-workspace mounts,
-daemon/RPC surfaces, daemon-embedded store-primary
+the `verlet serve` and `verlet console` server surfaces, endpoint-discovered
+CLI clients with bounded auto-start, daemon-embedded store-primary
 stream propagation, store-backed remote child placement, and the proof path for
 packageable local agents.
 

@@ -56,13 +56,13 @@ fn parse_daemon_service_uninstall_accepts_target_and_label() {
 }
 
 #[test]
-fn parse_daemon_run_accepts_config_only() {
+fn parse_serve_accepts_config_only() {
     let args = vec!["--config", "/tmp/verlet.toml"]
         .into_iter()
         .map(std::ffi::OsString::from)
         .collect();
 
-    let parsed = crate::cli::daemon::parse_daemon_run_args(args).unwrap();
+    let parsed = crate::cli::serve::parse_serve_args(args).unwrap();
 
     assert_eq!(
         parsed.config_path,

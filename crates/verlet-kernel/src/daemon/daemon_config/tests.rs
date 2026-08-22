@@ -1203,7 +1203,7 @@ fn renders_launchd_and_systemd_services() {
         &spec,
     );
     assert!(launchd.contains("<string>com.example.verlet</string>"));
-    assert!(launchd.contains("<string>daemon</string>"));
+    assert!(launchd.contains("<string>serve</string>"));
     assert!(launchd.contains("<string>--config</string>"));
 
     let systemd = crate::daemon::daemon_config::render_verlet_daemon_service(
@@ -1211,10 +1211,31 @@ fn renders_launchd_and_systemd_services() {
         &spec,
     );
     assert!(
-        systemd
-            .contains("ExecStart=/usr/local/bin/verlet daemon run --config /Users/me/verlet.toml")
+        systemd.contains("ExecStart=/usr/local/bin/verlet serve --config /Users/me/verlet.toml")
     );
     assert!(systemd.contains("WorkingDirectory=/Users/me/project"));
+}
+
+#[test]
+fn daemon_idle_timeout_uses_human_duration_syntax() {
+    let config =
+        crate::daemon::daemon_config::decode_daemon_config("[daemon]\nidle_timeout = \"2s\"\n")
+            .unwrap();
+
+    assert_eq!(
+        config.idle_timeout().unwrap(),
+        Some(std::time::Duration::from_secs(2))
+    );
+
+    let invalid =
+        crate::daemon::daemon_config::decode_daemon_config("[daemon]\nidle_timeout = \"later\"\n")
+            .unwrap();
+    assert!(
+        invalid
+            .validation_errors()
+            .iter()
+            .any(|error| error.starts_with("idle_timeout:"))
+    );
 }
 
 #[test]

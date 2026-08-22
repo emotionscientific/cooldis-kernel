@@ -2,13 +2,13 @@
 
 `verlet chat` is the bundled local terminal console for operating a Verlet
 app-server session. It is intentionally an RPC client over the app-server
-boundary, not a privileged runtime path. By default it launches a private local
-app-server; with `--attach` it connects to an existing endpoint.
+boundary, not a privileged runtime path. By default it discovers the project
+instance and auto-starts an idle-bounded `verlet serve` when needed. With
+`--attach` it connects to the specified endpoint.
 
 ```text
 verlet chat [PROMPT] [--config <file>] [--cwd <path>]
 verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>
-verlet chat [PROMPT] --provider <provider> [--model <model>] ...
 ```
 
 ## OpenAI Codex With A ChatGPT Plan
@@ -19,7 +19,7 @@ the signed-in user's ChatGPT plan. It does not use an OpenAI API key.
 ```sh
 verlet auth login openai-codex
 verlet auth status openai-codex
-verlet chat --provider openai-codex
+verlet chat
 ```
 
 Login normally opens a browser and listens for the registered OAuth callback on
@@ -31,7 +31,7 @@ verlet auth login openai-codex --device
 ```
 
 Credentials are stored in the user provider store. `verlet auth status
-openai-codex` shows the account without exposing tokens, and `verlet auth delete
+openai-codex` shows redacted configuration status, and `verlet auth delete
 openai-codex` signs the local Verlet installation out. Verlet refreshes expiring
 tokens automatically.
 

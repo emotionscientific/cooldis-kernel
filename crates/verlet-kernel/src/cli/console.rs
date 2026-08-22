@@ -35,6 +35,7 @@ pub(crate) async fn run_console(
     let resolved = resolve_console_app_server_config(&options, listen.clone())?;
     let project_root = resolved.project_root.clone();
     let config_path = resolved.config_path.clone();
+    let daemon_config = resolved.daemon_config;
     let mut config = resolved.config;
     let state_home = config.state_home.clone();
     config.console_assets = Some(crate::adapters::app_server::ConsoleAssetConfig {
@@ -44,6 +45,24 @@ pub(crate) async fn run_console(
     prepare_console_project_storage(&config)?;
 
     let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
+    let _io_tasks = match crate::cli::daemon::start_daemon_io(
+        &daemon_config.io,
+        &daemon_config.sync,
+        config_path.clone(),
+        &server,
+    )
+    .await
+    {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            if let Err(shutdown_error) = server.shutdown().await {
+                eprintln!(
+                    "failed to shut down Verlet console after I/O startup error {error}: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
+    };
     let ui_url = format!("http://{bound_addr}/");
     let rpc_url = format!("ws://{bound_addr}/rpc");
     println!("verlet console UI  {ui_url}");
@@ -75,9 +94,11 @@ pub(crate) fn console_app_server_config(
 }
 
 pub(crate) struct ResolvedConsoleAppServerConfig {
-    config: crate::adapters::app_server::VerletAppServerConfig,
-    project_root: std::path::PathBuf,
-    config_path: Option<std::path::PathBuf>,
+    pub(crate) config: crate::adapters::app_server::VerletAppServerConfig,
+    pub(crate) project_root: std::path::PathBuf,
+    pub(crate) config_path: Option<std::path::PathBuf>,
+    pub(crate) idle_timeout: Option<std::time::Duration>,
+    pub(crate) daemon_config: crate::daemon::daemon_config::VerletDaemonConfig,
 }
 
 pub(crate) struct ConsoleEnvironment {
@@ -140,11 +161,47 @@ pub(crate) fn resolve_console_app_server_config(
     );
     config.listen = listen;
 
+    let mut daemon_config = loaded.config;
+    daemon_config.io.resolve_paths(&env.project_root);
+    let idle_timeout = daemon_config.idle_timeout()?;
     Ok(ResolvedConsoleAppServerConfig {
         config,
         project_root: env.project_root,
         config_path: loaded.path,
+        idle_timeout,
+        daemon_config,
     })
+}
+
+pub(crate) fn resolve_instance_app_server_config(
+    cwd: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
+    runtime_home: Option<std::path::PathBuf>,
+    state_home: Option<std::path::PathBuf>,
+    user_state_home: Option<std::path::PathBuf>,
+) -> crate::kernel::runtime_host::VerletResult<ResolvedConsoleAppServerConfig> {
+    let options = ConsoleArgs {
+        listen: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        cwd,
+        cwd_explicit: true,
+        config_path,
+        open: false,
+        help: false,
+    };
+    let mut resolved = resolve_console_app_server_config(
+        &options,
+        crate::adapters::app_server::AppServerListenAddr::WebSocket(options.listen),
+    )?;
+    if let Some(runtime_home) = runtime_home {
+        resolved.config.runtime_home = absolute_path(&runtime_home)?;
+    }
+    if let Some(state_home) = state_home {
+        resolved.config.state_home = absolute_path(&state_home)?;
+    }
+    if let Some(user_state_home) = user_state_home {
+        resolved.config.user_state_home = absolute_path(&user_state_home)?;
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn resolve_console_environment(
@@ -375,58 +432,9 @@ pub(crate) struct ConsoleArgs {
 
 #[derive(Debug)]
 pub(crate) struct ChatArgs {
-    pub(crate) cwd: std::path::PathBuf,
-    config_path: Option<std::path::PathBuf>,
-    env_file: Option<std::path::PathBuf>,
-    runtime_home: Option<std::path::PathBuf>,
-    state_home: Option<std::path::PathBuf>,
-    provider: Option<String>,
-    base_url: Option<String>,
-    api_key: Option<String>,
-    api_key_env: Option<String>,
-    model: Option<String>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
     pub(crate) attach: Option<String>,
     pub(crate) prompt: Option<String>,
     pub(crate) help: bool,
-}
-
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(crate) struct ChatConfigFile {
-    chat: Option<ChatConfigSection>,
-    provider: Option<String>,
-    base_url: Option<String>,
-    api_key: Option<String>,
-    api_key_env: Option<String>,
-    region: Option<String>,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    aws_session_token: Option<String>,
-    model: Option<String>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
-    env_file: Option<std::path::PathBuf>,
-    #[serde(default, alias = "capsuleBindings")]
-    capsule_bindings: Option<crate::adapters::app_server::CapsuleBindingsConfig>,
-}
-
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-pub(crate) struct ChatConfigSection {
-    provider: Option<String>,
-    base_url: Option<String>,
-    api_key: Option<String>,
-    api_key_env: Option<String>,
-    region: Option<String>,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    aws_session_token: Option<String>,
-    model: Option<String>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
-    env_file: Option<std::path::PathBuf>,
-    #[serde(default, alias = "capsuleBindings")]
-    capsule_bindings: Option<crate::adapters::app_server::CapsuleBindingsConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -671,20 +679,6 @@ pub(crate) fn parse_console_args(
 pub(crate) fn parse_chat_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<ChatArgs> {
-    let mut cwd = std::env::current_dir().map_err(|err| {
-        crate::cli::usage_error(format!("failed to read current working directory: {err}"))
-    })?;
-    let mut config_path = None;
-    let mut env_file = None;
-    let mut runtime_home = None;
-    let mut state_home = None;
-    let mut provider = None;
-    let mut base_url = None;
-    let mut api_key = None;
-    let mut api_key_env = None;
-    let mut model = None;
-    let mut max_tokens = None;
-    let mut stream = None;
     let mut attach = None;
     let mut positionals = Vec::new();
     let mut help = false;
@@ -693,68 +687,17 @@ pub(crate) fn parse_chat_args(
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--config" => {
-                config_path = Some(crate::cli::tool::required_path_value(
-                    &mut iter, "--config",
-                )?)
-            }
-            "--env-file" => {
-                env_file = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--env-file",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--config")?;
             }
             "--cwd" => {
-                cwd = std::path::PathBuf::from(crate::cli::tool::required_string_value(
-                    &mut iter, "--cwd",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--cwd")?;
             }
             "--runtime-home" => {
-                runtime_home = Some(std::path::PathBuf::from(
-                    crate::cli::tool::required_string_value(&mut iter, "--runtime-home")?,
-                ));
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--runtime-home")?;
             }
             "--state-home" => {
-                state_home = Some(std::path::PathBuf::from(
-                    crate::cli::tool::required_string_value(&mut iter, "--state-home")?,
-                ));
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
-            "--provider" => {
-                provider = Some(crate::cli::tool::required_string_value(
-                    &mut iter,
-                    "--provider",
-                )?)
-            }
-            "--base-url" => {
-                base_url = Some(crate::cli::tool::required_string_value(
-                    &mut iter,
-                    "--base-url",
-                )?)
-            }
-            "--api-key" => {
-                api_key = Some(crate::cli::tool::required_string_value(
-                    &mut iter,
-                    "--api-key",
-                )?)
-            }
-            "--api-key-env" => {
-                api_key_env = Some(crate::cli::tool::required_string_value(
-                    &mut iter,
-                    "--api-key-env",
-                )?)
-            }
-            "--model" => {
-                model = Some(crate::cli::tool::required_string_value(
-                    &mut iter, "--model",
-                )?)
-            }
-            "--max-tokens" => {
-                let value = crate::cli::tool::required_string_value(&mut iter, "--max-tokens")?;
-                max_tokens = Some(value.parse().map_err(|_| {
-                    crate::cli::usage_error("--max-tokens must be a positive integer")
-                })?);
-            }
-            "--stream" => stream = Some(true),
-            "--no-stream" => stream = Some(false),
             "--attach" => {
                 attach = Some(crate::cli::tool::required_string_value(
                     &mut iter, "--attach",
@@ -774,491 +717,10 @@ pub(crate) fn parse_chat_args(
         Some(positionals.join(" "))
     };
     Ok(ChatArgs {
-        cwd,
-        config_path,
-        env_file,
-        runtime_home,
-        state_home,
-        provider,
-        base_url,
-        api_key,
-        api_key_env,
-        model,
-        max_tokens,
-        stream,
         attach,
         prompt,
         help,
     })
-}
-
-pub(crate) fn load_chat_provider_config(
-    args: &ChatArgs,
-) -> crate::kernel::runtime_host::VerletResult<ChatProviderConfig> {
-    let (mut config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
-    if let Some(provider) = args.provider.clone() {
-        config.provider = Some(provider);
-    }
-    if let Some(base_url) = args.base_url.clone() {
-        config.base_url = Some(base_url);
-    }
-    if let Some(api_key) = args.api_key.clone() {
-        config.api_key = Some(api_key);
-    }
-    if let Some(api_key_env) = args.api_key_env.clone() {
-        config.api_key_env = Some(api_key_env);
-    }
-    if let Some(model) = args.model.clone() {
-        config.model = Some(model);
-    }
-    if let Some(max_tokens) = args.max_tokens {
-        config.max_tokens = Some(max_tokens);
-    }
-    if let Some(stream) = args.stream {
-        config.stream = Some(stream);
-    }
-    if let Some(env_file) = args.env_file.clone() {
-        config.env_file = Some(env_file);
-    }
-
-    let provider = config.provider.as_deref().unwrap_or_else(|| {
-        if config.aws_access_key_id.is_some() || config.aws_secret_access_key.is_some() {
-            "anthropic_bedrock"
-        } else if config.base_url.is_some() || config.model.is_some() || config.api_key.is_some() {
-            "bifrost_openai"
-        } else {
-            "local"
-        }
-    });
-
-    match provider {
-        "local" | "local_offline" | "offline" => Ok(ChatProviderConfig::Local),
-        "openai-codex" | "openai_codex" => Ok(ChatProviderConfig::OpenAICodex {
-            model: config.model.clone().unwrap_or_else(|| {
-                verlet_metadata::provider_store::OPENAI_CODEX_DEFAULT_MODEL.to_string()
-            }),
-            max_tokens: config.max_tokens.unwrap_or(4096),
-            stream: config.stream.unwrap_or(true),
-        }),
-        "bifrost" | "bifrost_openai" | "openai" | "openai_responses" => {
-            let env_file = config
-                .env_file
-                .clone()
-                .map(|path| {
-                    crate::cli::tool::resolve_config_path(
-                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
-                        path,
-                    )
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_CHAT_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_BIFROST_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
-            let file_env = read_env_file_if_exists(&env_file)?;
-            let base_url = config
-                .base_url
-                .clone()
-                .or_else(|| env_or_file("VERLET_BIFROST_URL", &file_env))
-                .or_else(|| env_or_file("LLM_PROXY_PUBLIC_URL", &file_env))
-                .or_else(|| env_or_file("LLM_PROXY_URL", &file_env))
-                .ok_or_else(|| {
-                    crate::cli::usage_error(
-                        "Bifrost chat provider requires chat.base_url, VERLET_BIFROST_URL, LLM_PROXY_PUBLIC_URL, or LLM_PROXY_URL",
-                    )
-                })?
-                .trim_end_matches('/')
-                .to_string();
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| {
-                    config
-                        .api_key_env
-                        .as_deref()
-                        .and_then(|name| env_or_file(name, &file_env))
-                })
-                .or_else(|| env_or_file("VERLET_BIFROST_KEY", &file_env))
-                .or_else(|| env_or_file("BIFROST_SYSTEM_VIRTUAL_KEY", &file_env))
-                .or_else(|| env_or_file("BIFROST_SYSTEM_KEY", &file_env))
-                .ok_or_else(|| {
-                    crate::cli::usage_error(
-                        "Bifrost chat provider requires chat.api_key, chat.api_key_env, VERLET_BIFROST_KEY, or BIFROST_SYSTEM_VIRTUAL_KEY",
-                    )
-                })?;
-            let model = config
-                .model
-                .clone()
-                .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env))
-                .unwrap_or_else(|| {
-                    crate::adapters::app_server::APP_SERVER_BIFROST_MODEL.to_string()
-                });
-            Ok(ChatProviderConfig::BifrostOpenAI {
-                base_url,
-                api_key,
-                model,
-                max_tokens: config.max_tokens.unwrap_or(4096),
-                stream: config.stream.unwrap_or(true),
-            })
-        }
-        "anthropic" | "anthropic_messages" => {
-            let env_file = config
-                .env_file
-                .clone()
-                .map(|path| {
-                    crate::cli::tool::resolve_config_path(
-                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
-                        path,
-                    )
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_CHAT_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_ANTHROPIC_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
-            let file_env = read_env_file_if_exists(&env_file)?;
-            let base_url = config
-                .base_url
-                .clone()
-                .or_else(|| env_or_file("VERLET_ANTHROPIC_URL", &file_env))
-                .or_else(|| env_or_file("ANTHROPIC_BASE_URL", &file_env))
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string())
-                .trim_end_matches('/')
-                .to_string();
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| {
-                    config
-                        .api_key_env
-                        .as_deref()
-                        .and_then(|name| env_or_file(name, &file_env))
-                })
-                .or_else(|| env_or_file("ANTHROPIC_API_KEY", &file_env))
-                .ok_or_else(|| {
-                    crate::cli::usage_error(
-                        "Anthropic chat provider requires chat.api_key, chat.api_key_env, or ANTHROPIC_API_KEY",
-                    )
-                })?;
-            let model = config
-                .model
-                .clone()
-                .or_else(|| env_or_file("VERLET_ANTHROPIC_MODEL", &file_env))
-                .or_else(|| env_or_file("ANTHROPIC_MODEL", &file_env))
-                .unwrap_or_else(|| {
-                    crate::adapters::app_server::APP_SERVER_ANTHROPIC_MODEL.to_string()
-                });
-            Ok(ChatProviderConfig::AnthropicMessages {
-                base_url,
-                api_key,
-                model,
-                max_tokens: config.max_tokens.unwrap_or(4096),
-                stream: config.stream.unwrap_or(true),
-            })
-        }
-        "anthropic_bedrock" | "bedrock" | "bedrock_anthropic" => {
-            let env_file = config
-                .env_file
-                .clone()
-                .map(|path| {
-                    crate::cli::tool::resolve_config_path(
-                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
-                        path,
-                    )
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_CHAT_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_BEDROCK_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_ANTHROPIC_BEDROCK_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
-            let file_env = read_env_file_if_exists(&env_file)?;
-            let region = config
-                .region
-                .clone()
-                .or_else(|| env_or_file("AWS_BEDROCK_REGION", &file_env))
-                .or_else(|| env_or_file("AWS_REGION", &file_env))
-                .or_else(|| env_or_file("AWS_DEFAULT_REGION", &file_env))
-                .unwrap_or_else(|| "us-east-1".to_string());
-            let base_url = config
-                .base_url
-                .clone()
-                .or_else(|| env_or_file("VERLET_BEDROCK_BASE_URL", &file_env))
-                .or_else(|| env_or_file("ANTHROPIC_BEDROCK_BASE_URL", &file_env))
-                .map(|url| url.trim_end_matches('/').to_string());
-            let access_key_id = config
-                .aws_access_key_id
-                .clone()
-                .or_else(|| env_or_file("AWS_ACCESS_KEY_ID", &file_env))
-                .ok_or_else(|| {
-                    crate::cli::usage_error(
-                        "Anthropic Bedrock provider requires AWS_ACCESS_KEY_ID or chat.aws_access_key_id",
-                    )
-                })?;
-            let secret_access_key = config
-                .aws_secret_access_key
-                .clone()
-                .or_else(|| env_or_file("AWS_SECRET_ACCESS_KEY", &file_env))
-                .ok_or_else(|| {
-                    crate::cli::usage_error(
-                        "Anthropic Bedrock provider requires AWS_SECRET_ACCESS_KEY or chat.aws_secret_access_key",
-                    )
-                })?;
-            let session_token = config
-                .aws_session_token
-                .clone()
-                .or_else(|| env_or_file("AWS_SESSION_TOKEN", &file_env));
-            let model = config
-                .model
-                .clone()
-                .or_else(|| env_or_file("VERLET_ANTHROPIC_BEDROCK_MODEL", &file_env))
-                .or_else(|| env_or_file("AWS_BEDROCK_MODEL", &file_env))
-                .or_else(|| env_or_file("ANTHROPIC_DEFAULT_SONNET_MODEL", &file_env))
-                .unwrap_or_else(|| {
-                    crate::adapters::app_server::APP_SERVER_ANTHROPIC_BEDROCK_MODEL.to_string()
-                });
-            let stream = config.stream.unwrap_or(true);
-            Ok(ChatProviderConfig::AnthropicBedrock {
-                region,
-                base_url,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                model,
-                max_tokens: config.max_tokens.unwrap_or(4096),
-                stream,
-            })
-        }
-        "bifrost_openai_chat"
-        | "bifrost_chat"
-        | "openai_chat"
-        | "openai_chat_completions"
-        | "openai_compatible"
-        | "openai_compatible_openai"
-        | "openai_compatible_chat"
-        | "openai_compatible_serverless" => {
-            let openai_compatible = crate::cli::daemon::provider_is_openai_compatible(provider);
-            let env_file = config
-                .env_file
-                .clone()
-                .map(|path| {
-                    crate::cli::tool::resolve_config_path(
-                        config_base.as_deref().unwrap_or(std::path::Path::new(".")),
-                        path,
-                    )
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_CHAT_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .or_else(|| {
-                    if openai_compatible {
-                        std::env::var("VERLET_OPENAI_COMPATIBLE_ENV_FILE")
-                            .ok()
-                            .map(std::path::PathBuf::from)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    std::env::var("VERLET_BIFROST_ENV_FILE")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
-                .unwrap_or_else(|| std::path::PathBuf::from(".env"));
-            let file_env = read_env_file_if_exists(&env_file)?;
-            if openai_compatible
-                && config.base_url.is_none()
-                && config.api_key.is_none()
-                && config.api_key_env.is_none()
-                && !file_env.contains_key("VERLET_OPENAI_COMPATIBLE_API_KEY")
-                && !file_env.contains_key("OPENAI_COMPATIBLE_API_KEY")
-            {
-                let model = config
-                    .model
-                    .clone()
-                    .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_MODEL", &file_env))
-                    .or_else(|| env_or_file("OPENAI_COMPATIBLE_MODEL", &file_env));
-                return Ok(ChatProviderConfig::CatalogOpenAIChatCompletions {
-                    provider_id: crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_PROVIDER
-                        .to_string(),
-                    model,
-                    max_tokens: config.max_tokens.unwrap_or(4096),
-                    stream: config.stream.unwrap_or(true),
-                });
-            }
-            let base_url = if openai_compatible {
-                config
-                    .base_url
-                    .clone()
-                    .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_URL", &file_env))
-                    .or_else(|| env_or_file("OPENAI_COMPATIBLE_BASE_URL", &file_env))
-                    .unwrap_or_else(|| "https://api.example.invalid/v1".to_string())
-            } else {
-                config
-                    .base_url
-                    .clone()
-                    .or_else(|| env_or_file("VERLET_BIFROST_URL", &file_env))
-                    .or_else(|| env_or_file("LLM_PROXY_PUBLIC_URL", &file_env))
-                    .or_else(|| env_or_file("LLM_PROXY_URL", &file_env))
-                    .ok_or_else(|| {
-                        crate::cli::usage_error(
-                            "OpenAI Chat Completions provider requires chat.base_url, VERLET_BIFROST_URL, LLM_PROXY_PUBLIC_URL, or LLM_PROXY_URL",
-                        )
-                    })?
-            }
-            .trim_end_matches('/')
-            .to_string();
-            let api_key = if openai_compatible {
-                config
-                    .api_key
-                    .clone()
-                    .or_else(|| {
-                        config
-                            .api_key_env
-                            .as_deref()
-                            .and_then(|name| env_or_file(name, &file_env))
-                    })
-                    .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_API_KEY", &file_env))
-                    .or_else(|| env_or_file("OPENAI_COMPATIBLE_API_KEY", &file_env))
-                    .ok_or_else(|| {
-                        crate::cli::usage_error(
-                            "OpenAI Compatible chat provider requires chat.api_key, chat.api_key_env, VERLET_OPENAI_COMPATIBLE_API_KEY, or OPENAI_COMPATIBLE_API_KEY",
-                        )
-                    })?
-            } else {
-                config
-                    .api_key
-                    .clone()
-                    .or_else(|| {
-                        config
-                            .api_key_env
-                            .as_deref()
-                            .and_then(|name| env_or_file(name, &file_env))
-                    })
-                    .or_else(|| env_or_file("VERLET_BIFROST_KEY", &file_env))
-                    .or_else(|| env_or_file("BIFROST_SYSTEM_VIRTUAL_KEY", &file_env))
-                    .or_else(|| env_or_file("BIFROST_SYSTEM_KEY", &file_env))
-                    .ok_or_else(|| {
-                        crate::cli::usage_error(
-                            "OpenAI Chat Completions provider requires chat.api_key, chat.api_key_env, VERLET_BIFROST_KEY, or BIFROST_SYSTEM_VIRTUAL_KEY",
-                        )
-                    })?
-            };
-            let model = if openai_compatible {
-                config
-                    .model
-                    .clone()
-                    .or_else(|| env_or_file("VERLET_OPENAI_COMPATIBLE_MODEL", &file_env))
-                    .or_else(|| env_or_file("OPENAI_COMPATIBLE_MODEL", &file_env))
-                    .unwrap_or_else(|| {
-                        crate::adapters::app_server::APP_SERVER_OPENAI_COMPATIBLE_MODEL.to_string()
-                    })
-            } else {
-                config
-                    .model
-                    .clone()
-                    .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_CHAT_MODEL", &file_env))
-                    .or_else(|| env_or_file("VERLET_BIFROST_OPENAI_MODEL", &file_env))
-                    .unwrap_or_else(|| {
-                        crate::adapters::app_server::APP_SERVER_BIFROST_MODEL.to_string()
-                    })
-            };
-            Ok(ChatProviderConfig::OpenAIChatCompletions {
-                provider: crate::cli::daemon::chat_completions_provider_name(provider),
-                base_url,
-                api_key,
-                model,
-                max_tokens: config.max_tokens.unwrap_or(4096),
-                stream: config.stream.unwrap_or(true),
-                headers: crate::cli::daemon::provider_default_headers(provider),
-            })
-        }
-        other => Err(crate::cli::usage_error(format!(
-            "unknown chat provider {other:?}; expected local, openai-codex, bifrost_openai, openai_chat_completions, anthropic, anthropic_bedrock, or openai_compatible"
-        ))),
-    }
-}
-
-pub(crate) fn load_chat_capsule_bindings_config(
-    args: &ChatArgs,
-) -> crate::kernel::runtime_host::VerletResult<crate::adapters::app_server::CapsuleBindingsConfig> {
-    let (config, config_base) = load_chat_config_file(args.config_path.as_deref())?;
-    let mut capsule_bindings = config.capsule_bindings.unwrap_or_default();
-    if let Some(registry_root) = capsule_bindings.registry_root.take() {
-        capsule_bindings.registry_root = Some(match config_base.as_deref() {
-            Some(base) => crate::cli::tool::resolve_config_path(base, registry_root),
-            None => registry_root,
-        });
-    }
-    Ok(capsule_bindings)
-}
-
-pub(crate) fn load_chat_config_file(
-    path: Option<&std::path::Path>,
-) -> crate::kernel::runtime_host::VerletResult<(ChatConfigSection, Option<std::path::PathBuf>)> {
-    let discovered;
-    let path = if let Some(path) = path {
-        path
-    } else {
-        discovered = std::path::PathBuf::from("verlet.json");
-        if !discovered.exists() {
-            return Ok((ChatConfigSection::default(), None));
-        }
-        discovered.as_path()
-    };
-    let bytes = std::fs::read(path).map_err(|err| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "failed to read chat config {}: {err}",
-            path.display()
-        ))
-    })?;
-    let file: ChatConfigFile = serde_json::from_slice(&bytes).map_err(|err| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "failed to decode chat config {} as JSON: {err}",
-            path.display()
-        ))
-    })?;
-    let config = file.chat.unwrap_or(ChatConfigSection {
-        provider: file.provider,
-        base_url: file.base_url,
-        api_key: file.api_key,
-        api_key_env: file.api_key_env,
-        region: file.region,
-        aws_access_key_id: file.aws_access_key_id,
-        aws_secret_access_key: file.aws_secret_access_key,
-        aws_session_token: file.aws_session_token,
-        model: file.model,
-        max_tokens: file.max_tokens,
-        stream: file.stream,
-        env_file: file.env_file,
-        // lexicon-allow: capsule - existing app-server operation binding API name
-        capsule_bindings: file.capsule_bindings,
-    });
-    Ok((config, path.parent().map(|base| base.to_path_buf())))
 }
 
 pub(crate) fn read_env_file_if_exists(
@@ -1309,131 +771,6 @@ pub(crate) fn env_or_file(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| file_env.get(name).cloned())
-}
-
-pub(crate) struct PrivateAppServer {
-    listen: crate::adapters::app_server::AppServerListenAddr,
-    root: std::path::PathBuf,
-    server: crate::adapters::app_server::VerletAppServer,
-    task: Option<tokio::task::JoinHandle<crate::kernel::runtime_host::VerletResult<()>>>,
-}
-
-impl PrivateAppServer {
-    pub(crate) async fn start(
-        options: &ChatArgs,
-    ) -> crate::kernel::runtime_host::VerletResult<Self> {
-        let root = std::path::PathBuf::from("/tmp")
-            .join(format!("cdis-chat-{}", uuid::Uuid::now_v7().simple()));
-        let listen =
-            crate::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock"));
-        let provider = load_chat_provider_config(options)?;
-        // lexicon-allow: capsule - existing app-server operation binding API name
-        let capsule_bindings = load_chat_capsule_bindings_config(options)?;
-        let mut config = crate::adapters::app_server::VerletAppServerConfig::local(
-            listen.clone(),
-            options.cwd.clone(),
-        );
-        config.runtime_home = options
-            .runtime_home
-            .clone()
-            .unwrap_or_else(|| root.join("runtime"));
-        config.state_home = options
-            .state_home
-            .clone()
-            .unwrap_or_else(|| root.join("state"));
-        config.user_state_home = crate::cli::secret::default_user_state_home()?;
-        // lexicon-allow: capsule - existing app-server operation binding API name
-        config.capsule_bindings = capsule_bindings;
-        apply_chat_provider_config(&mut config, provider);
-
-        let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
-        let serve_listen = listen.clone();
-        let serve_server = server.clone();
-        let task = tokio::spawn(async move { serve_server.serve(serve_listen).await });
-        if let Err(error) = wait_for_private_socket(socket_path(&listen)).await {
-            match server.shutdown().await {
-                Ok(()) => {
-                    if let Err(task_error) = task.await {
-                        eprintln!(
-                            "private app-server task failed after socket startup error {error}: {task_error}"
-                        );
-                    }
-                }
-                Err(shutdown_error) => {
-                    task.abort();
-                    let _ = task.await;
-                    eprintln!(
-                        "failed to shut down private app-server after socket startup error {error}: {shutdown_error}"
-                    );
-                }
-            }
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(error);
-        }
-        Ok(Self {
-            listen,
-            root,
-            server,
-            task: Some(task),
-        })
-    }
-
-    pub(crate) fn socket_path(&self) -> &std::path::Path {
-        socket_path(&self.listen)
-    }
-
-    pub(crate) async fn shutdown(mut self) -> crate::kernel::runtime_host::VerletResult<()> {
-        if let Err(error) = self.server.shutdown().await {
-            if let Some(task) = self.task.take() {
-                task.abort();
-            }
-            return Err(error);
-        }
-        let serving = match self.task.take() {
-            Some(task) => task.await.map_err(|error| {
-                crate::cli::usage_error(format!(
-                    "private app-server task failed during shutdown: {error}"
-                ))
-            })?,
-            None => Ok(()),
-        };
-        serving
-    }
-}
-
-impl Drop for PrivateAppServer {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-pub(crate) fn socket_path(
-    listen: &crate::adapters::app_server::AppServerListenAddr,
-) -> &std::path::Path {
-    match listen {
-        crate::adapters::app_server::AppServerListenAddr::Unix(path) => path.as_path(),
-        crate::adapters::app_server::AppServerListenAddr::WebSocket(_) => {
-            unreachable!("private chat app-server always listens on a Unix socket")
-        }
-    }
-}
-
-pub(crate) async fn wait_for_private_socket(
-    path: &std::path::Path,
-) -> crate::kernel::runtime_host::VerletResult<()> {
-    for _ in 0..100 {
-        if path.exists() {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    Err(crate::cli::usage_error(format!(
-        "timed out waiting for private app-server socket {}",
-        path.display()
-    )))
 }
 
 pub(crate) async fn manifest_receipt_event_ids(
@@ -1595,8 +932,8 @@ pub(crate) fn print_console_help() {
 Usage:\n\
   verlet console [--no-open] [--cwd <path>] [--config <verlet.toml>] [--port <port>]\n\
 \n\
-Starts the bundled local browser console on 127.0.0.1. The command serves the\n\
-console UI and the /rpc WebSocket endpoint from one loopback listener, prints\n\
+Starts the configured server and bundled browser console on 127.0.0.1. The\n\
+command serves the console UI and /rpc from one loopback listener, prints\n\
 the UI and RPC URLs, and opens the browser unless --no-open is set.\n"
     );
 }
@@ -1608,11 +945,10 @@ pub(crate) fn print_chat_help() {
 Usage:\n\
   verlet chat [PROMPT] [--config <file>] [--cwd <path>]\n\
   verlet chat [PROMPT] --attach <unix://path|ws://host:port[/rpc]>\n\
-  verlet chat [PROMPT] --provider openai-codex [--model <model>]\n\
-  verlet chat [PROMPT] --provider bifrost_openai --base-url <url> --api-key-env <env> [--model <model>]\n\
 \n\
 Starts the bundled local terminal console over the app-server RPC boundary. By\n\
-default it launches a private local app-server; --attach connects to an existing\n\
-endpoint. In the TUI, use /help for session commands.\n"
+default it discovers the project instance and auto-starts an idle-bounded\n\
+server when needed. --attach selects an explicit endpoint. In the TUI, use\n\
+/help for session commands.\n"
     );
 }

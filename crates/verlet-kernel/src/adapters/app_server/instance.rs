@@ -49,7 +49,14 @@ pub(crate) fn refuse_live_instance(
     let Some(endpoint) = resolve_instance_endpoint(state_root) else {
         return Ok(());
     };
-    if endpoint.pid == std::process::id() && !instance_endpoint_is_active(&endpoint.instance_id) {
+    let current_process_endpoint = endpoint.pid == std::process::id();
+    if current_process_endpoint && !instance_endpoint_is_active(&endpoint.instance_id) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    if !current_process_endpoint
+        && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_err()
+    {
         return Ok(());
     }
     Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(

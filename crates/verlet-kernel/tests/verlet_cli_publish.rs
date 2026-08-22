@@ -376,7 +376,7 @@ fn verlet_cli_uses_clean_public_entrypoints() {
     assert!(rpc.contains("fresh temporary state home"));
 
     let console = run_verlet(["console", "--help"]);
-    assert!(console.contains("local browser console"));
+    assert!(console.contains("configured server and bundled browser console"));
     assert!(console.contains("--no-open"));
     assert!(console.contains("--port"));
 
@@ -937,100 +937,127 @@ fn verlet_cli_tool_run_reports_missing_registered_operation_secret_refs() {
 
 #[tokio::test]
 async fn verlet_cli_auth_set_status_and_delete_redact_values() {
-    let state_home = temp_dir("auth-state");
+    let project = temp_dir("auth-project");
+    let state_home = project.join("user-state");
+    std::fs::write(
+        project.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"2s\"\n",
+    )
+    .unwrap();
 
-    // The store no longer ships an api-key provider by default (EMO-575), so
-    // pre-create the record the CLI credential commands operate on.
-    {
-        use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
-
-        let store = verlet_metadata::provider_store::SqliteMetadataStore::open(
-            state_home.join("metadata.sqlite3"),
-        )
-        .await
-        .unwrap();
-        let mut provider = verlet_metadata::provider_store::example_openai_compatible_record();
-        provider.base_url = "https://llm.internal.example/v1".to_string();
-        store.upsert_provider(provider).await.unwrap();
-    }
-
-    let set = run_verlet_with_stdin(
+    let set = run_verlet_with_stdin_in_dir(
+        &project,
         [
             "auth",
             "set",
-            "openai_compatible",
+            "openai",
             "--api-key-stdin",
             "--state-home",
             state_home.to_str().unwrap(),
         ],
         "fixture-provider-key\n",
     );
-    assert!(set.contains("stored provider credential openai_compatible"));
+    assert!(set.contains("stored provider credential openai"));
     assert!(!set.contains("fixture-provider-key"));
 
-    let status = run_verlet([
-        "auth",
-        "status",
-        "openai_compatible",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
-    assert!(status.contains(r#""provider_id": "openai_compatible""#));
+    let status = run_verlet_in_dir(
+        &project,
+        [
+            "auth",
+            "status",
+            "openai",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+    );
+    assert!(status.contains(r#""providerId": "openai""#));
     assert!(status.contains(r#""configured": true"#));
     assert!(status.contains(r#""source": "stored""#));
     assert!(!status.contains("fixture-provider-key"));
 
-    let delete = run_verlet([
-        "auth",
-        "delete",
-        "openai_compatible",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
-    assert!(delete.contains("deleted provider credential openai_compatible"));
+    let delete = run_verlet_in_dir(
+        &project,
+        [
+            "auth",
+            "delete",
+            "openai",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+    );
+    assert!(delete.contains("deleted provider credential openai"));
 
-    let status = run_verlet([
-        "auth",
-        "status",
-        "openai_compatible",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let status = run_verlet_in_dir(
+        &project,
+        [
+            "auth",
+            "status",
+            "openai",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+    );
     assert!(status.contains(r#""configured": false"#));
+
+    let endpoint = project.join(".verlet/state/endpoint.json");
+    for _ in 0..200 {
+        if !endpoint.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(!endpoint.exists());
+    let _ = std::fs::remove_dir_all(project);
 }
 
-#[test]
-fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
-    let state_home = temp_dir("tool-source-state");
+#[tokio::test]
+async fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
+    let project = temp_dir("tool-source-project");
+    let state_home = project.join("state");
+    let user_home = project.join("user-home");
+    std::fs::write(
+        project.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"2s\"\n",
+    )
+    .unwrap();
+    let envs = [("VERLET_HOME", user_home.to_str().unwrap())];
 
-    let add = run_verlet([
-        "tool",
-        "source",
-        "add",
-        "arcade",
-        "--kind",
-        "mcp-http",
-        "--url",
-        "https://mcp.example.test/arcade",
-        "--bearer-secret",
-        "arcade.api_key",
-        "--header",
-        "x-tenant=demo",
-        "--include-tool",
-        "gmail_search",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let add = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "source",
+            "add",
+            "arcade",
+            "--kind",
+            "mcp-http",
+            "--url",
+            "https://mcp.example.test/arcade",
+            "--bearer-secret",
+            "arcade.api_key",
+            "--header",
+            "x-tenant=demo",
+            "--include-tool",
+            "gmail_search",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(add.contains("stored tool source arcade"));
 
-    let list = run_verlet([
-        "tool",
-        "source",
-        "list",
-        "--json",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let list = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "source",
+            "list",
+            "--json",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(list.contains(r#""name": "arcade""#));
     assert!(list.contains(r#""secret": "arcade.api_key""#));
     assert!(list.contains(r#""type": "bearer_secret""#));
@@ -1046,15 +1073,19 @@ fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
     assert_eq!(sources[0]["headers"][0]["name"], "x-tenant");
     assert_eq!(sources[0]["headers"][0]["value"]["redacted"], true);
 
-    let show = run_verlet([
-        "tool",
-        "source",
-        "show",
-        "arcade",
-        "--json",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let show = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "source",
+            "show",
+            "arcade",
+            "--json",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     let source: serde_json::Value = serde_json::from_str(&show).unwrap();
     assert_eq!(source["name"], "arcade");
     assert_eq!(source["auth"]["secret"], "arcade.api_key");
@@ -1062,25 +1093,43 @@ fn verlet_cli_tool_source_add_list_show_and_remove_redacts_remote_mcp_auth() {
     assert_eq!(source["headers"][0]["name"], "x-tenant");
     assert_eq!(source["headers"][0]["value"]["redacted"], true);
 
-    let remove = run_verlet([
-        "tool",
-        "source",
-        "remove",
-        "arcade",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let remove = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "source",
+            "remove",
+            "arcade",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(remove.contains("removed tool source arcade"));
 
-    let empty = run_verlet([
-        "tool",
-        "source",
-        "list",
-        "--json",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let empty = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "source",
+            "list",
+            "--json",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert_eq!(empty.trim(), "[]");
+
+    let endpoint = state_home.join("endpoint.json");
+    for _ in 0..200 {
+        if !endpoint.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(!endpoint.exists());
+    let _ = std::fs::remove_dir_all(project);
 }
 
 #[test]
@@ -2857,6 +2906,58 @@ fn run_verlet_with_stdin<const N: usize>(args: [&str; N], stdin: &str) -> String
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
     model_catalog_test_support::disable_for_std_command(&mut command);
     let mut child = command
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn verlet cli");
+    child
+        .stdin
+        .as_mut()
+        .expect("verlet stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("failed to write verlet stdin");
+    let output = child.wait_with_output().expect("failed to run verlet cli");
+    assert!(
+        output.status.success(),
+        "verlet cli failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("verlet output should be utf8")
+}
+
+fn run_verlet_in_dir<const N: usize>(dir: &std::path::Path, args: [&str; N]) -> String {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    command.current_dir(dir).args(args);
+    run_verlet_command(&mut command)
+}
+
+fn run_verlet_in_dir_with_env<const N: usize>(
+    dir: &std::path::Path,
+    args: [&str; N],
+    envs: &[(&str, &str)],
+) -> String {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    command.current_dir(dir).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    run_verlet_command(&mut command)
+}
+
+fn run_verlet_with_stdin_in_dir<const N: usize>(
+    dir: &std::path::Path,
+    args: [&str; N],
+    stdin: &str,
+) -> String {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    let mut child = command
+        .current_dir(dir)
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

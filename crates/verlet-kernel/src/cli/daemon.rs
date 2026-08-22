@@ -18,56 +18,12 @@ pub(crate) async fn run_daemon(
 
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
-        "run" => daemon_run(args).await,
         "config" => daemon_config(args).await,
         "service" => daemon_service(args).await,
         other => Err(crate::cli::usage_error(format!(
             "unknown daemon subcommand {other:?}"
         ))),
     }
-}
-
-pub(crate) async fn daemon_run(
-    args: Vec<std::ffi::OsString>,
-) -> crate::kernel::runtime_host::VerletResult<()> {
-    let options = parse_daemon_run_args(args)?;
-    let loaded =
-        crate::daemon::daemon_config::load_verlet_daemon_config(options.config_path.as_deref())?;
-    let config = daemon_app_server_config_from_loaded(&loaded)?;
-    let listen = config.listen.clone();
-
-    let server = crate::adapters::app_server::VerletAppServer::new_local(config).await?;
-    let _io_tasks = match start_daemon_io(
-        &loaded.config.io,
-        &loaded.config.sync,
-        loaded.path.clone(),
-        &server,
-    )
-    .await
-    {
-        Ok(tasks) => tasks,
-        Err(error) => {
-            if let Err(shutdown_error) = server.shutdown().await {
-                eprintln!(
-                    "failed to shut down Verlet daemon after I/O startup error {error}: {shutdown_error}"
-                );
-            }
-            return Err(error);
-        }
-    };
-    eprintln!(
-        "verlet daemon listening on {}",
-        loaded.config.app_server.listen
-    );
-    if let Some(path) = &loaded.path {
-        eprintln!("verlet daemon config {}", path.display());
-    } else {
-        eprintln!("verlet daemon config <defaults>");
-    }
-    let serving = server.serve(listen).await;
-    let shutdown = server.shutdown().await;
-    serving?;
-    shutdown
 }
 
 pub(crate) fn daemon_app_server_config_from_loaded(
@@ -568,11 +524,6 @@ pub(crate) fn daemon_service_spec_from_args(
 }
 
 #[derive(Debug)]
-pub(crate) struct DaemonRunArgs {
-    config_path: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug)]
 pub(crate) struct DaemonConfigValidateArgs {
     config_path: Option<std::path::PathBuf>,
 }
@@ -590,28 +541,6 @@ pub(crate) struct DaemonServicePrintArgs {
 pub(crate) struct DaemonServiceUninstallArgs {
     target: crate::daemon::daemon_config::VerletDaemonServiceTarget,
     label: String,
-}
-
-pub(crate) fn parse_daemon_run_args(
-    args: Vec<std::ffi::OsString>,
-) -> crate::kernel::runtime_host::VerletResult<DaemonRunArgs> {
-    let mut config_path = None;
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.to_string_lossy().as_ref() {
-            "--config" => {
-                config_path = Some(crate::cli::tool::required_path_value(
-                    &mut iter, "--config",
-                )?)
-            }
-            other => {
-                return Err(crate::cli::usage_error(format!(
-                    "unknown daemon run argument {other:?}"
-                )));
-            }
-        }
-    }
-    Ok(DaemonRunArgs { config_path })
 }
 
 pub(crate) fn parse_daemon_config_validate_args(
@@ -1164,13 +1093,12 @@ pub(crate) fn print_daemon_help() {
         "verlet daemon\n\
 \n\
 Usage:\n\
-  verlet daemon run [--config verlet.toml]\n\
   verlet daemon config validate [--config verlet.toml]\n\
   verlet daemon service print [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]\n\
   verlet daemon service install [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]\n\
   verlet daemon service uninstall [--target launchd|systemd] [--label com.verlet.daemon]\n\
 \n\
-The daemon uses verlet.toml. Service installation is explicit and writes the\n\
+Server configuration uses verlet.toml. Service installation is explicit and writes the\n\
 user-level launchd/systemd service file without starting it automatically.\n"
     );
 }

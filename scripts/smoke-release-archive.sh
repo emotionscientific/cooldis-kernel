@@ -86,6 +86,7 @@ run_quiet "$VERLET" commands
 run_quiet "$VERLET" help chat
 run_quiet "$VERLET" console --help
 run_quiet "$VERLET" chat --help
+run_quiet "$VERLET" serve --help
 run_quiet "$VERLET" agent --help
 run_quiet "$VERLET" agent init --help
 run_quiet "$VERLET" agent plan --help
