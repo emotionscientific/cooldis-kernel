@@ -15,10 +15,7 @@ pub(crate) async fn run_auth(
         return Ok(());
     }
     let subcommand = args.remove(0);
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         match subcommand.to_string_lossy().as_ref() {
             "login" => print_auth_login_help(),
             "status" => print_auth_status_help(),
@@ -32,17 +29,21 @@ pub(crate) async fn run_auth(
         }
         return Ok(());
     }
+    let action = subcommand.to_string_lossy();
+    if !matches!(action.as_ref(), "login" | "status" | "set" | "delete") {
+        return Err(crate::cli::usage_error(format!(
+            "unknown auth subcommand {action:?}; use `verlet auth --help`"
+        )));
+    }
     let mut client = client.ok_or_else(|| {
         crate::cli::usage_error("auth command did not receive an instance connection")
     })?;
-    let result = match subcommand.to_string_lossy().as_ref() {
+    let result = match action.as_ref() {
         "login" => auth_login(args, &mut client).await,
         "status" => auth_status(args, &mut client).await,
         "set" => auth_set(args, &mut client).await,
         "delete" => auth_delete(args, &mut client).await,
-        other => Err(crate::cli::usage_error(format!(
-            "unknown auth subcommand {other:?}; use `verlet auth --help`"
-        ))),
+        _ => unreachable!("validated auth action"),
     };
     let close = client.close().await;
     result?;

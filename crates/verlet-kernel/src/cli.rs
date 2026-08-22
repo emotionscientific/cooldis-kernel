@@ -371,7 +371,7 @@ fn option_path(
 pub(crate) async fn connect_instance(
     scope: InstanceScope,
 ) -> crate::kernel::runtime_host::VerletResult<InstanceClient> {
-    let (target, discovery_roots) = match scope {
+    let (target, discovery_roots, auto_spawn) = match scope {
         InstanceScope::Project {
             cwd,
             config_path,
@@ -381,26 +381,49 @@ pub(crate) async fn connect_instance(
             let target =
                 resolve_project_instance_target(cwd, config_path, runtime_home, state_home, None)?;
             let roots = vec![target.state_root.clone()];
-            (target, roots)
+            (target, roots, true)
         }
         InstanceScope::User { state_home } => {
             // Auth prefers the current project instance when it owns the
             // requested user root, then checks the user-root endpoint.
             let cwd = std::env::current_dir().map_err(io_error)?;
-            let mut target = resolve_project_instance_target(cwd, None, None, None, None)?;
-            let requested_user_root = match state_home {
-                Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
-                None => target.user_state_root.clone(),
-            };
-            let mut roots = Vec::new();
-            if target.user_state_root == requested_user_root {
-                roots.push(target.state_root.clone());
+            let project = crate::daemon::daemon_config::discover_verlet_project(&cwd)?;
+            let has_project =
+                project.config_path.is_some() || project.root.join(".verlet").is_dir();
+            if !has_project {
+                let requested_user_root = match state_home {
+                    Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
+                    None => crate::cli::secret::default_user_state_home()?,
+                };
+                let target = InstanceTarget {
+                    project_root: cwd.clone(),
+                    state_root: requested_user_root.clone(),
+                    user_state_root: requested_user_root.clone(),
+                    runtime_home: requested_user_root
+                        .parent()
+                        .unwrap_or(requested_user_root.as_path())
+                        .join("runtime"),
+                    cwd,
+                    config_path: None,
+                    idle_timeout: None,
+                };
+                (target, vec![requested_user_root], false)
+            } else {
+                let mut target = resolve_project_instance_target(cwd, None, None, None, None)?;
+                let requested_user_root = match state_home {
+                    Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
+                    None => target.user_state_root.clone(),
+                };
+                let mut roots = Vec::new();
+                if target.user_state_root == requested_user_root {
+                    roots.push(target.state_root.clone());
+                }
+                if !roots.iter().any(|root| root == &requested_user_root) {
+                    roots.push(requested_user_root.clone());
+                }
+                target.user_state_root = requested_user_root;
+                (target, roots, true)
             }
-            if !roots.iter().any(|root| root == &requested_user_root) {
-                roots.push(requested_user_root.clone());
-            }
-            target.user_state_root = requested_user_root;
-            (target, roots)
         }
     };
 
@@ -425,6 +448,13 @@ pub(crate) async fn connect_instance(
                     Err(error) => last_error = Some(error.to_string()),
                 }
             }
+        }
+
+        if !auto_spawn {
+            return Err(usage_error(format!(
+                "could not start a server for {}: auth was run outside a Verlet project and no user instance is running; run auth inside a project or start `verlet serve` for the user state root first",
+                target.user_state_root.display()
+            )));
         }
 
         if !discovery_roots

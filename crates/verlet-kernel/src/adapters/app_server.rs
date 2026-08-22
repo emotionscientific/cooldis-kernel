@@ -977,6 +977,33 @@ impl ClientConnectionTracker {
         }
     }
 
+    #[cfg(unix)]
+    async fn accept_unix(
+        self: &std::sync::Arc<Self>,
+        listener: &tokio::net::UnixListener,
+    ) -> std::io::Result<(
+        tokio::net::UnixStream,
+        tokio::net::unix::SocketAddr,
+        ClientConnectionGuard,
+    )> {
+        let (stream, peer) = listener.accept().await?;
+        let connection = self.enter();
+        Ok((stream, peer, connection))
+    }
+
+    async fn accept_tcp(
+        self: &std::sync::Arc<Self>,
+        listener: &tokio::net::TcpListener,
+    ) -> std::io::Result<(
+        tokio::net::TcpStream,
+        std::net::SocketAddr,
+        ClientConnectionGuard,
+    )> {
+        let (stream, peer) = listener.accept().await?;
+        let connection = self.enter();
+        Ok((stream, peer, connection))
+    }
+
     async fn wait_for_idle_timeout(&self, idle_timeout: std::time::Duration) {
         let mut changes = self.changes.subscribe();
         loop {
@@ -984,7 +1011,13 @@ impl ClientConnectionTracker {
                 let timeout = tokio::time::sleep(idle_timeout);
                 tokio::pin!(timeout);
                 tokio::select! {
-                    () = &mut timeout => return,
+                    () = &mut timeout => {
+                        let still_idle = self.active.load(std::sync::atomic::Ordering::Acquire) == 0;
+                        let unchanged = !changes.has_changed().unwrap_or(false);
+                        if still_idle && unchanged {
+                            return;
+                        }
+                    }
                     changed = changes.changed() => {
                         if changed.is_err() {
                             return;
@@ -1654,23 +1687,21 @@ impl VerletAppServer {
 
         let inner = std::sync::Arc::downgrade(&self.inner);
         let tasks = std::sync::Arc::downgrade(&self.inner.tasks);
+        let client_connections = std::sync::Arc::clone(&self.inner.client_connections);
         let cancellation = self.inner.tasks.cancellation();
         if !self.inner.tasks.spawn(async move {
             loop {
                 let accepted = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    accepted = listener.accept() => accepted,
+                    accepted = client_connections.accept_unix(&listener) => accepted,
                 };
-                let (stream, _) = match accepted {
+                let (stream, _, connection) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         eprintln!("Verlet endpoint socket accept failed: {error}");
                         continue;
                     }
                 };
-                let connection = inner
-                    .upgrade()
-                    .map(|inner| inner.client_connections.enter());
                 let peer_uid = match stream.peer_cred() {
                     Ok(credentials) => credentials.uid(),
                     Err(error) => {
@@ -1679,9 +1710,6 @@ impl VerletAppServer {
                     }
                 };
                 let Some(inner) = inner.upgrade() else {
-                    return;
-                };
-                let Some(connection) = connection else {
                     return;
                 };
                 let Some(tasks) = tasks.upgrade() else {
@@ -1839,6 +1867,14 @@ impl VerletAppServer {
             .await;
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_client_connections_for_test(&self) -> usize {
+        self.inner
+            .client_connections
+            .active
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn supervisor(&self) -> crate::kernel::supervisor::VerletSupervisor {
         self.inner.supervisor.clone()
     }
@@ -1932,14 +1968,13 @@ impl VerletAppServer {
         loop {
             let accepted = tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),
-                accepted = listener.accept() => accepted,
+                accepted = self.inner.client_connections.accept_unix(&listener) => accepted,
             };
-            let (stream, _) = accepted.map_err(|err| {
+            let (stream, _, connection) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server connection: {err}"
                 ))
             })?;
-            let connection = self.inner.client_connections.enter();
             let peer_uid = stream
                 .peer_cred()
                 .map_err(|err| {
@@ -1997,14 +2032,13 @@ impl VerletAppServer {
         loop {
             let accepted = tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),
-                accepted = listener.accept() => accepted,
+                accepted = self.inner.client_connections.accept_tcp(&listener) => accepted,
             };
-            let (stream, peer) = accepted.map_err(|err| {
+            let (stream, peer, connection) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server websocket connection: {err}"
                 ))
             })?;
-            let connection = self.inner.client_connections.enter();
             let app = self.clone();
             self.inner.tasks.spawn(async move {
                 let _connection = connection;

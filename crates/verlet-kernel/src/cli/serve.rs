@@ -20,7 +20,11 @@ pub(crate) async fn run_serve(
     }
     let loaded =
         crate::daemon::daemon_config::load_verlet_daemon_config(options.config_path.as_deref())?;
-    let idle_timeout = options.idle_timeout.or(loaded.config.idle_timeout()?);
+    let idle_timeout = if options.no_idle_timeout {
+        None
+    } else {
+        options.idle_timeout.or(loaded.config.idle_timeout()?)
+    };
     let mut config = crate::cli::daemon::daemon_app_server_config_from_loaded(&loaded)?;
     if let Some(cwd) = options.cwd {
         config.cwd = crate::cli::console::absolute_path(&cwd)?;
@@ -44,11 +48,13 @@ pub(crate) async fn run_serve(
 
     let server = match crate::adapters::app_server::VerletAppServer::new_local(config).await {
         Ok(server) => server,
-        Err(error) if error.to_string().contains("instance already running for ") => {
-            eprintln!("verlet serve: {error}");
-            return Ok(());
+        Err(error) => {
+            if competing_server_started(&state_home, &error).await {
+                eprintln!("verlet serve: {error}");
+                return Ok(());
+            }
+            return Err(error);
         }
-        Err(error) => return Err(error),
     };
     let _io_tasks = match crate::cli::daemon::start_daemon_io(
         &loaded.config.io,
@@ -103,6 +109,49 @@ async fn serve_until_stopped(
     shutdown
 }
 
+#[cfg(unix)]
+async fn competing_server_started(
+    state_home: &std::path::Path,
+    error: &crate::kernel::runtime_host::VerletError,
+) -> bool {
+    let message = error.to_string();
+    if !message.contains("instance already running for ")
+        && !crate::adapters::app_server::instance::is_cross_process_database_guidance(error)
+        && !message.contains("app-server socket")
+        && !message.contains("failed to bind Verlet endpoint socket")
+    {
+        return false;
+    }
+    let wait = if crate::adapters::app_server::instance::is_cross_process_database_guidance(error) {
+        crate::cli::INSTANCE_START_TIMEOUT
+    } else {
+        std::time::Duration::from_secs(3)
+    };
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(endpoint) =
+            crate::adapters::app_server::instance::resolve_instance_endpoint(state_home)
+            && tokio::net::UnixStream::connect(&endpoint.unix_socket)
+                .await
+                .is_ok()
+        {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn competing_server_started(
+    _state_home: &std::path::Path,
+    _error: &crate::kernel::runtime_host::VerletError,
+) -> bool {
+    false
+}
+
 #[derive(Debug)]
 pub(crate) struct ServeArgs {
     pub(crate) config_path: Option<std::path::PathBuf>,
@@ -111,6 +160,7 @@ pub(crate) struct ServeArgs {
     pub(crate) state_home: Option<std::path::PathBuf>,
     pub(crate) user_state_home: Option<std::path::PathBuf>,
     pub(crate) idle_timeout: Option<std::time::Duration>,
+    pub(crate) no_idle_timeout: bool,
     pub(crate) help: bool,
 }
 
@@ -123,6 +173,7 @@ pub(crate) fn parse_serve_args(
     let mut state_home = None;
     let mut user_state_home = None;
     let mut idle_timeout = None;
+    let mut no_idle_timeout = false;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -152,6 +203,7 @@ pub(crate) fn parse_serve_args(
                     "--user-state-home",
                 )?)
             }
+            "--no-idle-timeout" => no_idle_timeout = true,
             "--idle-timeout" => {
                 let raw = crate::cli::tool::required_string_value(&mut iter, "--idle-timeout")?;
                 let duration = humantime::parse_duration(&raw).map_err(|error| {
@@ -173,6 +225,11 @@ pub(crate) fn parse_serve_args(
             }
         }
     }
+    if no_idle_timeout && idle_timeout.is_some() {
+        return Err(crate::cli::usage_error(
+            "--idle-timeout and --no-idle-timeout cannot be used together",
+        ));
+    }
     Ok(ServeArgs {
         config_path,
         cwd,
@@ -180,6 +237,7 @@ pub(crate) fn parse_serve_args(
         state_home,
         user_state_home,
         idle_timeout,
+        no_idle_timeout,
         help,
     })
 }
@@ -192,6 +250,7 @@ Usage:\n\
   verlet serve [--config verlet.toml] [--cwd <path>] [--runtime-home <path>] [--state-home <path>] [--idle-timeout <duration>]\n\
 \n\
 Runs the Verlet app-server in the foreground. Without --idle-timeout the server\n\
-continues until it receives an explicit shutdown signal.\n"
+uses daemon.idle_timeout when configured; otherwise it continues until it\n\
+receives an explicit shutdown signal.\n"
     );
 }

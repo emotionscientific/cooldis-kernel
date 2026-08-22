@@ -1338,6 +1338,7 @@ fn render_launchd_service(spec: &VerletDaemonServiceSpec) -> String {
             "    <array>\n",
             "        <string>{exe}</string>\n",
             "        <string>serve</string>\n",
+            "        <string>--no-idle-timeout</string>\n",
             "        <string>--config</string>\n",
             "        <string>{config}</string>\n",
             "    </array>\n",
@@ -1375,7 +1376,7 @@ After=network-online.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart={} serve --config {}\n\
+ExecStart={} serve --no-idle-timeout --config {}\n\
 {}Restart=always\n\
 RestartSec=2\n\
 \n\

@@ -20,6 +20,8 @@
 
 use sha2::Digest as _;
 
+const CROSS_PROCESS_DATABASE_GUIDANCE: &str = "another process holds this database (most likely a running Verlet instance); stop that instance and retry";
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct InstanceEndpoint {
     pub pid: u32,
@@ -71,9 +73,14 @@ pub(crate) fn refuse_live_instance(
 
 pub(crate) fn cross_process_database_guidance() -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(
-        "another process holds this database (most likely a running Verlet instance); stop that instance and retry"
-            .to_string(),
+        CROSS_PROCESS_DATABASE_GUIDANCE.to_string(),
     )
+}
+
+pub(crate) fn is_cross_process_database_guidance(
+    error: &crate::kernel::runtime_host::VerletError,
+) -> bool {
+    error.to_string().contains(CROSS_PROCESS_DATABASE_GUIDANCE)
 }
 
 pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {

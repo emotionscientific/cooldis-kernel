@@ -88,6 +88,141 @@ async fn auth_client_auto_spawns_serve_and_idle_shutdown_removes_endpoint() {
     assert_ne!(endpoint.pid, std::process::id());
     assert!(state_root.join("serve.log").is_file());
     wait_for_endpoint_removal(&state_root).await;
+    wait_for_endpoint_removal(&user_home.join("state")).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn concurrent_auto_spawn_preserves_log_and_winner_endpoint() {
+    let root = TestRoot::new("verlet-client-auto-spawn-race");
+    let project = root.path().join("project");
+    let user_home = root.path().join("user-home");
+    let state_root = project.join(".verlet/state");
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::fs::write(state_root.join("serve.log"), "preexisting log marker\n").unwrap();
+    std::fs::write(
+        project.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"500ms\"\n\n[daemon.provider]\nprovider = \"local\"\n",
+    )
+    .unwrap();
+
+    let first = run_client(&project, &user_home, ["auth", "status", "openai-codex"]);
+    let second = run_client(&project, &user_home, ["tool", "source", "list"]);
+    let (first, second) = tokio::join!(first, second);
+    assert_success("concurrent auth status", &first);
+    assert_success("concurrent tool source list", &second);
+
+    let endpoint = wait_for_endpoint(&state_root, None).await;
+    assert!(
+        std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok(),
+        "winning endpoint socket is not connectable"
+    );
+    let log = std::fs::read_to_string(state_root.join("serve.log")).unwrap();
+    assert!(log.starts_with("preexisting log marker\n"), "{log}");
+
+    let third = run_client(&project, &user_home, ["tool", "source", "list"]).await;
+    assert_success("client after losing spawn exited", &third);
+    wait_for_endpoint_removal(&state_root).await;
+    wait_for_endpoint_removal(&user_home.join("state")).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn simultaneous_serve_loser_exits_zero() {
+    let root = TestRoot::new("verlet-serve-start-race");
+    let project = root.path().join("project");
+    let user_home = root.path().join("user-home");
+    let state_root = project.join(".verlet/state");
+    let runtime_home = project.join(".verlet/runtime");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let run = || async {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+        model_catalog_test_support::disable_for_tokio_command(&mut command);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            command
+                .args(["serve", "--idle-timeout", "300ms", "--cwd"])
+                .arg(&project)
+                .arg("--runtime-home")
+                .arg(&runtime_home)
+                .arg("--state-home")
+                .arg(&state_root)
+                .arg("--user-state-home")
+                .arg(user_home.join("state"))
+                .current_dir(&project)
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        .expect("serve process timed out")
+        .unwrap()
+    };
+
+    let (first, second) = tokio::join!(run(), run());
+    assert_success("first simultaneous serve", &first);
+    assert_success("second simultaneous serve", &second);
+    assert!(!state_root.join("endpoint.json").exists());
+    assert!(!user_home.join("state/endpoint.json").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_managed_serve_ignores_configured_idle_timeout() {
+    let root = TestRoot::new("verlet-service-no-idle");
+    let project = root.path().join("project");
+    let user_home = root.path().join("user-home");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = project.join("verlet.toml");
+    std::fs::write(
+        &config,
+        "[daemon]\nidle_timeout = \"100ms\"\n\n[daemon.runtime]\ncwd = \".\"\nruntime_home = \".verlet/runtime\"\nstate_home = \".verlet/state\"\n\n[daemon.provider]\nprovider = \"local\"\n",
+    )
+    .unwrap();
+
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    let mut serve = command
+        .args(["serve", "--no-idle-timeout", "--config"])
+        .arg(&config)
+        .env("VERLET_HOME", &user_home)
+        .current_dir(&project)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for_endpoint(&project.join(".verlet/state"), Some(&mut serve)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        serve.try_wait().unwrap().is_none(),
+        "service-managed serve exited on configured idle timeout"
+    );
+    serve.start_kill().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), serve.wait())
+        .await
+        .expect("service-managed serve did not stop")
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn auth_outside_project_does_not_create_arbitrary_project_state() {
+    let root = TestRoot::new("verlet-auth-outside-project");
+    let directory = root.path().join("arbitrary-directory");
+    let user_home = root.path().join("user-home");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::create_dir_all(&user_home).unwrap();
+
+    let output = run_client(&directory, &user_home, ["auth", "status", "openai-codex"]).await;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("auth was run outside a Verlet project"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!directory.join(".verlet").exists());
 }
 
 async fn run_client<const N: usize>(

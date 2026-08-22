@@ -9,7 +9,7 @@ The daemon config format is TOML:
 ```toml
 [daemon]
 # Optional. Foreground serve has no idle timeout when this and the CLI flag are
-# absent. Auto-started client servers default to 10 minutes.
+# absent. Service-manager units always suppress idle shutdown.
 idle_timeout = "10m"
 
 [daemon.runtime]
@@ -146,7 +146,7 @@ parameter takes precedence. A requiring manifest fails closed when neither is
 present, and a configured or requested binding is rejected when the manifest
 did not declare a workspace. The selected mode must meet the manifest's
 `min_mode` floor. The bind receipt records the canonical host path, guest path,
-and mode. That receipt metadata—not the current daemon default—is used for
+and mode. That receipt metadata, rather than the current daemon default, is used for
 resume and clone forks, so a restart cannot silently re-point an existing
 thread. Workspace mounts are local-placement only in this slice.
 
@@ -330,7 +330,9 @@ verlet serve --config verlet.toml
 ```
 
 `daemon service install` writes a user-level launchd plist or systemd unit. It
-does not load, enable, start, or stop the service automatically.
+does not load, enable, start, or stop the service automatically. Generated
+units run `serve --no-idle-timeout` internally, so a service never exits because
+of `daemon.idle_timeout`.
 
 `serve` starts the Verlet app-server with the configured
 provider and starts enabled IO routes. Telegram routes bind the configured HTTP
@@ -378,18 +380,16 @@ The boundary rules for V1:
 - **State outlives the process; subscriptions do not.** Threads, turns, and
   events persist in the state home (published agent records live in the
   separate agent registry root, `.verlet/agents` by default) and are
-  reloaded on the next start — kill/restart/resume is a supported, tested
+  reloaded on the next start; kill/restart/resume is a supported, tested
   path. Live notification subscriptions are in-memory only: a reconnecting
   client must re-list state and re-subscribe; there is no notification
   replay.
-- **Client startup is bounded.** `auth`, `tool source`, and `chat` attach to a
-  discovered instance. When none is reachable they start `verlet serve`
-  detached with a 10 minute idle timeout by default, log to
-  `<state_root>/serve.log`, and wait up to 15 seconds for its endpoint record.
-  Explicit `--attach` endpoints remain attach-only.
+- **Client discovery is shared.** The endpoint lookup, bounded startup, log,
+  and attach-only rules are defined once in
+  [Verlet CLI](cli.md#server-and-client-commands).
 - **Loopback or Unix socket only.** TCP listen addresses must be loopback;
-  there is no authentication layer in V1, so the OS user boundary is the
-  security boundary.
+  Unix sockets default to same-user peer authentication, while WebSocket RPC
+  uses the configured identity boundary.
 
 `verlet-mcp-server` can attach to the daemon app-server socket and expose the
 same runtime as MCP stdio tools for Codex and other MCP clients:

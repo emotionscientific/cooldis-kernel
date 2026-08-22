@@ -1,4 +1,4 @@
-//! The `console` subcommand family and its private app-server support.
+//! The `console` subcommand family and shared app-server config resolution.
 
 #[cfg(test)]
 mod tests;

@@ -1190,6 +1190,7 @@ impl crate::adapters::app_server::VerletAppServer {
         method: &str,
         params: serde_json::Value,
     ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        let _connection = self.inner.client_connections.enter();
         let _dispatch = self.inner.dispatch_gate.read().await;
         if self.inner.tasks.is_shutdown() {
             return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(

@@ -380,9 +380,20 @@ fn verlet_cli_uses_clean_public_entrypoints() {
     assert!(console.contains("--no-open"));
     assert!(console.contains("--port"));
 
+    let serve = run_verlet(["serve", "--help"]);
+    assert!(serve.contains("daemon.idle_timeout"));
+    assert!(serve.contains("--idle-timeout <duration>"));
+    assert!(!serve.contains("--user-state-home"));
+    assert!(!serve.contains("--no-idle-timeout"));
+
     let auth = run_verlet(["auth", "--help"]);
     assert!(auth.contains("verlet auth set"));
     assert!(auth.contains("verlet auth status"));
+    let auth_status = run_verlet(["auth", "status", "openai-codex", "--help"]);
+    assert!(auth_status.contains("Prints redacted model-provider credential status"));
+
+    let tool_source_list = run_verlet(["tool", "source", "list", "--json", "--help"]);
+    assert!(tool_source_list.contains("verlet tool source list"));
 
     let debug_rpc = run_verlet(["debug", "rpc", "--help"]);
     assert!(debug_rpc.contains("Protocol-level debug client"));

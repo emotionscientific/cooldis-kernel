@@ -811,10 +811,7 @@ pub(crate) async fn tool_source(
         return Ok(());
     }
     let subcommand = args.remove(0);
-    if args
-        .first()
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         match subcommand.to_string_lossy().as_ref() {
             "add" => print_tool_source_add_help(),
             "discover" => print_tool_source_discover_help(),
@@ -829,18 +826,25 @@ pub(crate) async fn tool_source(
         }
         return Ok(());
     }
+    let action = subcommand.to_string_lossy();
+    if !matches!(
+        action.as_ref(),
+        "add" | "discover" | "list" | "show" | "remove"
+    ) {
+        return Err(crate::cli::usage_error(format!(
+            "unknown tool source subcommand {action:?}"
+        )));
+    }
     let mut client = client.ok_or_else(|| {
         crate::cli::usage_error("tool source command did not receive an instance connection")
     })?;
-    let result = match subcommand.to_string_lossy().as_ref() {
+    let result = match action.as_ref() {
         "add" => tool_source_add(args, &mut client).await,
         "discover" => tool_source_discover(args, &mut client).await,
         "list" => tool_source_list(args, &mut client).await,
         "show" => tool_source_show(args, &mut client).await,
         "remove" => tool_source_remove(args, &mut client).await,
-        _ => Err(crate::cli::usage_error(format!(
-            "unknown tool source subcommand {subcommand:?}"
-        ))),
+        _ => unreachable!("validated tool source action"),
     };
     let close = client.close().await;
     result?;

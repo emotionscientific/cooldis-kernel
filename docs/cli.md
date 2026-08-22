@@ -56,16 +56,20 @@ All status and list output redacts stored values.
 ## Server And Client Commands
 
 `verlet serve` runs the app-server and configured IO routes in the foreground.
-`verlet console` runs the same app-server in-process with the browser UI and a
-loopback WebSocket listener. Neither command has an idle timeout unless
-`serve --idle-timeout <duration>` or `daemon.idle_timeout` is configured.
+It idles out only when `serve --idle-timeout <duration>` or
+`daemon.idle_timeout` is configured. `verlet console` runs the same app-server
+in-process with the browser UI and a loopback WebSocket listener, and never
+idles out.
 
 `verlet auth`, `verlet tool source`, and `verlet chat` are clients. They read
 the endpoint record for their scope and connect to its Unix socket. Project
 commands use the same project and state-root resolution as `verlet console`.
 Auth first checks the current project instance because that instance also owns
 the user metadata root. If no project instance is reachable, auth checks the
-user-root endpoint record.
+user-root endpoint record. Outside a Verlet project, auth can use an already
+running user-root instance, but it will not create project state under the
+arbitrary current directory; start a server from a project first if no user
+instance is running.
 
 When no matching instance is reachable, a client starts `verlet serve`
 detached, writes its stdout and stderr to `<state_root>/serve.log`, waits up to

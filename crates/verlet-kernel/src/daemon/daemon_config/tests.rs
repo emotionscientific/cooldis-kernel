@@ -1204,15 +1204,16 @@ fn renders_launchd_and_systemd_services() {
     );
     assert!(launchd.contains("<string>com.example.verlet</string>"));
     assert!(launchd.contains("<string>serve</string>"));
+    assert!(launchd.contains("<string>--no-idle-timeout</string>"));
     assert!(launchd.contains("<string>--config</string>"));
 
     let systemd = crate::daemon::daemon_config::render_verlet_daemon_service(
         crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd,
         &spec,
     );
-    assert!(
-        systemd.contains("ExecStart=/usr/local/bin/verlet serve --config /Users/me/verlet.toml")
-    );
+    assert!(systemd.contains(
+        "ExecStart=/usr/local/bin/verlet serve --no-idle-timeout --config /Users/me/verlet.toml"
+    ));
     assert!(systemd.contains("WorkingDirectory=/Users/me/project"));
 }
 
