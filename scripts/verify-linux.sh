@@ -12,6 +12,12 @@ CACHE_ROOT=/verlet-cache
 CONTAINER_WORKSPACE=/workspace
 DRY_RUN=0
 LOW_MEMORY=0
+HOST_LOCK_DIR=
+HOST_LOCK_TOKEN=
+HOST_LOCK_HELD=0
+HOST_LOCK_READY=0
+HOST_RECLAIM_OWNER_FILE=
+HOST_LOCK_INITIALIZATION_GRACE_SECONDS=5
 
 usage() {
   printf 'usage: scripts/verify-linux.sh [--amd64] [--dry-run]\n'
@@ -20,6 +26,230 @@ usage() {
 die() {
   printf 'error: %s\n' "$1" >&2
   exit "${2:-1}"
+}
+
+read_host_lock_field() {
+  local file=$1
+  local value=
+
+  if [[ -r "$file" ]]; then
+    IFS= read -r value <"$file" || true
+  fi
+  printf '%s' "$value"
+}
+
+valid_host_lock_pid() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+host_lock_path_older_than_initialization_grace() {
+  local path=$1
+  local modified
+  local now
+
+  if modified=$(stat -f '%m' "$path" 2>/dev/null); then
+    :
+  elif modified=$(stat -c '%Y' "$path" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  now=$(date +%s)
+  ((now - modified >= HOST_LOCK_INITIALIZATION_GRACE_SECONDS))
+}
+
+release_host_reclaim_claim() {
+  if [[ -n "$HOST_RECLAIM_OWNER_FILE" ]]; then
+    rm -f "$HOST_RECLAIM_OWNER_FILE"
+    HOST_RECLAIM_OWNER_FILE=
+  fi
+  rmdir "$HOST_LOCK_DIR/reclaim" 2>/dev/null || true
+}
+
+recover_abandoned_host_reclaim_claim() {
+  local owner_file
+  local owner_pid
+
+  if [[ ! -d "$HOST_LOCK_DIR/reclaim" ]]; then
+    return
+  fi
+  if ! host_lock_path_older_than_initialization_grace \
+    "$HOST_LOCK_DIR/reclaim"; then
+    return
+  fi
+
+  for owner_file in "$HOST_LOCK_DIR"/reclaim/owner.*.*; do
+    if [[ ! -f "$owner_file" ]]; then
+      continue
+    fi
+    owner_pid=$(read_host_lock_field "$owner_file")
+    if ! valid_host_lock_pid "$owner_pid" \
+      || ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$owner_file"
+    fi
+  done
+  rmdir "$HOST_LOCK_DIR/reclaim" 2>/dev/null || true
+}
+
+acquire_host_reclaim_claim() {
+  local owner_file
+  local owner_pid
+
+  if ! mkdir "$HOST_LOCK_DIR/reclaim" 2>/dev/null; then
+    recover_abandoned_host_reclaim_claim
+    return 1
+  fi
+
+  owner_file="$HOST_LOCK_DIR/reclaim/owner.$RANDOM.$RANDOM"
+  if ! printf '%s\n' "$$" >"$owner_file"; then
+    rmdir "$HOST_LOCK_DIR/reclaim" 2>/dev/null || true
+    return 1
+  fi
+  owner_pid=$(read_host_lock_field "$owner_file")
+  if ! valid_host_lock_pid "$owner_pid" \
+    || ! kill -0 "$owner_pid" 2>/dev/null; then
+    rm -f "$owner_file"
+    rmdir "$HOST_LOCK_DIR/reclaim" 2>/dev/null || true
+    return 1
+  fi
+  HOST_RECLAIM_OWNER_FILE=$owner_file
+  return 0
+}
+
+try_reclaim_stale_host_lock() {
+  local observed_pid=$1
+  local observed_token=$2
+  local current_pid
+  local current_token
+
+  if ! acquire_host_reclaim_claim; then
+    return 1
+  fi
+
+  current_pid=$(read_host_lock_field "$HOST_LOCK_DIR/pid")
+  current_token=$(read_host_lock_field "$HOST_LOCK_DIR/token")
+  if [[ "$current_pid" != "$observed_pid" \
+    || "$current_token" != "$observed_token" ]]; then
+    release_host_reclaim_claim
+    return 1
+  fi
+  if valid_host_lock_pid "$current_pid" \
+    && kill -0 "$current_pid" 2>/dev/null; then
+    release_host_reclaim_claim
+    return 1
+  fi
+
+  rm -f "$HOST_LOCK_DIR/pid" "$HOST_LOCK_DIR/token"
+  release_host_reclaim_claim
+  rmdir "$HOST_LOCK_DIR" 2>/dev/null || return 1
+  return 0
+}
+
+release_host_lock() {
+  local recorded_token
+
+  if ((HOST_LOCK_HELD == 0)); then
+    return
+  fi
+
+  recorded_token=$(read_host_lock_field "$HOST_LOCK_DIR/token")
+  if [[ -n "$HOST_LOCK_TOKEN" \
+    && "$recorded_token" == "$HOST_LOCK_TOKEN" ]]; then
+    rm -f "$HOST_LOCK_DIR/pid" "$HOST_LOCK_DIR/token"
+    rmdir "$HOST_LOCK_DIR" 2>/dev/null || true
+  elif ((HOST_LOCK_READY == 0)) \
+    && [[ -d "$HOST_LOCK_DIR" && -z "$recorded_token" ]]; then
+    rmdir "$HOST_LOCK_DIR" 2>/dev/null || true
+  fi
+
+  HOST_LOCK_HELD=0
+  HOST_LOCK_READY=0
+}
+
+cleanup_host_lock_on_exit() {
+  local status=$?
+
+  trap - EXIT HUP INT QUIT TERM
+  release_host_reclaim_claim
+  release_host_lock
+  exit "$status"
+}
+
+handle_host_signal() {
+  trap - "$1"
+  exit "$2"
+}
+
+resolve_host_lock_path() {
+  local lock_root=${VERLET_VERIFY_LINUX_LOCK_ROOT:-${TMPDIR:-/tmp}/verlet-verify-linux-locks}
+
+  if [[ "$lock_root" != /* ]]; then
+    die 'VERLET_VERIFY_LINUX_LOCK_ROOT must be an absolute path'
+  fi
+  mkdir -p "$lock_root"
+  if ! lock_root=$(cd "$lock_root" && pwd -P); then
+    die "could not resolve host lock root: $lock_root"
+  fi
+  HOST_LOCK_DIR="$lock_root/$VOLUME.lock"
+}
+
+acquire_host_lock() {
+  local holder_pid
+  local holder_token
+  local printed_wait=0
+
+  resolve_host_lock_path
+  HOST_LOCK_TOKEN="$$.$RANDOM.$RANDOM"
+  trap cleanup_host_lock_on_exit EXIT
+  trap 'handle_host_signal HUP 129' HUP
+  trap 'handle_host_signal INT 130' INT
+  trap 'handle_host_signal QUIT 131' QUIT
+  trap 'handle_host_signal TERM 143' TERM
+
+  while true; do
+    if mkdir "$HOST_LOCK_DIR" 2>/dev/null; then
+      HOST_LOCK_HELD=1
+      if ! printf '%s\n' "$HOST_LOCK_TOKEN" >"$HOST_LOCK_DIR/token"; then
+        die "could not write Docker volume $VOLUME host lock token"
+      fi
+      if ! printf '%s\n' "$$" >"$HOST_LOCK_DIR/pid"; then
+        die "could not write Docker volume $VOLUME host lock PID"
+      fi
+      HOST_LOCK_READY=1
+      return
+    fi
+
+    if [[ -L "$HOST_LOCK_DIR" \
+      || ( -e "$HOST_LOCK_DIR" && ! -d "$HOST_LOCK_DIR" ) ]]; then
+      die "refusing unexpected Docker volume $VOLUME host lock path: $HOST_LOCK_DIR"
+    fi
+    if [[ ! -d "$HOST_LOCK_DIR" ]]; then
+      sleep 0.1
+      continue
+    fi
+
+    holder_pid=$(read_host_lock_field "$HOST_LOCK_DIR/pid")
+    holder_token=$(read_host_lock_field "$HOST_LOCK_DIR/token")
+    if ((printed_wait == 0)); then
+      if valid_host_lock_pid "$holder_pid"; then
+        printf 'verify-linux: waiting for Docker volume %s host lock (holder pid %s)\n' \
+          "$VOLUME" "$holder_pid" >&2
+      else
+        printf 'verify-linux: waiting for Docker volume %s host lock (holder initializing)\n' \
+          "$VOLUME" >&2
+      fi
+      printed_wait=1
+    fi
+
+    if valid_host_lock_pid "$holder_pid"; then
+      if ! kill -0 "$holder_pid" 2>/dev/null; then
+        try_reclaim_stale_host_lock "$holder_pid" "$holder_token" || true
+      fi
+    elif host_lock_path_older_than_initialization_grace "$HOST_LOCK_DIR"; then
+      try_reclaim_stale_host_lock "$holder_pid" "$holder_token" || true
+    fi
+    sleep 0.1
+  done
 }
 
 print_command() {
@@ -264,4 +494,6 @@ if ((DRY_RUN)); then
   exit 0
 fi
 
+# Container identity mismatch is stale only under this per-volume exclusion.
+acquire_host_lock
 "${docker_run[@]}"
