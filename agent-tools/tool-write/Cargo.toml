@@ -18,3 +18,7 @@ cli = ["verlet-tool-core/std-fs"]
 name = "tool-write"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[dev-dependencies]
+tempfile = "3"
+verlet-tool-core = { path = "../tool-core", features = ["std-fs"] }

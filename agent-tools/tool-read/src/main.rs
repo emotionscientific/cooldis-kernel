@@ -2,6 +2,6 @@
 //! Doubles as the executor-side implementation for remote serving.
 //! Input: {"root": "/abs/dir", "args": {...ReadArgs}}
 
-fn main() {
-    todo!("EMO ticket: stdin/stdout JSON harness over StdFs (shared shape across all five bins)")
+fn main() -> std::process::ExitCode {
+    verlet_tool_core::run_cli(verlet_tool_read::run)
 }
