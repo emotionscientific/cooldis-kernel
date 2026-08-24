@@ -207,8 +207,9 @@ async fn openapi_import_publish_gate_rejects_missing_network_and_secret_grants()
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[test]
-fn openapi_import_publishes_and_runs_through_the_existing_cli_path() {
+#[cfg(unix)]
+#[tokio::test]
+async fn openapi_import_publishes_and_runs_through_the_connected_secret_path() {
     let (base_url, server) = spawn_openapi_import_server(
         200,
         r#"{"results":[{"title":"Verlet runtime"}]}"#,
@@ -222,17 +223,29 @@ fn openapi_import_publishes_and_runs_through_the_existing_cli_path() {
         "200",
     );
     let registry_root = root.join("operations");
-    let state_home = root.join("state");
+    let state_home = root.join("user-state");
+    let user_home = root.join("user-home");
+    std::fs::write(
+        root.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"2s\"\n\n[daemon.provider]\nprovider = \"local\"\n",
+    )
+    .unwrap();
+    let envs = [("VERLET_HOME", user_home.to_str().unwrap())];
 
-    run_verlet([
-        "import",
-        "publish",
-        "--package",
-        package.to_str().unwrap(),
-        "--registry-root",
-        registry_root.to_str().unwrap(),
-    ]);
-    run_verlet_with_stdin(
+    run_verlet_in_dir_with_env(
+        &root,
+        [
+            "import",
+            "publish",
+            "--package",
+            package.to_str().unwrap(),
+            "--registry-root",
+            registry_root.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    run_verlet_with_stdin_in_dir_with_env(
+        &root,
         [
             "secret",
             "set",
@@ -242,24 +255,36 @@ fn openapi_import_publishes_and_runs_through_the_existing_cli_path() {
             state_home.to_str().unwrap(),
         ],
         "fixture-secret",
+        &envs,
     );
-    let output = run_verlet([
-        "tool",
-        "run",
-        "catalog",
-        "search",
-        "--input",
-        r#"{"query":"verlet"}"#,
-        "--registry-root",
-        registry_root.to_str().unwrap(),
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let endpoint_root = root.join(".verlet/state");
+    let before = verlet::adapters::app_server::instance::resolve_instance_endpoint(&endpoint_root)
+        .expect("secret set should leave the project instance running");
+    let output = run_verlet_in_dir_with_env(
+        &root,
+        [
+            "tool",
+            "run",
+            "catalog",
+            "search",
+            "--input",
+            r#"{"query":"verlet"}"#,
+            "--registry-root",
+            registry_root.to_str().unwrap(),
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
 
     assert!(output.contains(r#""status":200"#), "{output}");
     assert!(output.contains("Verlet runtime"), "{output}");
     assert!(output.contains(r#""truncated":false"#), "{output}");
+    let after = verlet::adapters::app_server::instance::resolve_instance_endpoint(&endpoint_root)
+        .expect("tool run should reuse the running project instance");
+    assert_eq!(after.pid, before.pid);
     server.join().unwrap();
+    wait_for_endpoint_removal(&endpoint_root).await;
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -699,11 +724,20 @@ fn verlet_cli_agent_init_rejects_single_file_output() {
     assert!(!workspace.join("prompts").exists());
 }
 
-#[test]
-fn verlet_cli_secret_import_list_and_status_redact_values() {
-    let state_home = temp_dir("secret-state");
+#[cfg(unix)]
+#[tokio::test]
+async fn verlet_cli_secret_import_list_status_and_delete_use_the_instance() {
+    let project = temp_dir("secret-client");
+    let state_home = project.join("user-state");
+    let user_home = project.join("user-home");
+    std::fs::write(
+        project.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"300ms\"\n\n[daemon.provider]\nprovider = \"local\"\n",
+    )
+    .unwrap();
 
-    let import = run_verlet_with_env(
+    let import = run_verlet_in_dir_with_env(
+        &project,
         [
             "secret",
             "import",
@@ -713,31 +747,59 @@ fn verlet_cli_secret_import_list_and_status_redact_values() {
             "--state-home",
             state_home.to_str().unwrap(),
         ],
-        &[("VERLET_TEST_EXAMPLE_API_KEY", "fixture-secret")],
+        &[
+            ("VERLET_HOME", user_home.to_str().unwrap()),
+            ("VERLET_TEST_EXAMPLE_API_KEY", "fixture-secret"),
+        ],
     );
     assert!(import.contains("imported secret EXAMPLE_API_KEY"));
     assert!(!import.contains("fixture-secret"));
 
-    let list = run_verlet([
-        "secret",
-        "list",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let envs = [("VERLET_HOME", user_home.to_str().unwrap())];
+    let list = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "secret",
+            "list",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(list.contains("EXAMPLE_API_KEY"));
     assert!(list.contains("env:VERLET_TEST_EXAMPLE_API_KEY"));
     assert!(!list.contains("fixture-secret"));
 
-    let status = run_verlet([
-        "secret",
-        "status",
-        "EXAMPLE_API_KEY",
-        "--state-home",
-        state_home.to_str().unwrap(),
-    ]);
+    let status = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "secret",
+            "status",
+            "EXAMPLE_API_KEY",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
     assert!(status.contains(r#""name": "EXAMPLE_API_KEY""#));
     assert!(status.contains(r#""redacted": true"#));
     assert!(!status.contains("fixture-secret"));
+
+    let delete = run_verlet_in_dir_with_env(
+        &project,
+        [
+            "secret",
+            "delete",
+            "EXAMPLE_API_KEY",
+            "--state-home",
+            state_home.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    assert!(delete.contains("deleted secret EXAMPLE_API_KEY"));
+
+    wait_for_endpoint_removal(&project.join(".verlet/state")).await;
+    let _ = std::fs::remove_dir_all(project);
 }
 
 #[test]
@@ -916,10 +978,18 @@ fn verlet_cli_skill_import_dry_run_and_publish_are_deterministic() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[test]
-fn verlet_cli_tool_run_reports_missing_registered_operation_secret_refs() {
-    let registry_root = temp_dir("tool-run-missing-secret-registry");
-    let state_home = temp_dir("tool-run-missing-secret-state");
+#[cfg(unix)]
+#[tokio::test]
+async fn verlet_cli_tool_run_reports_missing_registered_operation_secret_refs() {
+    let project = temp_dir("tool-run-missing-secret");
+    let registry_root = project.join("operations");
+    let state_home = project.join("user-state");
+    let user_home = project.join("user-home");
+    std::fs::write(
+        project.join("verlet.toml"),
+        "[daemon]\nidle_timeout = \"300ms\"\n\n[daemon.provider]\nprovider = \"local\"\n",
+    )
+    .unwrap();
     seed_operation_record(
         &registry_root,
         "secret-search",
@@ -927,23 +997,29 @@ fn verlet_cli_tool_run_reports_missing_registered_operation_secret_refs() {
         &[("search", &["secret:EXAMPLE_API_KEY"])],
     );
 
-    let failed = run_verlet_failed([
-        "tool",
-        "run",
-        "secret-search",
-        "search",
-        "--registry-root",
-        registry_root.to_str().unwrap(),
-        "--state-home",
-        state_home.to_str().unwrap(),
-        "--input",
-        r#"{"query":"verlet"}"#,
-    ]);
+    let failed = run_verlet_failed_in_dir_with_env(
+        &project,
+        [
+            "tool",
+            "run",
+            "secret-search",
+            "search",
+            "--registry-root",
+            registry_root.to_str().unwrap(),
+            "--state-home",
+            state_home.to_str().unwrap(),
+            "--input",
+            r#"{"query":"verlet"}"#,
+        ],
+        &[("VERLET_HOME", user_home.to_str().unwrap())],
+    );
     let err = stderr(&failed);
 
     assert!(err.contains("missing required operation secrets: EXAMPLE_API_KEY"));
     assert!(err.contains("verlet secret import"));
     assert!(!err.contains("fixture-secret"));
+    wait_for_endpoint_removal(&project.join(".verlet/state")).await;
+    let _ = std::fs::remove_dir_all(project);
 }
 
 #[tokio::test]
@@ -2903,42 +2979,6 @@ fn run_verlet<const N: usize>(args: [&str; N]) -> String {
     run_verlet_command(command.args(args))
 }
 
-fn run_verlet_with_env<const N: usize>(args: [&str; N], envs: &[(&str, &str)]) -> String {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
-    model_catalog_test_support::disable_for_std_command(&mut command);
-    command.args(args);
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    run_verlet_command(&mut command)
-}
-
-fn run_verlet_with_stdin<const N: usize>(args: [&str; N], stdin: &str) -> String {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
-    model_catalog_test_support::disable_for_std_command(&mut command);
-    let mut child = command
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to spawn verlet cli");
-    child
-        .stdin
-        .as_mut()
-        .expect("verlet stdin should be piped")
-        .write_all(stdin.as_bytes())
-        .expect("failed to write verlet stdin");
-    let output = child.wait_with_output().expect("failed to run verlet cli");
-    assert!(
-        output.status.success(),
-        "verlet cli failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("verlet output should be utf8")
-}
-
 fn run_verlet_in_dir<const N: usize>(dir: &std::path::Path, args: [&str; N]) -> String {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
     model_catalog_test_support::disable_for_std_command(&mut command);
@@ -2991,6 +3031,40 @@ fn run_verlet_with_stdin_in_dir<const N: usize>(
     String::from_utf8(output.stdout).expect("verlet output should be utf8")
 }
 
+fn run_verlet_with_stdin_in_dir_with_env<const N: usize>(
+    dir: &std::path::Path,
+    args: [&str; N],
+    stdin: &str,
+    envs: &[(&str, &str)],
+) -> String {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    command.current_dir(dir).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn verlet cli");
+    child
+        .stdin
+        .as_mut()
+        .expect("verlet stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("failed to write verlet stdin");
+    let output = child.wait_with_output().expect("failed to run verlet cli");
+    assert!(
+        output.status.success(),
+        "verlet cli failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("verlet output should be utf8")
+}
+
 fn run_verlet_failed_in_dir<const N: usize>(
     dir: &std::path::Path,
     args: [&str; N],
@@ -3002,6 +3076,27 @@ fn run_verlet_failed_in_dir<const N: usize>(
         .args(args)
         .output()
         .expect("failed to run verlet cli");
+    assert!(
+        !output.status.success(),
+        "verlet cli unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn run_verlet_failed_in_dir_with_env<const N: usize>(
+    dir: &std::path::Path,
+    args: [&str; N],
+    envs: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_std_command(&mut command);
+    command.current_dir(dir).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("failed to run verlet cli");
     assert!(
         !output.status.success(),
         "verlet cli unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
@@ -3040,6 +3135,22 @@ fn run_verlet_failed<const N: usize>(args: [&str; N]) -> std::process::Output {
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+async fn wait_for_endpoint_removal(state_root: &std::path::Path) {
+    let endpoint = state_root.join("endpoint.json");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if !endpoint.exists() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {} to be removed",
+            endpoint.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 fn stdout(output: &std::process::Output) -> String {

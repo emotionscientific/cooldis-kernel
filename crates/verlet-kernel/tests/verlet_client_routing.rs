@@ -1,9 +1,11 @@
 #[path = "support/model_catalog.rs"]
 mod model_catalog_test_support;
 
+use tokio::io::AsyncWriteExt as _;
+
 #[cfg(unix)]
 #[tokio::test]
-async fn console_serves_concurrent_auth_and_tool_source_clients() {
+async fn console_serves_concurrent_auth_tool_source_secret_and_identity_clients() {
     let root = TestRoot::new("verlet-client-routing");
     let project = root.path().join("project");
     let user_home = root.path().join("user-home");
@@ -33,9 +35,60 @@ async fn console_serves_concurrent_auth_and_tool_source_clients() {
 
     let auth = run_client(&project, &user_home, ["auth", "status", "openai-codex"]);
     let sources = run_client(&project, &user_home, ["tool", "source", "list"]);
-    let (auth, sources) = tokio::join!(auth, sources);
+    let secrets = run_client(&project, &user_home, ["secret", "list"]);
+    let identities = run_client(&project, &user_home, ["identity", "list"]);
+    let (auth, sources, secrets, identities) = tokio::join!(auth, sources, secrets, identities);
     assert_success("auth status", &auth);
     assert_success("tool source list", &sources);
+    assert_success("secret list", &secrets);
+    assert_success("identity list", &identities);
+
+    let secret_value = format!("console-secret-{}", uuid::Uuid::now_v7());
+    let set = run_client_with_stdin(
+        &project,
+        &user_home,
+        ["secret", "set", "CONSOLE_SECRET", "--value-stdin"],
+        secret_value.as_bytes(),
+    )
+    .await;
+    assert_success("secret set", &set);
+    assert!(!String::from_utf8_lossy(&set.stdout).contains(&secret_value));
+    assert!(!String::from_utf8_lossy(&set.stderr).contains(&secret_value));
+    let status = run_client(&project, &user_home, ["secret", "status", "CONSOLE_SECRET"]).await;
+    assert_success("secret status", &status);
+    assert!(!String::from_utf8_lossy(&status.stdout).contains(&secret_value));
+
+    let declared = run_client(
+        &project,
+        &user_home,
+        [
+            "identity",
+            "declare",
+            "adapter:console-test",
+            "--kind",
+            "adapter",
+            "--display",
+            "Console test adapter",
+        ],
+    )
+    .await;
+    assert_success("identity declare", &declared);
+    let minted = run_client(
+        &project,
+        &user_home,
+        ["identity", "mint", "adapter:console-test"],
+    )
+    .await;
+    assert_success("identity mint", &minted);
+    let minted_stdout = String::from_utf8(minted.stdout).unwrap();
+    let token = minted_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("token "))
+        .expect("identity mint should print its token once");
+    assert_eq!(minted_stdout.matches(token).count(), 1);
+    let identities = run_client(&project, &user_home, ["identity", "list"]).await;
+    assert_success("identity list after mint", &identities);
+    assert!(!String::from_utf8_lossy(&identities.stdout).contains(token));
     assert_eq!(
         verlet::adapters::app_server::instance::resolve_instance_endpoint(
             &project.join(".verlet/state")
@@ -252,6 +305,32 @@ async fn run_client<const N: usize>(
     .await
     .expect("client command timed out")
     .unwrap()
+}
+
+async fn run_client_with_stdin<const N: usize>(
+    project: &std::path::Path,
+    user_home: &std::path::Path,
+    args: [&str; N],
+    stdin: &[u8],
+) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    let mut child = command
+        .args(args)
+        .current_dir(project)
+        .env("HOME", user_home)
+        .env("VERLET_HOME", user_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("client command timed out")
+        .unwrap()
 }
 
 fn assert_success(label: &str, output: &std::process::Output) {

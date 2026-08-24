@@ -65,7 +65,7 @@ async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
 }
 
 #[tokio::test]
-async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() {
+async fn identity_clients_manage_adapters_without_reprinting_secrets() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
@@ -88,8 +88,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "member",
         "--display",
         "Reserved member",
-        "--declared-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -104,8 +102,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "adapter",
         "--display",
         "Webhook adapter",
-        "--declared-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -115,8 +111,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "identity",
         "mint",
         "adapter:webhook",
-        "--minted-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -163,8 +157,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "identity",
         "revoke-credential",
         credential_id,
-        "--revoked-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -178,8 +170,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "identity",
         "mint",
         "adapter:webhook",
-        "--minted-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -193,8 +183,6 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         "identity",
         "revoke-principal",
         "adapter:webhook",
-        "--revoked-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -204,10 +192,8 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
         stderr(&revoke_principal)
     );
 
-    let store =
-        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
-            .await
-            .unwrap();
+    wait_for_endpoint_removal(&state_home).await;
+    let store = open_session_store_after_owner_exit(&state_home).await;
     let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
         std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock);
     let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(store, clock, None)
@@ -226,8 +212,8 @@ async fn offline_identity_commands_manage_adapters_without_reprinting_secrets() 
     remove_sqlite_state(&state_home);
 }
 
-#[test]
-fn revoking_a_bogus_id_fails_without_printing_success() {
+#[tokio::test]
+async fn revoking_a_bogus_id_fails_without_printing_success() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
@@ -235,8 +221,6 @@ fn revoking_a_bogus_id_fails_without_printing_success() {
         "identity",
         "revoke-credential",
         "credential_missing",
-        "--revoked-by",
-        "operator:root",
         "--state-home",
         &state_home_arg,
     ]);
@@ -246,11 +230,12 @@ fn revoking_a_bogus_id_fails_without_printing_success() {
     assert!(!stdout(&revoke).contains("revoked"));
     assert!(!stderr(&revoke).contains("revoked credential"));
 
+    wait_for_endpoint_removal(&state_home).await;
     remove_sqlite_state(&state_home);
 }
 
 #[tokio::test]
-async fn locked_store_tells_the_user_to_stop_the_running_instance() {
+async fn bootstrap_on_a_locked_store_tells_the_user_to_stop_the_running_instance() {
     let state_home = temp_state_home();
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
@@ -264,18 +249,41 @@ async fn locked_store_tells_the_user_to_stop_the_running_instance() {
         .await
         .unwrap();
 
-    let list = run_identity(["identity", "list", "--state-home", &state_home_arg]);
-    assert!(!list.status.success());
-    assert!(stderr(&list).contains("another process holds this database"));
-    assert!(stderr(&list).contains("stop that instance and retry"));
+    let bootstrap = run_identity([
+        "identity",
+        "bootstrap",
+        "operator:blocked",
+        "--display",
+        "Blocked operator",
+        "--state-home",
+        &state_home_arg,
+    ]);
+    assert!(!bootstrap.status.success());
+    assert!(stderr(&bootstrap).contains("another process holds this database"));
+    assert!(stderr(&bootstrap).contains("stop that instance and retry"));
 
     drop(authority);
     remove_sqlite_state(&state_home);
 }
 
 fn run_identity<const N: usize>(args: [&str; N]) -> std::process::Output {
+    let state_home = args
+        .iter()
+        .position(|arg| *arg == "--state-home")
+        .and_then(|index| args.get(index + 1))
+        .map(std::path::PathBuf::from)
+        .expect("identity CLI test requires --state-home");
+    let client_home = state_home.join("client-home");
+    std::fs::create_dir_all(&client_home).unwrap();
+    std::fs::write(
+        client_home.join("config.toml"),
+        "[daemon]\nidle_timeout = \"300ms\"\n",
+    )
+    .unwrap();
     std::process::Command::new(env!("CARGO_BIN_EXE_verlet"))
         .args(args)
+        .env("HOME", &client_home)
+        .env("VERLET_HOME", &client_home)
         .output()
         .expect("failed to run verlet identity command")
 }
@@ -293,13 +301,41 @@ fn temp_state_home() -> std::path::PathBuf {
 }
 
 fn remove_sqlite_state(state_home: &std::path::Path) {
-    for suffix in ["", "-wal", "-shm"] {
-        let path = std::path::PathBuf::from(format!(
-            "{}{}",
-            state_home.join("session_history.sqlite3").display(),
-            suffix
-        ));
-        let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(state_home);
+}
+
+async fn wait_for_endpoint_removal(state_home: &std::path::Path) {
+    let endpoint = state_home.join("endpoint.json");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if !endpoint.exists() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {} to be removed",
+            endpoint.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let _ = std::fs::remove_dir(state_home);
+}
+
+async fn open_session_store_after_owner_exit(
+    state_home: &std::path::Path,
+) -> verlet_history_sqlite::SqliteSessionStore {
+    let path = state_home.join("session_history.sqlite3");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match verlet_history_sqlite::SqliteSessionStore::open(&path).await {
+            Ok(store) => return store,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting to reopen {}: {error}",
+                    path.display()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+    }
 }

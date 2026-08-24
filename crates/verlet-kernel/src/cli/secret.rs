@@ -1,9 +1,10 @@
-//! The `secret` subcommand family and shared local metadata-store access.
+//! The `secret` subcommand family.
 
 use std::io::Read as _;
 
 pub(crate) async fn run_secret(
     mut args: Vec<std::ffi::OsString>,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
@@ -32,20 +33,34 @@ pub(crate) async fn run_secret(
         }
         return Ok(());
     }
-    match subcommand.to_string_lossy().as_ref() {
-        "import" => secret_import(args).await,
-        "set" => secret_set(args).await,
-        "list" => secret_list(args).await,
-        "status" => secret_status(args).await,
-        "delete" => secret_delete(args).await,
-        _ => Err(crate::cli::usage_error(format!(
-            "unknown secret subcommand {subcommand:?}"
-        ))),
+    let action = subcommand.to_string_lossy();
+    if !matches!(
+        action.as_ref(),
+        "import" | "set" | "list" | "status" | "delete"
+    ) {
+        return Err(crate::cli::usage_error(format!(
+            "unknown secret subcommand {action:?}"
+        )));
     }
+    let mut client = client.ok_or_else(|| {
+        crate::cli::usage_error("secret command did not receive an instance connection")
+    })?;
+    let result = match action.as_ref() {
+        "import" => secret_import(args, &mut client).await,
+        "set" => secret_set(args, &mut client).await,
+        "list" => secret_list(args, &mut client).await,
+        "status" => secret_status(args, &mut client).await,
+        "delete" => secret_delete(args, &mut client).await,
+        _ => unreachable!("validated secret action"),
+    };
+    let close = client.close().await;
+    result?;
+    close
 }
 
 pub(crate) async fn secret_import(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_import_args(args)?;
     if options.help {
@@ -58,11 +73,23 @@ pub(crate) async fn secret_import(
     let from_env = options
         .from_env
         .ok_or_else(|| crate::cli::usage_error("secret import requires --from-env <ENV>"))?;
-    let store = open_secret_store(options.state_home).await?;
-    let status = store
-        .import_secret_from_env(&name, &from_env)
-        .await
-        .map_err(secret_cli_error)?;
+    let value = std::env::var(&from_env).map_err(|_| {
+        secret_cli_error(
+            verlet_metadata::secret_store::SecretStoreError::MissingEnv {
+                secret_name: name.clone(),
+                env_name: from_env.clone(),
+            },
+        )
+    })?;
+    let result = client
+        .secret_set(
+            &name,
+            &value,
+            verlet_metadata::secret_store::SecretSourceKind::Env,
+            Some(&from_env),
+        )
+        .await?;
+    let status = required_secret_status(&result, "secret/set")?;
     println!("imported secret {}", status.name);
     println!("source {}", secret_source_display(&status));
     Ok(())
@@ -70,6 +97,7 @@ pub(crate) async fn secret_import(
 
 pub(crate) async fn secret_set(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_set_args(args)?;
     if options.help {
@@ -87,16 +115,15 @@ pub(crate) async fn secret_set(
         .read_to_string(&mut value)
         .map_err(crate::cli::io_error)?;
     let value = trim_stdin_secret_value(value);
-    let store = open_secret_store(options.state_home).await?;
-    let status = store
-        .set_secret(
+    let result = client
+        .secret_set(
             &name,
-            value,
+            &value,
             verlet_metadata::secret_store::SecretSourceKind::Stdin,
             None,
         )
-        .await
-        .map_err(secret_cli_error)?;
+        .await?;
+    let status = required_secret_status(&result, "secret/set")?;
     println!("stored secret {}", status.name);
     println!("source {}", secret_source_display(&status));
     Ok(())
@@ -104,14 +131,21 @@ pub(crate) async fn secret_set(
 
 pub(crate) async fn secret_list(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_list_args(args, "secret list")?;
     if options.help {
         print_secret_list_help();
         return Ok(());
     }
-    let store = open_secret_store(options.state_home).await?;
-    let statuses = store.list().await.map_err(secret_cli_error)?;
+    let result = client.secret_list().await?;
+    let statuses = serde_json::from_value::<Vec<verlet_metadata::secret_store::SecretStatus>>(
+        result
+            .get("data")
+            .cloned()
+            .ok_or_else(|| crate::cli::usage_error("secret/list response did not include data"))?,
+    )
+    .map_err(|error| crate::cli::usage_error(format!("invalid secret/list response: {error}")))?;
     if statuses.is_empty() {
         println!("no secrets");
         return Ok(());
@@ -129,6 +163,7 @@ pub(crate) async fn secret_list(
 
 pub(crate) async fn secret_status(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_name_args(args, "secret status")?;
     if options.help {
@@ -138,11 +173,8 @@ pub(crate) async fn secret_status(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("secret status requires <name>"))?;
-    let store = open_secret_store(options.state_home).await?;
-    let status = store
-        .status(&name)
-        .await
-        .map_err(secret_cli_error)?
+    let result = client.secret_status(&name).await?;
+    let status = optional_secret_status(&result, "secret/status")?
         .ok_or_else(|| crate::cli::usage_error(format!("secret {name:?} was not found")))?;
     println!(
         "{}",
@@ -157,6 +189,7 @@ pub(crate) async fn secret_status(
 
 pub(crate) async fn secret_delete(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_secret_name_args(args, "secret delete")?;
     if options.help {
@@ -166,8 +199,12 @@ pub(crate) async fn secret_delete(
     let name = options
         .name
         .ok_or_else(|| crate::cli::usage_error("secret delete requires <name>"))?;
-    let store = open_secret_store(options.state_home).await?;
-    if store.delete_secret(&name).await.map_err(secret_cli_error)? {
+    let result = client.secret_delete(&name).await?;
+    let deleted = result
+        .get("deleted")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| crate::cli::usage_error("secret/delete response did not include deleted"))?;
+    if deleted {
         println!("deleted secret {name}");
     } else {
         println!("secret {name} was not found");
@@ -179,7 +216,6 @@ pub(crate) async fn secret_delete(
 pub(crate) struct SecretImportArgs {
     name: Option<String>,
     from_env: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -187,20 +223,17 @@ pub(crate) struct SecretImportArgs {
 pub(crate) struct SecretSetArgs {
     name: Option<String>,
     value_stdin: bool,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct SecretNameArgs {
     name: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct SecretListArgs {
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -209,7 +242,6 @@ pub(crate) fn parse_secret_import_args(
 ) -> crate::kernel::runtime_host::VerletResult<SecretImportArgs> {
     let mut name = None;
     let mut from_env = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -222,10 +254,7 @@ pub(crate) fn parse_secret_import_args(
                 )?)
             }
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -245,7 +274,6 @@ pub(crate) fn parse_secret_import_args(
     Ok(SecretImportArgs {
         name,
         from_env,
-        state_home,
         help,
     })
 }
@@ -255,7 +283,6 @@ pub(crate) fn parse_secret_set_args(
 ) -> crate::kernel::runtime_host::VerletResult<SecretSetArgs> {
     let mut name = None;
     let mut value_stdin = false;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -263,10 +290,7 @@ pub(crate) fn parse_secret_set_args(
             "--help" | "-h" => help = true,
             "--value-stdin" => value_stdin = true,
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -286,7 +310,6 @@ pub(crate) fn parse_secret_set_args(
     Ok(SecretSetArgs {
         name,
         value_stdin,
-        state_home,
         help,
     })
 }
@@ -296,17 +319,13 @@ pub(crate) fn parse_secret_name_args(
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<SecretNameArgs> {
     let mut name = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -323,28 +342,20 @@ pub(crate) fn parse_secret_name_args(
             }
         }
     }
-    Ok(SecretNameArgs {
-        name,
-        state_home,
-        help,
-    })
+    Ok(SecretNameArgs { name, help })
 }
 
 pub(crate) fn parse_secret_list_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<SecretListArgs> {
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other => {
                 return Err(crate::cli::usage_error(format!(
@@ -353,7 +364,7 @@ pub(crate) fn parse_secret_list_args(
             }
         }
     }
-    Ok(SecretListArgs { state_home, help })
+    Ok(SecretListArgs { help })
 }
 
 pub(crate) fn default_user_state_home()
@@ -361,36 +372,30 @@ pub(crate) fn default_user_state_home()
     Ok(crate::cli::console::default_user_verlet_home()?.join("state"))
 }
 
-pub(crate) fn metadata_store_path_for_state_home(
-    state_home: Option<std::path::PathBuf>,
-    default_state_home: std::path::PathBuf,
-) -> std::path::PathBuf {
-    state_home
-        .unwrap_or(default_state_home)
-        .join("metadata.sqlite3")
-}
-
-pub(crate) async fn open_secret_store(
-    state_home: Option<std::path::PathBuf>,
-) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::secret_store::SqliteSecretStore> {
-    verlet_metadata::secret_store::SqliteSecretStore::open(metadata_store_path_for_state_home(
-        state_home,
-        default_user_state_home()?,
-    ))
-    .await
-    .map_err(|err| {
-        if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
-            crate::adapters::app_server::instance::cross_process_database_guidance()
-        } else {
-            secret_cli_error(err)
-        }
-    })
-}
-
 pub(crate) fn secret_cli_error(
     err: impl std::fmt::Display,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
+}
+
+fn required_secret_status(
+    result: &serde_json::Value,
+    method: &str,
+) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::secret_store::SecretStatus> {
+    optional_secret_status(result, method)?
+        .ok_or_else(|| crate::cli::usage_error(format!("{method} response did not include status")))
+}
+
+fn optional_secret_status(
+    result: &serde_json::Value,
+    method: &str,
+) -> crate::kernel::runtime_host::VerletResult<Option<verlet_metadata::secret_store::SecretStatus>>
+{
+    let status = result.get("status").cloned().ok_or_else(|| {
+        crate::cli::usage_error(format!("{method} response did not include status"))
+    })?;
+    serde_json::from_value(status)
+        .map_err(|error| crate::cli::usage_error(format!("invalid {method} response: {error}")))
 }
 
 pub(crate) fn secret_source_display(

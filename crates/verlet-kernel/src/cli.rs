@@ -59,12 +59,18 @@ pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
             crate::cli::tool::run_tool(args, client).await
         }
         "skill" => crate::cli::skill::run_skill(args).await,
-        "secret" => crate::cli::secret::run_secret(args).await,
+        "secret" => {
+            let client = client_command_preamble("secret", &args).await?;
+            crate::cli::secret::run_secret(args, client).await
+        }
         "auth" => {
             let client = client_command_preamble("auth", &args).await?;
             crate::cli::auth::run_auth(args, client).await
         }
-        "identity" => crate::cli::identity::run_identity(args).await,
+        "identity" => {
+            let client = client_command_preamble("identity", &args).await?;
+            crate::cli::identity::run_identity(args, client).await
+        }
         "console" => crate::cli::console::run_console(args).await,
         "chat" => {
             let client = client_command_preamble("chat", &args).await?;
@@ -322,6 +328,36 @@ async fn client_command_preamble(
         {
             InstanceScope::User {
                 state_home: option_path(args, "--state-home")?,
+            }
+        }
+        "secret"
+            if args.first().is_some_and(|subcommand| {
+                matches!(
+                    subcommand.to_string_lossy().as_ref(),
+                    "import" | "set" | "list" | "status" | "delete"
+                )
+            }) =>
+        {
+            InstanceScope::User {
+                state_home: option_path(args, "--state-home")?,
+            }
+        }
+        "identity"
+            if args.first().is_some_and(|subcommand| {
+                matches!(
+                    subcommand.to_string_lossy().as_ref(),
+                    "declare" | "mint" | "revoke-credential" | "revoke-principal" | "list"
+                )
+            }) =>
+        {
+            match option_path(args, "--state-home")? {
+                Some(state_home) => InstanceScope::Project {
+                    cwd: std::env::current_dir().map_err(io_error)?,
+                    config_path: None,
+                    runtime_home: None,
+                    state_home: Some(state_home),
+                },
+                None => InstanceScope::User { state_home: None },
             }
         }
         "tool"

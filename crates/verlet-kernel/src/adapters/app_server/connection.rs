@@ -7,6 +7,7 @@ use verlet_history::EventStore as _;
 use verlet_metadata::provider_store::LlmProviderAuthStore as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
+use verlet_metadata::secret_store::SecretResolver as _;
 
 #[derive(Clone)]
 pub(crate) struct ConnectionState {
@@ -373,6 +374,15 @@ pub(crate) struct SecretSetParams {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SecretDeleteParams {
     pub(crate) name: String,
+}
+
+/// Params for `secret/resolve` (unix-socket-only): the plaintext values for
+/// the named secrets, for `verlet tool run` injection. Mirrors the store's
+/// `resolve_manifest_secrets`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretResolveParams {
+    pub(crate) names: Vec<String>,
 }
 
 // EMO-593: identity/* params. The acting principal (declared_by, minted_by,
@@ -967,6 +977,10 @@ pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         crate::daemon::identity::AuthorityClass::Host,
     ),
     (
+        "secret/resolve",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
         "identity/list",
         crate::daemon::identity::AuthorityClass::Host,
     ),
@@ -1226,6 +1240,7 @@ pub(crate) const HOST_EFFECT_METHODS: &[&str] = &[
     "secret/status",
     "secret/set",
     "secret/delete",
+    "secret/resolve",
     // Identity authority operations (EMO-593): witnessed operator events.
     "identity/list",
     "identity/declare",
@@ -1721,6 +1736,11 @@ impl crate::adapters::app_server::VerletAppServer {
                 let params: SecretDeleteParams = parse_params(params)?;
                 self.secret_delete(params).await
             }
+            "secret/resolve" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: SecretResolveParams = parse_params(params)?;
+                self.secret_resolve(params).await
+            }
             "identity/list" => self.identity_list().await,
             "identity/declare" => {
                 let params: IdentityDeclareParams = parse_params(params)?;
@@ -2067,7 +2087,7 @@ impl crate::adapters::app_server::VerletAppServer {
             let secret_name = params
                 .bearer_secret
                 .unwrap_or_else(|| format!("mcp.{}.bearer", config.name));
-            self.mcp_secret_store()
+            self.user_secret_store()
                 .await?
                 .set_secret(
                     &secret_name,
@@ -2120,7 +2140,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(std::sync::Arc::new(self.mcp_secret_store().await?)),
+            Some(std::sync::Arc::new(self.user_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -2157,7 +2177,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(std::sync::Arc::new(self.mcp_secret_store().await?)),
+            Some(std::sync::Arc::new(self.user_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -2295,7 +2315,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .map_err(internal_error)
     }
 
-    async fn mcp_secret_store(
+    async fn user_secret_store(
         &self,
     ) -> Result<verlet_metadata::secret_store::SqliteSecretStore, JsonRpcErrorError> {
         verlet_metadata::secret_store::SqliteSecretStore::open(&self.inner.user_metadata_store_path)
@@ -2391,10 +2411,15 @@ impl crate::adapters::app_server::VerletAppServer {
     /// Response: `{ "data": [SecretStatus...], "nextCursor": null }`; the
     /// serialized `SecretStatus.value` is always redacted.
     pub(crate) async fn secret_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: secret/list is not implemented yet",
-        ))
+        let data = self
+            .user_secret_store()
+            .await?
+            .list()
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
     /// EMO-593: status for one secret by name.
@@ -2403,11 +2428,15 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: SecretStatusParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = params;
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: secret/status is not implemented yet",
-        ))
+        let status = self
+            .user_secret_store()
+            .await?
+            .status(params.name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "status": status }))
     }
 
     /// EMO-593: create or update a secret via `SqliteSecretStore::set_secret`.
@@ -2418,11 +2447,15 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: SecretSetParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = params;
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: secret/set is not implemented yet",
-        ))
+        let status = self
+            .user_secret_store()
+            .await?
+            .set_secret(params.name, params.value, params.source, params.source_name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "status": status }))
     }
 
     /// EMO-593: delete a secret by name.
@@ -2431,11 +2464,49 @@ impl crate::adapters::app_server::VerletAppServer {
         &self,
         params: SecretDeleteParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = params;
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: secret/delete is not implemented yet",
-        ))
+        let deleted = self
+            .user_secret_store()
+            .await?
+            .delete_secret(params.name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "deleted": deleted }))
+    }
+
+    /// EMO-593: resolve plaintext values for the named secrets, for
+    /// `verlet tool run` injection. Unix-socket-only (gated in dispatch).
+    /// Response: `{ "values": { name: value }, "missing": [String] }` where
+    /// `missing` lists requested names with no stored secret. The values must
+    /// never appear in logs, errors, or witnessed events.
+    pub(crate) async fn secret_resolve(
+        &self,
+        params: SecretResolveParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let store = self.user_secret_store().await?;
+        let mut values = std::collections::BTreeMap::new();
+        let mut missing = std::collections::BTreeSet::new();
+        for name in params.names {
+            let name =
+                verlet_metadata::secret_store::validate_secret_name(&name).map_err(|error| {
+                    internal_error(crate::adapters::app_server::secret_store_error(error))
+                })?;
+            match store.resolve_secret(&name).await.map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })? {
+                Some(secret) => {
+                    values.insert(secret.name, secret.value);
+                }
+                None => {
+                    missing.insert(name);
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "values": values,
+            "missing": missing,
+        }))
     }
 
     /// EMO-593: list declared principals and credentials from the identity
@@ -2444,10 +2515,26 @@ impl crate::adapters::app_server::VerletAppServer {
     /// Credentials carry `token_digest` only; bearer secrets are never stored
     /// and never listed.
     pub(crate) async fn identity_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: identity/list is not implemented yet",
-        ))
+        let principals = self
+            .inner
+            .identity_authority
+            .list_principals()
+            .await
+            .map_err(internal_error)?;
+        let mut credentials = Vec::new();
+        for principal in &principals {
+            credentials.extend(
+                self.inner
+                    .identity_authority
+                    .list_credentials(&principal.principal_id)
+                    .await
+                    .map_err(internal_error)?,
+            );
+        }
+        Ok(serde_json::json!({
+            "principals": principals,
+            "credentials": credentials,
+        }))
     }
 
     /// EMO-593: declare a principal. `declared_by` is the connection's
@@ -2457,11 +2544,18 @@ impl crate::adapters::app_server::VerletAppServer {
         connection: &ConnectionState,
         params: IdentityDeclareParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = (connection, params);
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: identity/declare is not implemented yet",
-        ))
+        let principal = self
+            .inner
+            .identity_authority
+            .declare_principal(
+                &connection.resolved_principal.principal_id,
+                &crate::daemon::identity::PrincipalId::new(params.principal_id),
+                params.kind,
+                &params.display,
+            )
+            .await
+            .map_err(identity_operation_error)?;
+        Ok(serde_json::json!({ "principal": principal }))
     }
 
     /// EMO-593: mint a credential. `minted_by` is the connection's
@@ -2473,11 +2567,20 @@ impl crate::adapters::app_server::VerletAppServer {
         connection: &ConnectionState,
         params: IdentityMintParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = (connection, params);
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: identity/mint is not implemented yet",
-        ))
+        let (credential, token) = self
+            .inner
+            .identity_authority
+            .mint_credential(
+                &connection.resolved_principal.principal_id,
+                &crate::daemon::identity::PrincipalId::new(params.principal_id),
+                params.expires_at_ms,
+            )
+            .await
+            .map_err(identity_operation_error)?;
+        Ok(serde_json::json!({
+            "credential": credential,
+            "token": token,
+        }))
     }
 
     /// EMO-593: revoke a credential (`credential_id`) or a principal and all
@@ -2489,11 +2592,33 @@ impl crate::adapters::app_server::VerletAppServer {
         connection: &ConnectionState,
         params: IdentityRevokeParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let _ = (connection, params);
-        Err(jsonrpc_error(
-            -32603,
-            "EMO-593: identity/revoke is not implemented yet",
-        ))
+        match (
+            params.credential_id.as_deref(),
+            params.principal_id.as_deref(),
+        ) {
+            (Some(credential_id), None) => self
+                .inner
+                .identity_authority
+                .revoke_credential(&connection.resolved_principal.principal_id, credential_id)
+                .await
+                .map_err(identity_operation_error)?,
+            (None, Some(principal_id)) => self
+                .inner
+                .identity_authority
+                .revoke_principal(
+                    &connection.resolved_principal.principal_id,
+                    &crate::daemon::identity::PrincipalId::new(principal_id),
+                )
+                .await
+                .map_err(identity_operation_error)?,
+            (None, None) | (Some(_), Some(_)) => {
+                return Err(jsonrpc_error(
+                    -32602,
+                    "identity/revoke requires exactly one of credentialId or principalId",
+                ));
+            }
+        }
+        Ok(serde_json::json!({ "revoked": true }))
     }
 
     pub(crate) async fn model_provider_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6484,9 +6609,10 @@ where
 }
 
 /// EMO-593: methods whose request or response carries secret material
-/// (`secret/set` values, `identity/mint` bearer tokens) are only served over
-/// the instance unix socket. Every other boundary surface is refused with an
-/// error that names the unix socket.
+/// (`secret/set` request values, `secret/resolve` response values, and
+/// `identity/mint` bearer tokens) are only served over the instance unix
+/// socket. Every other boundary surface is refused with an error that names
+/// the unix socket.
 pub(crate) fn require_unix_socket_surface(
     connection: &ConnectionState,
     method: &str,
@@ -6513,6 +6639,10 @@ pub(crate) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErr
 
 pub(crate) fn internal_error(err: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
     jsonrpc_error(-32000, err.to_string())
+}
+
+fn identity_operation_error(error: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
+    jsonrpc_error(-32602, error.to_string())
 }
 
 pub(crate) fn json_codec_error(err: serde_json::Error) -> JsonRpcErrorError {

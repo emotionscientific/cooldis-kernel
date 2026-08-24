@@ -34,6 +34,7 @@ verlet blob publish
 verlet tool build|list|publish|run|source|manual
 verlet auth status|set|delete
 verlet secret import|set|list|status|delete
+verlet identity bootstrap|declare|mint|revoke-credential|revoke-principal|list
 ```
 
 `verlet console` starts the bundled browser console on loopback, serves the UI
@@ -50,8 +51,12 @@ generated package is validated with `verlet tool build --package`.
 
 `verlet auth` manages model-provider credentials through the running instance.
 `verlet tool source` manages project MCP sources through that same RPC surface.
-`verlet secret` still opens the user metadata store directly in this release.
-All status and list output redacts stored values.
+`verlet secret` manages the user secret store through the instance; import reads
+the named environment variable in the client and sends its value only over the
+local Unix socket. `verlet identity bootstrap` is the sole offline identity
+operation and requires the server to be stopped. The other identity commands
+act through the authenticated operator connection. Secret status/list output
+and identity list output do not expose bearer values.
 
 ## Server And Client Commands
 
@@ -61,14 +66,17 @@ It idles out only when `serve --idle-timeout <duration>` or
 in-process with the browser UI and a loopback WebSocket listener, and never
 idles out.
 
-`verlet auth`, `verlet tool source`, and `verlet chat` are clients. They read
-the endpoint record for their scope and connect to its Unix socket. Project
-commands use the same project and state-root resolution as `verlet console`.
-Auth first checks the current project instance because that instance also owns
-the user metadata root. If no project instance is reachable, auth checks the
-user-root endpoint record. Outside a Verlet project, a user-scoped command
-starts its server from the Verlet home with project and user state sharing the
-user state root, and creates nothing under the arbitrary current directory.
+`verlet auth`, `verlet secret`, non-bootstrap `verlet identity`, `verlet tool
+source`, the secret-bearing path of `verlet tool run`, and `verlet chat` are
+clients. They read the endpoint record for their scope and connect to its Unix
+socket. Project commands use the same project and state-root resolution as
+`verlet console`. User-scoped commands first check the current project instance
+because that instance also owns the user metadata root, then check the
+user-root endpoint. An explicit identity `--state-home` instead names the
+server/session state root, preserving the bootstrap flag's meaning. Outside a
+Verlet project, a user-scoped command starts its server from the Verlet home
+with project and user state sharing the user state root, and creates nothing
+under the arbitrary current directory.
 
 When no matching instance is reachable, a client starts `verlet serve`
 detached, writes its stdout and stderr to `<state_root>/serve.log`, waits up to

@@ -586,6 +586,17 @@ where
             .await
     }
 
+    /// Resolve plaintext values for named secrets (`verlet tool run`
+    /// injection). Unix-socket-only; the server refuses it on any other
+    /// surface. Response: `{ "values": { name: value }, "missing": [names] }`.
+    pub async fn secret_resolve(
+        &mut self,
+        names: &[String],
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("secret/resolve", serde_json::json!({ "names": names }))
+            .await
+    }
+
     // EMO-593: identity/* helpers. The acting principal is the connection's
     // authenticated principal; there are no declared-by/minted-by inputs.
     // `identity_mint` only works over the unix socket transport because the
