@@ -77,6 +77,18 @@ behind a single engine-owner crate.
    daemon's database from another process now fail with a lock error
    where WAL rusqlite allowed a concurrent reader; the audit and
    RPC-rerouting of those flows is a follow-up ticket.
+   Addendum (2026-08-24, EMO-590): that follow-up shipped as the
+   client-of-instance epic, released in v0.5.0. Every running instance
+   writes an endpoint record beside its state root and serves a unix
+   socket (EMO-591). `verlet serve` is the one server command, `verlet
+   console` is serve plus the web UI, and every other CLI command is a
+   socket client with detached auto-spawn and an idle timeout (EMO-592).
+   `secret/*` and `identity/*` exist on the wire and the last direct CLI
+   store opens are gone (EMO-593). The sanctioned direct-file opens are
+   `identity bootstrap` and the read-only forensics commands (`debug
+   bind --journal`, `coupling run --replay`), which fail with
+   cross-process guidance when the file is owned. The storage law is
+   unchanged.
 6. **Version policy: exact pin plus a standing fork as the patch lane**
    (anchor-ratified 2026-07-11). Default posture: `turso = "=0.6.1"` from
    crates.io (latest stable at decision time; the 0.7 pre-releases carry
