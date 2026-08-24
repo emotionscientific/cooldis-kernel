@@ -78,8 +78,10 @@ sha256_file() {
 
 cd "$ROOT"
 
+source scripts/release-version.sh
+
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' crates/verlet-kernel/Cargo.toml | head -n 1
+  read_verlet_workspace_version Cargo.toml
 )"
 if [[ -z "$VERSION" ]]; then
   echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
