@@ -15,6 +15,7 @@ pub(crate) struct ConnectionState {
     pub(crate) resolved_principal: crate::daemon::identity::ResolvedPrincipal,
     pub(crate) witnessed_session_id: String,
     pub(crate) boundary_surface: crate::daemon::identity::BoundarySurface,
+    pub(crate) unix_socket_transport: bool,
     pub(crate) outbound: tokio::sync::mpsc::UnboundedSender<JsonRpcMessage>,
     pub(crate) handshake: std::sync::Arc<tokio::sync::Mutex<HandshakeState>>,
     pub(crate) opt_out_notifications:
@@ -58,7 +59,7 @@ pub enum JsonRpcMessage {
     Error(JsonRpcError),
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcRequest {
     pub id: RequestId,
     pub method: String,
@@ -68,17 +69,46 @@ pub struct JsonRpcRequest {
     pub trace: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for JsonRpcRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcRequest")
+            .field("id", &self.id)
+            .field("method", &self.method)
+            .field("params", &self.params.as_ref().map(|_| "<redacted>"))
+            .field("trace", &self.trace.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcNotification {
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for JsonRpcNotification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcNotification")
+            .field("method", &self.method)
+            .field("params", &self.params.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcResponse {
     pub id: RequestId,
     pub result: serde_json::Value,
+}
+
+impl std::fmt::Debug for JsonRpcResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcResponse")
+            .field("id", &self.id)
+            .field("result", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -347,9 +377,6 @@ pub(crate) struct ModelProviderAuthDeleteParams {
     pub(crate) provider_id: String,
 }
 
-// EMO-593: secret/* params. Values travel over the local unix socket only
-// (see `require_unix_socket_surface`); responses never echo secret values.
-
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SecretStatusParams {
@@ -360,7 +387,7 @@ pub(crate) struct SecretStatusParams {
 /// value (`env`, `stdin`, `local`); `source_name` is the env-var name when
 /// `source` is `env` (the CLI reads the variable locally, the server never
 /// sees the client environment).
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SecretSetParams {
     pub(crate) name: String,
@@ -384,10 +411,6 @@ pub(crate) struct SecretDeleteParams {
 pub(crate) struct SecretResolveParams {
     pub(crate) names: Vec<String>,
 }
-
-// EMO-593: identity/* params. The acting principal (declared_by, minted_by,
-// revoker) is always the connection's authenticated principal, never a
-// parameter.
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1234,14 +1257,14 @@ pub(crate) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
     "modelProvider/catalog",
-    // Secret store projections and mutations (EMO-593). Same treatment as
+    // Secret store projections and mutations. Same treatment as
     // modelProvider/*: reads of secret-adjacent state are witnessed too.
     "secret/list",
     "secret/status",
     "secret/set",
     "secret/delete",
     "secret/resolve",
-    // Identity authority operations (EMO-593): witnessed operator events.
+    // Identity authority operations: witnessed operator events.
     "identity/list",
     "identity/declare",
     "identity/mint",
@@ -1338,6 +1361,7 @@ impl crate::adapters::app_server::VerletAppServer {
             resolved_principal,
             witnessed_session_id: session_id,
             boundary_surface: surface,
+            unix_socket_transport: false,
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(HandshakeState::default())),
             opt_out_notifications: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -1451,6 +1475,10 @@ impl crate::adapters::app_server::VerletAppServer {
             resolved_principal,
             witnessed_session_id: session_id,
             boundary_surface: surface,
+            unix_socket_transport: matches!(
+                surface,
+                crate::daemon::identity::BoundarySurface::UnixSocket
+            ),
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(HandshakeState::default())),
             opt_out_notifications: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -1729,7 +1757,7 @@ impl crate::adapters::app_server::VerletAppServer {
             }
             "secret/set" => {
                 require_unix_socket_surface(connection, method)?;
-                let params: SecretSetParams = parse_params(params)?;
+                let params: SecretSetParams = parse_sensitive_params(params, method)?;
                 self.secret_set(params).await
             }
             "secret/delete" => {
@@ -2407,7 +2435,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
     }
 
-    /// EMO-593: list secret statuses from the user secret store.
+    /// List secret statuses from the user secret store.
     /// Response: `{ "data": [SecretStatus...], "nextCursor": null }`; the
     /// serialized `SecretStatus.value` is always redacted.
     pub(crate) async fn secret_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -2422,7 +2450,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "nextCursor": null }))
     }
 
-    /// EMO-593: status for one secret by name.
+    /// Status for one secret by name.
     /// Response: `{ "status": SecretStatus | null }`.
     pub(crate) async fn secret_status(
         &self,
@@ -2439,7 +2467,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "status": status }))
     }
 
-    /// EMO-593: create or update a secret via `SqliteSecretStore::set_secret`.
+    /// Create or update a secret via `SqliteSecretStore::set_secret`.
     /// Unix-socket-only (gated in dispatch). Response: `{ "status": SecretStatus }`
     /// with the value redacted; the plaintext value must never be echoed,
     /// logged, or journaled.
@@ -2458,7 +2486,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "status": status }))
     }
 
-    /// EMO-593: delete a secret by name.
+    /// Delete a secret by name.
     /// Response: `{ "deleted": bool }` (false when the name did not exist).
     pub(crate) async fn secret_delete(
         &self,
@@ -2475,7 +2503,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "deleted": deleted }))
     }
 
-    /// EMO-593: resolve plaintext values for the named secrets, for
+    /// Resolve plaintext values for the named secrets, for
     /// `verlet tool run` injection. Unix-socket-only (gated in dispatch).
     /// Response: `{ "values": { name: value }, "missing": [String] }` where
     /// `missing` lists requested names with no stored secret. The values must
@@ -2509,7 +2537,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    /// EMO-593: list declared principals and credentials from the identity
+    /// List declared principals and credentials from the identity
     /// authority. Response:
     /// `{ "principals": [PrincipalRecordV1...], "credentials": [IdentityCredentialV1...] }`.
     /// Credentials carry `token_digest` only; bearer secrets are never stored
@@ -2537,7 +2565,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    /// EMO-593: declare a principal. `declared_by` is the connection's
+    /// Declare a principal. `declared_by` is the connection's
     /// authenticated principal. Response: `{ "principal": PrincipalRecordV1 }`.
     pub(crate) async fn identity_declare(
         &self,
@@ -2558,7 +2586,7 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "principal": principal }))
     }
 
-    /// EMO-593: mint a credential. `minted_by` is the connection's
+    /// Mint a credential. `minted_by` is the connection's
     /// authenticated principal. Unix-socket-only (gated in dispatch) because
     /// the response carries the bearer secret, shown exactly once:
     /// `{ "credential": IdentityCredentialV1, "token": "<bearer secret>" }`.
@@ -2583,7 +2611,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }))
     }
 
-    /// EMO-593: revoke a credential (`credential_id`) or a principal and all
+    /// Revoke a credential (`credential_id`) or a principal and all
     /// its credentials (`principal_id`); exactly one must be set. The revoker
     /// is the connection's authenticated principal.
     /// Response: `{ "revoked": true }`.
@@ -6608,19 +6636,31 @@ where
         .map_err(|err| jsonrpc_error(-32602, format!("invalid params: {err}")))
 }
 
-/// EMO-593: methods whose request or response carries secret material
+fn parse_sensitive_params<T>(
+    params: Option<serde_json::Value>,
+    method: &str,
+) -> Result<T, JsonRpcErrorError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = match params {
+        Some(serde_json::Value::Null) | None => serde_json::json!({}),
+        Some(value) => value,
+    };
+    serde_json::from_value(value)
+        .map_err(|_| jsonrpc_error(-32602, format!("invalid params for {method}")))
+}
+
+/// Methods whose request or response carries secret material
 /// (`secret/set` request values, `secret/resolve` response values, and
 /// `identity/mint` bearer tokens) are only served over the instance unix
-/// socket. Every other boundary surface is refused with an error that names
-/// the unix socket.
+/// socket. In-process dispatch remains non-socket even when its witness uses
+/// the local operator's Unix-socket surface label.
 pub(crate) fn require_unix_socket_surface(
     connection: &ConnectionState,
     method: &str,
 ) -> Result<(), JsonRpcErrorError> {
-    if matches!(
-        connection.boundary_surface,
-        crate::daemon::identity::BoundarySurface::UnixSocket
-    ) {
+    if connection.unix_socket_transport {
         return Ok(());
     }
     Err(jsonrpc_error(

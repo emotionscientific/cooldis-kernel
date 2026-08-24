@@ -2505,13 +2505,11 @@ async fn secret_rpc_handlers_manage_only_redacted_store_records() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        resolved,
-        serde_json::json!({
-            "values": { "RPC_SECRET": plaintext },
-            "missing": ["MISSING_SECRET"],
-        })
+    assert!(
+        resolved["values"]["RPC_SECRET"].as_str() == Some(plaintext.as_str()),
+        "secret/resolve returned the wrong stored value"
     );
+    assert_eq!(resolved["missing"], serde_json::json!(["MISSING_SECRET"]));
 
     let deleted = app
         .dispatch_request(
@@ -2552,6 +2550,7 @@ async fn secret_value_methods_and_identity_mint_require_the_unix_socket_surface(
     ] {
         let mut refused = connection.clone();
         refused.boundary_surface = surface;
+        refused.unix_socket_transport = false;
         for method in ["secret/set", "secret/resolve", "identity/mint"] {
             let error = app
                 .dispatch_request(&refused, method, None)
@@ -2564,6 +2563,86 @@ async fn secret_value_methods_and_identity_mint_require_the_unix_socket_surface(
         }
     }
     app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_process_json_rpc_cannot_impersonate_the_unix_socket_transport() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let plaintext = format!("in-process-secret-{}", uuid::Uuid::now_v7());
+
+    for method in ["secret/set", "secret/resolve", "identity/mint"] {
+        let local_error = app
+            .local_json_rpc_request(method, serde_json::json!(plaintext))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(local_error.contains(method), "{local_error}");
+        assert!(local_error.contains("unix socket"), "{local_error}");
+        assert!(!local_error.contains(&plaintext), "{local_error}");
+
+        let host_error = app
+            .dispatch_authenticated_json_rpc(
+                connection.resolved_principal.clone(),
+                method,
+                serde_json::json!(plaintext),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(host_error.contains(method), "{host_error}");
+        assert!(host_error.contains("unix socket"), "{host_error}");
+        assert!(!host_error.contains(&plaintext), "{host_error}");
+    }
+
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn secret_set_parse_errors_do_not_echo_the_value() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let plaintext = format!("invalid-param-secret-{}", uuid::Uuid::now_v7());
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "secret/set",
+            Some(serde_json::json!(plaintext)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(
+        error.message.contains("invalid params"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains(&plaintext), "{}", error.message);
+
+    app.shutdown().await.unwrap();
+}
+
+#[test]
+fn json_rpc_debug_redacts_value_bearing_payloads() {
+    let plaintext = format!("debug-secret-{}", uuid::Uuid::now_v7());
+    let request = crate::adapters::app_server::connection::JsonRpcRequest {
+        id: crate::adapters::app_server::connection::RequestId::Integer(1),
+        method: "secret/set".to_string(),
+        params: Some(serde_json::json!({ "value": plaintext })),
+        trace: Some(serde_json::json!({ "secret": plaintext })),
+    };
+    let response = crate::adapters::app_server::connection::JsonRpcResponse {
+        id: crate::adapters::app_server::connection::RequestId::Integer(1),
+        result: serde_json::json!({ "token": plaintext }),
+    };
+
+    let request_debug = format!("{request:?}");
+    let response_debug = format!("{response:?}");
+    assert!(!request_debug.contains(&plaintext), "{request_debug}");
+    assert!(!response_debug.contains(&plaintext), "{response_debug}");
+    assert!(request_debug.contains("<redacted>"), "{request_debug}");
+    assert!(response_debug.contains("<redacted>"), "{response_debug}");
 }
 
 #[tokio::test]
@@ -2751,19 +2830,24 @@ async fn identity_revoke_rejects_zero_both_and_unknown_ids_as_invalid_params() {
 }
 
 #[tokio::test]
-async fn non_operator_principals_are_refused_for_every_identity_rpc() {
+async fn non_operator_principals_are_refused_for_every_secret_and_identity_rpc() {
     let app = test_app().await;
     let adapter = crate::daemon::identity::ResolvedPrincipal {
         principal_id: crate::daemon::identity::PrincipalId::new("adapter:unauthorized"),
         kind: crate::daemon::identity::PrincipalKind::Adapter,
         auth: crate::daemon::identity::AuthenticationPath::Credential {
-            credential_id: "credential_unauthorized".to_string(),
+            credential_id: "credential_adapter_unauthorized".to_string(),
         },
     };
     let (connection, _outbound_rx) = test_connection_for_principal(app.clone(), adapter).await;
     initialize_for_test(&connection).await;
 
     for method in [
+        "secret/list",
+        "secret/status",
+        "secret/set",
+        "secret/delete",
+        "secret/resolve",
         "identity/list",
         "identity/declare",
         "identity/mint",
@@ -20390,6 +20474,7 @@ async fn test_connection_for_principal(
             resolved_principal,
             witnessed_session_id,
             boundary_surface: crate::daemon::identity::BoundarySurface::UnixSocket,
+            unix_socket_transport: true,
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::adapters::app_server::connection::HandshakeState::default(),

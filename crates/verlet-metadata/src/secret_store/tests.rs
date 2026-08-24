@@ -44,7 +44,10 @@ async fn sqlite_secret_store_persists_and_redacts_status() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(resolved.value, "fixture-secret");
+    assert!(
+        resolved.value == "fixture-secret",
+        "resolved secret value did not match the stored value"
+    );
 }
 
 #[tokio::test]
@@ -80,13 +83,42 @@ async fn manifest_secret_resolution_reports_missing_refs_without_values() {
         .unwrap();
 
     assert!(!resolution.is_ready());
-    assert_eq!(
-        resolution.values,
-        std::collections::BTreeMap::from([("VISIBLE".to_string(), "fixture-secret".to_string())])
+    assert!(
+        resolution.values.get("VISIBLE").map(String::as_str) == Some("fixture-secret"),
+        "manifest resolution returned the wrong stored value"
     );
     assert_eq!(
         resolution.missing,
         std::collections::BTreeSet::from(["MISSING".to_string()])
+    );
+}
+
+#[test]
+fn resolved_secret_debug_redacts_plaintext_values() {
+    let plaintext = format!("debug-secret-{}", uuid::Uuid::now_v7());
+    let resolved = crate::secret_store::ResolvedSecret {
+        name: "EXAMPLE_API_KEY".to_string(),
+        value: plaintext.clone(),
+        source_kind: crate::secret_store::SecretSourceKind::Local,
+        source_label: None,
+        updated_at_ms: 1,
+    };
+    let resolution = crate::secret_store::ManifestSecretResolution {
+        values: std::collections::BTreeMap::from([(
+            "EXAMPLE_API_KEY".to_string(),
+            plaintext.clone(),
+        )]),
+        missing: std::collections::BTreeSet::new(),
+    };
+
+    let resolved_debug = format!("{resolved:?}");
+    let resolution_debug = format!("{resolution:?}");
+    assert!(!resolved_debug.contains(&plaintext), "{resolved_debug}");
+    assert!(!resolution_debug.contains(&plaintext), "{resolution_debug}");
+    assert!(resolved_debug.contains("<redacted>"), "{resolved_debug}");
+    assert!(
+        resolution_debug.contains("<redacted>"),
+        "{resolution_debug}"
     );
 }
 

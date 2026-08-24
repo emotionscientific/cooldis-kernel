@@ -58,6 +58,31 @@ async fn console_serves_concurrent_auth_tool_source_secret_and_identity_clients(
     assert_success("secret status", &status);
     assert!(!String::from_utf8_lossy(&status.stdout).contains(&secret_value));
 
+    let other_user_state = root.path().join("other-user-state");
+    let other_user_state_arg = other_user_state.to_string_lossy().to_string();
+    let mismatched_state = run_client(
+        &project,
+        &user_home,
+        [
+            "secret",
+            "list",
+            "--state-home",
+            other_user_state_arg.as_str(),
+        ],
+    )
+    .await;
+    assert!(!mismatched_state.status.success());
+    let mismatched_state_error = String::from_utf8(mismatched_state.stderr).unwrap();
+    assert!(
+        mismatched_state_error.contains(&format!("pid {}", endpoint.pid)),
+        "{mismatched_state_error}"
+    );
+    assert!(
+        mismatched_state_error.contains(&endpoint.unix_socket.display().to_string()),
+        "{mismatched_state_error}"
+    );
+    assert!(!other_user_state.join("endpoint.json").exists());
+
     let declared = run_client(
         &project,
         &user_home,

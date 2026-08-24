@@ -542,7 +542,7 @@ where
             .map_err(|err| tui_error(format!("invalid modelProvider/auth/delete response: {err}")))
     }
 
-    // EMO-593: secret/* helpers. `secret_set` only works over the unix
+    // `secret_set` only works over the Unix
     // socket transport; the server refuses it on any other surface.
 
     pub async fn secret_list(
@@ -597,7 +597,7 @@ where
             .await
     }
 
-    // EMO-593: identity/* helpers. The acting principal is the connection's
+    // The acting identity principal is the connection's
     // authenticated principal; there are no declared-by/minted-by inputs.
     // `identity_mint` only works over the unix socket transport because the
     // response carries the bearer secret.

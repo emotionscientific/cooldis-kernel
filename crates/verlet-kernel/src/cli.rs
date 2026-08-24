@@ -470,21 +470,22 @@ pub(crate) async fn connect_instance(
             }
         }
 
-        if !discovery_roots
-            .iter()
-            .any(|root| root == &target.user_state_root)
-            && let Some(endpoint) = crate::adapters::app_server::instance::resolve_instance_endpoint(
-                &target.user_state_root,
-            )
-            && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok()
-        {
-            return Err(usage_error(format!(
-                "could not start a server for {}: user state root {} is owned by pid {}, socket {}; stop that process first",
-                target.state_root.display(),
-                target.user_state_root.display(),
-                endpoint.pid,
-                endpoint.unix_socket.display()
-            )));
+        for root in [&target.state_root, &target.user_state_root] {
+            if discovery_roots.iter().any(|candidate| candidate == root) {
+                continue;
+            }
+            if let Some(endpoint) =
+                crate::adapters::app_server::instance::resolve_instance_endpoint(root)
+                && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok()
+            {
+                return Err(usage_error(format!(
+                    "could not start a server for {}: instance root {} is owned by pid {}, socket {}; stop that process first",
+                    target.state_root.display(),
+                    root.display(),
+                    endpoint.pid,
+                    endpoint.unix_socket.display()
+                )));
+            }
         }
 
         spawn_instance_server(&target).map_err(|error| {
