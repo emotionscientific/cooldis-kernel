@@ -7,6 +7,7 @@ description = "Glob file finder (model-facing `glob`, attachable as `find`)"
 
 [dependencies]
 verlet-tool-core = { path = "../tool-core" }
+globset = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -18,3 +19,7 @@ cli = ["verlet-tool-core/std-fs"]
 name = "tool-glob"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+verlet-tool-core = { path = "../tool-core", features = ["std-fs"] }

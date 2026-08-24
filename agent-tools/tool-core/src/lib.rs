@@ -71,6 +71,151 @@ pub enum ToolError {
     ResultTooLarge,
 }
 
+/// One file discovered by [`walk_files`].
+///
+/// `path` is the path to pass back to [`ToolFs`]. `relative_path` is the
+/// deterministic, `/`-separated path exposed by model-facing tools.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkFile {
+    pub path: std::path::PathBuf,
+    pub relative_path: String,
+}
+
+/// Walk a file or directory using only [`ToolFs`].
+///
+/// Directory walks include hidden files, skip every `.git` directory, apply
+/// root `.git/info/exclude` plus nested `.gitignore` files, prune ignored
+/// directories, and return files sorted by root-relative path.
+pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFile>, ToolError> {
+    let stat = fs.stat(root)?;
+    if stat.is_file {
+        let relative_path = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| root.to_string_lossy().into_owned());
+        return Ok(vec![WalkFile {
+            path: root.to_path_buf(),
+            relative_path,
+        }]);
+    }
+    if !stat.is_dir {
+        return Err(ToolError::Failed(format!(
+            "path {} is not a file or directory",
+            root.display()
+        )));
+    }
+
+    let mut ignore_matchers = Vec::new();
+    add_ignore_file(
+        fs,
+        root,
+        &root.join(".git/info/exclude"),
+        &mut ignore_matchers,
+    )?;
+    add_ignore_file(fs, root, &root.join(".gitignore"), &mut ignore_matchers)?;
+
+    let mut files = Vec::new();
+    walk_directory(
+        fs,
+        root,
+        std::path::Path::new(""),
+        &mut ignore_matchers,
+        &mut files,
+    )?;
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(files)
+}
+
+fn walk_directory(
+    fs: &dyn ToolFs,
+    directory: &std::path::Path,
+    relative_directory: &std::path::Path,
+    ignore_matchers: &mut Vec<ignore::gitignore::Gitignore>,
+    files: &mut Vec<WalkFile>,
+) -> Result<(), ToolError> {
+    let mut entries = fs.read_dir(directory)?;
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+    for entry in entries {
+        let path = directory.join(&entry.name);
+        let relative = relative_directory.join(&entry.name);
+        if entry.is_dir {
+            if entry.name == ".git" || is_ignored(ignore_matchers, &path, true) {
+                continue;
+            }
+
+            let matcher_count = ignore_matchers.len();
+            add_ignore_file(fs, &path, &path.join(".gitignore"), ignore_matchers)?;
+            walk_directory(fs, &path, &relative, ignore_matchers, files)?;
+            ignore_matchers.truncate(matcher_count);
+        } else if !is_ignored(ignore_matchers, &path, false) {
+            let stat = fs.stat(&path)?;
+            if stat.is_file {
+                files.push(WalkFile {
+                    path,
+                    relative_path: relative_path_string(&relative),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn add_ignore_file(
+    fs: &dyn ToolFs,
+    match_root: &std::path::Path,
+    ignore_path: &std::path::Path,
+    ignore_matchers: &mut Vec<ignore::gitignore::Gitignore>,
+) -> Result<(), ToolError> {
+    if !fs.exists(ignore_path)? {
+        return Ok(());
+    }
+
+    let bytes = fs.read_file(ignore_path)?;
+    let content = String::from_utf8_lossy(&bytes);
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(match_root);
+    for (index, line) in content.lines().enumerate() {
+        let line = if index == 0 {
+            line.trim_start_matches('\u{feff}')
+        } else {
+            line
+        };
+        let _ = builder.add_line(Some(ignore_path.to_path_buf()), line);
+    }
+    let matcher = builder
+        .build()
+        .map_err(|error| ToolError::Failed(format!("failed to parse ignore rules: {error}")))?;
+    ignore_matchers.push(matcher);
+    Ok(())
+}
+
+fn is_ignored(
+    ignore_matchers: &[ignore::gitignore::Gitignore],
+    path: &std::path::Path,
+    is_dir: bool,
+) -> bool {
+    let mut ignored = false;
+    for matcher in ignore_matchers {
+        match matcher.matched(path, is_dir) {
+            ignore::Match::None => {}
+            ignore::Match::Ignore(_) => ignored = true,
+            ignore::Match::Whitelist(_) => ignored = false,
+        }
+    }
+    ignored
+}
+
+fn relative_path_string(path: &std::path::Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// How a tool call composes with retries and replay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectClass {

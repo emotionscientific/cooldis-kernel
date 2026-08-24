@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "Shared trait and contract types for the standalone agent file tools"
 
 [dependencies]
+ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
