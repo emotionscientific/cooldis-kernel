@@ -243,19 +243,24 @@ verlet identity bootstrap operator:orch \
   --display "Orch operator" \
   --state-home /data/instances/orch/state
 
+# In a provisioning terminal:
+verlet serve \
+  --state-home /data/instances/orch/state \
+  --user-state-home /data/instances/orch/user-state
+
+# From another local terminal:
 verlet identity declare adapter:gateway \
   --kind adapter \
   --display "Gateway adapter" \
-  --declared-by operator:orch \
   --state-home /data/instances/orch/state
 
 verlet identity mint adapter:gateway \
-  --minted-by operator:orch \
   --state-home /data/instances/orch/state
 # stdout includes both:
 # token <store-this-client-side>
 # token_digest=sha256:<put-this-in-route_digests>
 
+# After shutting down the provisioning server:
 verlet host run --config /etc/verlet/host.toml
 ```
 
@@ -269,9 +274,10 @@ shutdown fails.
 
 ### Bootstrap and credentials
 
-Identity commands still edit the offline session store in this slice, so stop
-the server first and pass the same state home configured at
-`[daemon.runtime].state_home`:
+Only `identity bootstrap` edits the offline session store. Stop the server
+before bootstrap and pass the same state home configured at
+`[daemon.runtime].state_home`. After bootstrap, start the server; declare,
+mint, revoke, and list run through its authenticated operator connection:
 
 ```toml
 [daemon.identity]
@@ -291,18 +297,23 @@ verlet identity bootstrap operator:root \
   --display "Root operator" \
   --state-home /var/lib/verlet/state
 
+verlet daemon config validate --config verlet.toml
+verlet serve --config verlet.toml
+```
+
+In another terminal, set the bootstrap token for managed mode and use the
+client commands:
+
+```sh
+export VERLET_APP_SERVER_TOKEN="<bootstrap token>"
+
 verlet identity declare adapter:gateway \
   --kind adapter \
   --display "Gateway adapter" \
-  --declared-by operator:root \
   --state-home /var/lib/verlet/state
 
 verlet identity mint adapter:gateway \
-  --minted-by operator:root \
   --state-home /var/lib/verlet/state
-
-verlet daemon config validate --config verlet.toml
-verlet serve --config verlet.toml
 ```
 
 `bootstrap` declares the first operator and mints its credential atomically.
@@ -310,8 +321,9 @@ verlet serve --config verlet.toml
 `token_digest=sha256:<hex>`; only the digest is stored. Capture the operator and
 adapter tokens in the deployment's secret store. `identity list`
 shows redacted records, and `revoke-credential` / `revoke-principal` retire
-them. Revocation takes effect at the next connection; live sessions are not
-torn down.
+them. The acting declarer, minter, or revoker is always the authenticated
+operator; actor flags are not accepted. Revocation takes effect at the next
+connection; live sessions are not torn down.
 
 Verlet-owned daemon clients read the bearer token from the environment. For
 example, an operator can connect the debug client with:
@@ -354,8 +366,8 @@ dispatcher against the principal's kind:
 - `Host`: methods that execute commands, access the filesystem, touch provider
   or secret configuration, or construct/reconstruct runtime bindings
   (`command/*`, `fs/*`, the stateful `modelProvider/*` methods,
-  `mcpSource/*`, `thread/start`, `thread/resume`, `approval/resolve`, ...).
-  Operator-only.
+  `secret/*`, `identity/*`, `mcpSource/*`, `thread/start`, `thread/resume`,
+  `approval/resolve`, ...). Operator-only.
 - `Interactive`: reads and conversational control on existing threads
   (`thread/read`, `thread/list`, `stream/read`, `turn/steer`, `model/select`,
   `mandate/*`, ...).
@@ -416,9 +428,12 @@ max_tokens = 4096
 Keep real secrets in the environment or in the provider credential store.
 `verlet auth` writes credentials through `modelProvider/auth/*` on the running
 instance, so it can run while `serve` or `console` owns the metadata stores.
-`verlet tool source` uses `mcpSource/*` for the same reason. `verlet chat`
-connects through the shared client preamble. None of these commands requires
-stopping the server or opening a second app-server.
+`verlet secret` uses `secret/*`, non-bootstrap `verlet identity` uses
+`identity/*`, and `verlet tool source` uses `mcpSource/*` for the same reason.
+Published `verlet tool run` invocations resolve declared secrets with the
+Unix-only `secret/resolve` method before local Wasm execution. `verlet chat`
+connects through the shared client preamble. None of these client paths opens a
+store beside the owning server.
 
 The app-server opens project metadata at `state_home/metadata.sqlite3` and user
 metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
@@ -856,6 +871,83 @@ before endpoint construction: reviewed provider endpoints are re-pinned, and
 refresh-only provider records are retired. Their separately stored credentials
 are preserved so an operator can recover them through an explicit custom
 provider configuration.
+
+### `secret/list`
+
+Params: none.
+
+Result: `{ "data": [SecretStatus...], "nextCursor": null }`. Each status
+contains `name`, `source_kind`, optional `source_label`, timestamps, and
+`value: { "redacted": true }`. Plaintext values are never listed.
+
+### `secret/status`
+
+Params: `{ "name": "SEARCH_API_KEY" }`.
+
+Result: `{ "status": SecretStatus | null }`, with the same redacted shape as
+`secret/list`.
+
+### `secret/set`
+
+Params: `{ "name": "SEARCH_API_KEY", "value": "...", "source": "env" |
+"stdin" | "local", "sourceName": "SEARCH_API_KEY" | null }`.
+
+Result: `{ "status": SecretStatus }`, redacted. The request is accepted only
+over the instance Unix socket; WebSocket, console, and host-facade surfaces are
+refused with `-32003`. The value is stored but never echoed, logged, or written
+to the host-effect witness.
+
+### `secret/delete`
+
+Params: `{ "name": "SEARCH_API_KEY" }`.
+
+Result: `{ "deleted": true | false }`.
+
+### `secret/resolve`
+
+Params: `{ "names": ["SEARCH_API_KEY", "OPTIONAL_KEY"] }`.
+
+Result: `{ "values": { "SEARCH_API_KEY": "..." }, "missing":
+["OPTIONAL_KEY"] }`. Requested names without a stored value are reported in
+`missing`, not as an RPC error. This method exists for local `verlet tool run`
+secret injection and is accepted only over the instance Unix socket. Plaintext
+values never appear in logs, errors, or witnessed events.
+
+### `identity/list`
+
+Params: none.
+
+Result: `{ "principals": [PrincipalRecordV1...], "credentials":
+[IdentityCredentialV1...] }`. Credential records contain a token digest, never
+the bearer token.
+
+### `identity/declare`
+
+Params: `{ "principalId": "adapter:gateway", "kind": "adapter", "display":
+"Gateway adapter" }`.
+
+Result: `{ "principal": PrincipalRecordV1 }`. `declared_by` is always the
+authenticated operator principal; it is not accepted as a parameter.
+
+### `identity/mint`
+
+Params: `{ "principalId": "adapter:gateway", "expiresAtMs": null }`.
+
+Result: `{ "credential": IdentityCredentialV1, "token": "<bearer>" }`. The
+authenticated operator is recorded as `minted_by`. The method is Unix-socket
+only because the bearer token is returned exactly once.
+
+### `identity/revoke`
+
+Params: exactly one of `{ "credentialId": "credential_..." }` or
+`{ "principalId": "adapter:gateway" }`.
+
+Result: `{ "revoked": true }`. Zero selectors, both selectors, and unknown
+identifiers fail with `-32602`. The authenticated operator is the revoker.
+
+All `secret/*` and `identity/*` methods require Host authority and are recorded
+in `HOST_EFFECT_METHODS`. Their witness rows contain the method name and acting
+principal, never request parameters, secret values, or minted tokens.
 
 ### `mcpSource/list`
 

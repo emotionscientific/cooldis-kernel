@@ -7,6 +7,7 @@ use verlet_history::EventStore as _;
 use verlet_metadata::provider_store::LlmProviderAuthStore as _;
 use verlet_metadata::provider_store::LlmProviderCatalogStore as _;
 use verlet_metadata::provider_store::ThreadMetadataStore as _;
+use verlet_metadata::secret_store::SecretResolver as _;
 
 #[derive(Clone)]
 pub(crate) struct ConnectionState {
@@ -14,6 +15,7 @@ pub(crate) struct ConnectionState {
     pub(crate) resolved_principal: crate::daemon::identity::ResolvedPrincipal,
     pub(crate) witnessed_session_id: String,
     pub(crate) boundary_surface: crate::daemon::identity::BoundarySurface,
+    pub(crate) unix_socket_transport: bool,
     pub(crate) outbound: tokio::sync::mpsc::UnboundedSender<JsonRpcMessage>,
     pub(crate) handshake: std::sync::Arc<tokio::sync::Mutex<HandshakeState>>,
     pub(crate) opt_out_notifications:
@@ -57,7 +59,7 @@ pub enum JsonRpcMessage {
     Error(JsonRpcError),
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcRequest {
     pub id: RequestId,
     pub method: String,
@@ -67,17 +69,46 @@ pub struct JsonRpcRequest {
     pub trace: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for JsonRpcRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcRequest")
+            .field("id", &self.id)
+            .field("method", &self.method)
+            .field("params", &self.params.as_ref().map(|_| "<redacted>"))
+            .field("trace", &self.trace.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcNotification {
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+impl std::fmt::Debug for JsonRpcNotification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcNotification")
+            .field("method", &self.method)
+            .field("params", &self.params.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonRpcResponse {
     pub id: RequestId,
     pub result: serde_json::Value,
+}
+
+impl std::fmt::Debug for JsonRpcResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonRpcResponse")
+            .field("id", &self.id)
+            .field("result", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -344,6 +375,69 @@ pub(crate) struct ModelProviderAuthSetOAuthParams {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelProviderAuthDeleteParams {
     pub(crate) provider_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretStatusParams {
+    pub(crate) name: String,
+}
+
+/// Params for `secret/set`. `source` records how the client obtained the
+/// value (`env`, `stdin`, `local`); `source_name` is the env-var name when
+/// `source` is `env` (the CLI reads the variable locally, the server never
+/// sees the client environment).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSetParams {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) source: verlet_metadata::secret_store::SecretSourceKind,
+    #[serde(default)]
+    pub(crate) source_name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretDeleteParams {
+    pub(crate) name: String,
+}
+
+/// Params for `secret/resolve` (unix-socket-only): the plaintext values for
+/// the named secrets, for `verlet tool run` injection. Mirrors the store's
+/// `resolve_manifest_secrets`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretResolveParams {
+    pub(crate) names: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityDeclareParams {
+    pub(crate) principal_id: String,
+    pub(crate) kind: crate::daemon::identity::PrincipalKind,
+    pub(crate) display: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityMintParams {
+    pub(crate) principal_id: String,
+    #[serde(default)]
+    pub(crate) expires_at_ms: Option<i64>,
+}
+
+/// Params for `identity/revoke`. Exactly one of `credential_id` (revoke a
+/// credential) or `principal_id` (revoke a principal and all its
+/// credentials) must be set; the handler rejects zero or both.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityRevokeParams {
+    #[serde(default)]
+    pub(crate) credential_id: Option<String>,
+    #[serde(default)]
+    pub(crate) principal_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -895,6 +989,36 @@ pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         "modelProvider/catalog",
         crate::daemon::identity::AuthorityClass::Host,
     ),
+    ("secret/list", crate::daemon::identity::AuthorityClass::Host),
+    (
+        "secret/status",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    ("secret/set", crate::daemon::identity::AuthorityClass::Host),
+    (
+        "secret/delete",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "secret/resolve",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/list",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/declare",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/mint",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/revoke",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
     (
         "experimentalFeature/list",
         crate::daemon::identity::AuthorityClass::Interactive,
@@ -1133,6 +1257,18 @@ pub(crate) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
     "modelProvider/catalog",
+    // Secret store projections and mutations. Same treatment as
+    // modelProvider/*: reads of secret-adjacent state are witnessed too.
+    "secret/list",
+    "secret/status",
+    "secret/set",
+    "secret/delete",
+    "secret/resolve",
+    // Identity authority operations: witnessed operator events.
+    "identity/list",
+    "identity/declare",
+    "identity/mint",
+    "identity/revoke",
     // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
     "thread/spawn",
@@ -1225,6 +1361,7 @@ impl crate::adapters::app_server::VerletAppServer {
             resolved_principal,
             witnessed_session_id: session_id,
             boundary_surface: surface,
+            unix_socket_transport: false,
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(HandshakeState::default())),
             opt_out_notifications: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -1338,6 +1475,10 @@ impl crate::adapters::app_server::VerletAppServer {
             resolved_principal,
             witnessed_session_id: session_id,
             boundary_surface: surface,
+            unix_socket_transport: matches!(
+                surface,
+                crate::daemon::identity::BoundarySurface::UnixSocket
+            ),
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(HandshakeState::default())),
             opt_out_notifications: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -1609,6 +1750,39 @@ impl crate::adapters::app_server::VerletAppServer {
                 self.model_provider_auth_delete(params).await
             }
             "modelProvider/catalog" => self.model_provider_catalog().await,
+            "secret/list" => self.secret_list().await,
+            "secret/status" => {
+                let params: SecretStatusParams = parse_params(params)?;
+                self.secret_status(params).await
+            }
+            "secret/set" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: SecretSetParams = parse_sensitive_params(params, method)?;
+                self.secret_set(params).await
+            }
+            "secret/delete" => {
+                let params: SecretDeleteParams = parse_params(params)?;
+                self.secret_delete(params).await
+            }
+            "secret/resolve" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: SecretResolveParams = parse_params(params)?;
+                self.secret_resolve(params).await
+            }
+            "identity/list" => self.identity_list().await,
+            "identity/declare" => {
+                let params: IdentityDeclareParams = parse_params(params)?;
+                self.identity_declare(connection, params).await
+            }
+            "identity/mint" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: IdentityMintParams = parse_params(params)?;
+                self.identity_mint(connection, params).await
+            }
+            "identity/revoke" => {
+                let params: IdentityRevokeParams = parse_params(params)?;
+                self.identity_revoke(connection, params).await
+            }
             "experimentalFeature/list" => Ok(serde_json::json!({ "data": [], "nextCursor": null })),
             "experimentalFeature/enablement/set" => {
                 let params: ExperimentalFeatureEnablementSetParams = parse_params(params)?;
@@ -1941,7 +2115,7 @@ impl crate::adapters::app_server::VerletAppServer {
             let secret_name = params
                 .bearer_secret
                 .unwrap_or_else(|| format!("mcp.{}.bearer", config.name));
-            self.mcp_secret_store()
+            self.user_secret_store()
                 .await?
                 .set_secret(
                     &secret_name,
@@ -1994,7 +2168,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(std::sync::Arc::new(self.mcp_secret_store().await?)),
+            Some(std::sync::Arc::new(self.user_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -2031,7 +2205,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .ok_or_else(|| mcp_source_not_found(&params.name))?;
         let provider = crate::adapters::mcp_client::McpRemoteToolProvider::connect(
             record.to_config(),
-            Some(std::sync::Arc::new(self.mcp_secret_store().await?)),
+            Some(std::sync::Arc::new(self.user_secret_store().await?)),
         )
         .await
         .map_err(internal_error)?;
@@ -2169,7 +2343,7 @@ impl crate::adapters::app_server::VerletAppServer {
         .map_err(internal_error)
     }
 
-    async fn mcp_secret_store(
+    async fn user_secret_store(
         &self,
     ) -> Result<verlet_metadata::secret_store::SqliteSecretStore, JsonRpcErrorError> {
         verlet_metadata::secret_store::SqliteSecretStore::open(&self.inner.user_metadata_store_path)
@@ -2259,6 +2433,220 @@ impl crate::adapters::app_server::VerletAppServer {
             .registry_root
             .clone()
             .unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
+    }
+
+    /// List secret statuses from the user secret store.
+    /// Response: `{ "data": [SecretStatus...], "nextCursor": null }`; the
+    /// serialized `SecretStatus.value` is always redacted.
+    pub(crate) async fn secret_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let data = self
+            .user_secret_store()
+            .await?
+            .list()
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "data": data, "nextCursor": null }))
+    }
+
+    /// Status for one secret by name.
+    /// Response: `{ "status": SecretStatus | null }`.
+    pub(crate) async fn secret_status(
+        &self,
+        params: SecretStatusParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let status = self
+            .user_secret_store()
+            .await?
+            .status(params.name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "status": status }))
+    }
+
+    /// Create or update a secret via `SqliteSecretStore::set_secret`.
+    /// Unix-socket-only (gated in dispatch). Response: `{ "status": SecretStatus }`
+    /// with the value redacted; the plaintext value must never be echoed,
+    /// logged, or journaled.
+    pub(crate) async fn secret_set(
+        &self,
+        params: SecretSetParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let status = self
+            .user_secret_store()
+            .await?
+            .set_secret(params.name, params.value, params.source, params.source_name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "status": status }))
+    }
+
+    /// Delete a secret by name.
+    /// Response: `{ "deleted": bool }` (false when the name did not exist).
+    pub(crate) async fn secret_delete(
+        &self,
+        params: SecretDeleteParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let deleted = self
+            .user_secret_store()
+            .await?
+            .delete_secret(params.name)
+            .await
+            .map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })?;
+        Ok(serde_json::json!({ "deleted": deleted }))
+    }
+
+    /// Resolve plaintext values for the named secrets, for
+    /// `verlet tool run` injection. Unix-socket-only (gated in dispatch).
+    /// Response: `{ "values": { name: value }, "missing": [String] }` where
+    /// `missing` lists requested names with no stored secret. The values must
+    /// never appear in logs, errors, or witnessed events.
+    pub(crate) async fn secret_resolve(
+        &self,
+        params: SecretResolveParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let store = self.user_secret_store().await?;
+        let mut values = std::collections::BTreeMap::new();
+        let mut missing = std::collections::BTreeSet::new();
+        for name in params.names {
+            let name =
+                verlet_metadata::secret_store::validate_secret_name(&name).map_err(|error| {
+                    internal_error(crate::adapters::app_server::secret_store_error(error))
+                })?;
+            match store.resolve_secret(&name).await.map_err(|error| {
+                internal_error(crate::adapters::app_server::secret_store_error(error))
+            })? {
+                Some(secret) => {
+                    values.insert(secret.name, secret.value);
+                }
+                None => {
+                    missing.insert(name);
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "values": values,
+            "missing": missing,
+        }))
+    }
+
+    /// List declared principals and credentials from the identity
+    /// authority. Response:
+    /// `{ "principals": [PrincipalRecordV1...], "credentials": [IdentityCredentialV1...] }`.
+    /// Credentials carry `token_digest` only; bearer secrets are never stored
+    /// and never listed.
+    pub(crate) async fn identity_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let principals = self
+            .inner
+            .identity_authority
+            .list_principals()
+            .await
+            .map_err(internal_error)?;
+        let mut credentials = Vec::new();
+        for principal in &principals {
+            credentials.extend(
+                self.inner
+                    .identity_authority
+                    .list_credentials(&principal.principal_id)
+                    .await
+                    .map_err(internal_error)?,
+            );
+        }
+        Ok(serde_json::json!({
+            "principals": principals,
+            "credentials": credentials,
+        }))
+    }
+
+    /// Declare a principal. `declared_by` is the connection's
+    /// authenticated principal. Response: `{ "principal": PrincipalRecordV1 }`.
+    pub(crate) async fn identity_declare(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityDeclareParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let principal = self
+            .inner
+            .identity_authority
+            .declare_principal(
+                &connection.resolved_principal.principal_id,
+                &crate::daemon::identity::PrincipalId::new(params.principal_id),
+                params.kind,
+                &params.display,
+            )
+            .await
+            .map_err(identity_operation_error)?;
+        Ok(serde_json::json!({ "principal": principal }))
+    }
+
+    /// Mint a credential. `minted_by` is the connection's
+    /// authenticated principal. Unix-socket-only (gated in dispatch) because
+    /// the response carries the bearer secret, shown exactly once:
+    /// `{ "credential": IdentityCredentialV1, "token": "<bearer secret>" }`.
+    pub(crate) async fn identity_mint(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityMintParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let (credential, token) = self
+            .inner
+            .identity_authority
+            .mint_credential(
+                &connection.resolved_principal.principal_id,
+                &crate::daemon::identity::PrincipalId::new(params.principal_id),
+                params.expires_at_ms,
+            )
+            .await
+            .map_err(identity_operation_error)?;
+        Ok(serde_json::json!({
+            "credential": credential,
+            "token": token,
+        }))
+    }
+
+    /// Revoke a credential (`credential_id`) or a principal and all
+    /// its credentials (`principal_id`); exactly one must be set. The revoker
+    /// is the connection's authenticated principal.
+    /// Response: `{ "revoked": true }`.
+    pub(crate) async fn identity_revoke(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityRevokeParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        match (
+            params.credential_id.as_deref(),
+            params.principal_id.as_deref(),
+        ) {
+            (Some(credential_id), None) => self
+                .inner
+                .identity_authority
+                .revoke_credential(&connection.resolved_principal.principal_id, credential_id)
+                .await
+                .map_err(identity_operation_error)?,
+            (None, Some(principal_id)) => self
+                .inner
+                .identity_authority
+                .revoke_principal(
+                    &connection.resolved_principal.principal_id,
+                    &crate::daemon::identity::PrincipalId::new(principal_id),
+                )
+                .await
+                .map_err(identity_operation_error)?,
+            (None, None) | (Some(_), Some(_)) => {
+                return Err(jsonrpc_error(
+                    -32602,
+                    "identity/revoke requires exactly one of credentialId or principalId",
+                ));
+            }
+        }
+        Ok(serde_json::json!({ "revoked": true }))
     }
 
     pub(crate) async fn model_provider_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6248,6 +6636,39 @@ where
         .map_err(|err| jsonrpc_error(-32602, format!("invalid params: {err}")))
 }
 
+fn parse_sensitive_params<T>(
+    params: Option<serde_json::Value>,
+    method: &str,
+) -> Result<T, JsonRpcErrorError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = match params {
+        Some(serde_json::Value::Null) | None => serde_json::json!({}),
+        Some(value) => value,
+    };
+    serde_json::from_value(value)
+        .map_err(|_| jsonrpc_error(-32602, format!("invalid params for {method}")))
+}
+
+/// Methods whose request or response carries secret material
+/// (`secret/set` request values, `secret/resolve` response values, and
+/// `identity/mint` bearer tokens) are only served over the instance unix
+/// socket. In-process dispatch remains non-socket even when its witness uses
+/// the local operator's Unix-socket surface label.
+pub(crate) fn require_unix_socket_surface(
+    connection: &ConnectionState,
+    method: &str,
+) -> Result<(), JsonRpcErrorError> {
+    if connection.unix_socket_transport {
+        return Ok(());
+    }
+    Err(jsonrpc_error(
+        METHOD_NOT_AUTHORIZED_CODE,
+        format!("{method} carries secret values and is only served over the instance unix socket"),
+    ))
+}
+
 pub(crate) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErrorError {
     JsonRpcErrorError {
         code,
@@ -6258,6 +6679,10 @@ pub(crate) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErr
 
 pub(crate) fn internal_error(err: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
     jsonrpc_error(-32000, err.to_string())
+}
+
+fn identity_operation_error(error: crate::kernel::runtime_host::VerletError) -> JsonRpcErrorError {
+    jsonrpc_error(-32602, error.to_string())
 }
 
 pub(crate) fn json_codec_error(err: serde_json::Error) -> JsonRpcErrorError {

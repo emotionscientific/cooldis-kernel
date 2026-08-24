@@ -55,11 +55,17 @@ verlet secret status EXAMPLE_API_KEY
 verlet secret delete EXAMPLE_API_KEY
 ```
 
+These commands are clients of the owning Verlet instance. Environment import
+reads the variable in the client process and sends the value over the local
+Unix socket; list and status return redacted metadata. The instance witnesses
+the method name and acting operator, never the value.
+
 When a published operation declares `secret:<name>` in its required
 capabilities, `verlet tool run <published-name> <operation>` and manifest-backed
-runtime catalog mounts check the local secret store before loading or invoking
-the runtime artifact. Missing secret refs fail with the ref name and an
-import/set hint. Raw values are never printed.
+runtime catalog mounts resolve the names through the owning instance before
+loading or invoking the runtime artifact. CLI resolution is Unix-socket-only.
+Missing secret refs fail with the ref name and an import/set hint. Raw values
+are never printed.
 
 Remote runtimes can use the same secret reference shape without relying on the
 remote process environment.

@@ -542,6 +542,121 @@ where
             .map_err(|err| tui_error(format!("invalid modelProvider/auth/delete response: {err}")))
     }
 
+    // `secret_set` only works over the Unix
+    // socket transport; the server refuses it on any other surface.
+
+    pub async fn secret_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("secret/list", serde_json::json!({})).await
+    }
+
+    pub async fn secret_status(
+        &mut self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("secret/status", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    pub async fn secret_set(
+        &mut self,
+        name: &str,
+        value: &str,
+        source: verlet_metadata::secret_store::SecretSourceKind,
+        source_name: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "secret/set",
+            serde_json::json!({
+                "name": name,
+                "value": value,
+                "source": source,
+                "sourceName": source_name,
+            }),
+        )
+        .await
+    }
+
+    pub async fn secret_delete(
+        &mut self,
+        name: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("secret/delete", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    /// Resolve plaintext values for named secrets (`verlet tool run`
+    /// injection). Unix-socket-only; the server refuses it on any other
+    /// surface. Response: `{ "values": { name: value }, "missing": [names] }`.
+    pub async fn secret_resolve(
+        &mut self,
+        names: &[String],
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("secret/resolve", serde_json::json!({ "names": names }))
+            .await
+    }
+
+    // The acting identity principal is the connection's
+    // authenticated principal; there are no declared-by/minted-by inputs.
+    // `identity_mint` only works over the unix socket transport because the
+    // response carries the bearer secret.
+
+    pub async fn identity_list(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request("identity/list", serde_json::json!({})).await
+    }
+
+    pub async fn identity_declare(
+        &mut self,
+        principal_id: &str,
+        kind: crate::daemon::identity::PrincipalKind,
+        display: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "identity/declare",
+            serde_json::json!({
+                "principalId": principal_id,
+                "kind": kind,
+                "display": display,
+            }),
+        )
+        .await
+    }
+
+    pub async fn identity_mint(
+        &mut self,
+        principal_id: &str,
+        expires_at_ms: Option<i64>,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "identity/mint",
+            serde_json::json!({
+                "principalId": principal_id,
+                "expiresAtMs": expires_at_ms,
+            }),
+        )
+        .await
+    }
+
+    /// Revoke a credential (`credential_id`) or a principal (`principal_id`);
+    /// pass exactly one.
+    pub async fn identity_revoke(
+        &mut self,
+        credential_id: Option<&str>,
+        principal_id: Option<&str>,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        self.request(
+            "identity/revoke",
+            serde_json::json!({
+                "credentialId": credential_id,
+                "principalId": principal_id,
+            }),
+        )
+        .await
+    }
+
     pub async fn mcp_source_list(
         &mut self,
     ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {

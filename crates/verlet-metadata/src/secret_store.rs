@@ -59,7 +59,7 @@ pub struct RedactedSecretValue {
     pub redacted: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolvedSecret {
     pub name: String,
     pub value: String,
@@ -68,10 +68,31 @@ pub struct ResolvedSecret {
     pub updated_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+impl std::fmt::Debug for ResolvedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSecret")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("source_kind", &self.source_kind)
+            .field("source_label", &self.source_label)
+            .field("updated_at_ms", &self.updated_at_ms)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ManifestSecretResolution {
     pub values: std::collections::BTreeMap<String, String>,
     pub missing: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Debug for ManifestSecretResolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManifestSecretResolution")
+            .field("values", &"<redacted>")
+            .field("missing", &self.missing)
+            .finish()
+    }
 }
 
 impl ManifestSecretResolution {

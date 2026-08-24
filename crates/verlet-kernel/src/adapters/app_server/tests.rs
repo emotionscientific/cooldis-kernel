@@ -153,6 +153,36 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             "modelProvider/catalog",
             crate::daemon::identity::AuthorityClass::Host,
         ),
+        ("secret/list", crate::daemon::identity::AuthorityClass::Host),
+        (
+            "secret/status",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        ("secret/set", crate::daemon::identity::AuthorityClass::Host),
+        (
+            "secret/delete",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "secret/resolve",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "identity/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "identity/declare",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "identity/mint",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
+            "identity/revoke",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
         (
             "experimentalFeature/list",
             crate::daemon::identity::AuthorityClass::Interactive,
@@ -2399,6 +2429,441 @@ async fn model_provider_auth_set_oauth_rejects_empty_tokens_before_mutation_lock
         assert_eq!(error.code, -32602);
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn secret_rpc_handlers_manage_only_redacted_store_records() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let listed = app
+        .dispatch_request(&connection, "secret/list", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed,
+        serde_json::json!({ "data": [], "nextCursor": null })
+    );
+    let missing = app
+        .dispatch_request(
+            &connection,
+            "secret/status",
+            Some(serde_json::json!({ "name": "RPC_SECRET" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing, serde_json::json!({ "status": null }));
+
+    let plaintext = format!("fixture-secret-{}", uuid::Uuid::now_v7());
+    let stored = app
+        .dispatch_request(
+            &connection,
+            "secret/set",
+            Some(serde_json::json!({
+                "name": "RPC_SECRET",
+                "value": plaintext,
+                "source": "env",
+                "sourceName": "RPC_SECRET_ENV",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored["status"]["name"], "RPC_SECRET");
+    assert_eq!(stored["status"]["source_kind"], "env");
+    assert_eq!(stored["status"]["source_label"], "RPC_SECRET_ENV");
+    assert_eq!(stored["status"]["value"]["redacted"], true);
+    assert!(!stored.to_string().contains(&plaintext));
+
+    let status = app
+        .dispatch_request(
+            &connection,
+            "secret/status",
+            Some(serde_json::json!({ "name": "RPC_SECRET" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status["status"], stored["status"]);
+    let listed = app
+        .dispatch_request(&connection, "secret/list", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["data"],
+        serde_json::json!([stored["status"].clone()])
+    );
+    assert!(!listed.to_string().contains(&plaintext));
+
+    let resolved = app
+        .dispatch_request(
+            &connection,
+            "secret/resolve",
+            Some(serde_json::json!({
+                "names": ["MISSING_SECRET", "RPC_SECRET"]
+            })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolved["values"]["RPC_SECRET"].as_str() == Some(plaintext.as_str()),
+        "secret/resolve returned the wrong stored value"
+    );
+    assert_eq!(resolved["missing"], serde_json::json!(["MISSING_SECRET"]));
+
+    let deleted = app
+        .dispatch_request(
+            &connection,
+            "secret/delete",
+            Some(serde_json::json!({ "name": "RPC_SECRET" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted, serde_json::json!({ "deleted": true }));
+    let missing_delete = app
+        .dispatch_request(
+            &connection,
+            "secret/delete",
+            Some(serde_json::json!({ "name": "RPC_SECRET" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_delete, serde_json::json!({ "deleted": false }));
+
+    let methods = identity_host_effect_methods(&store_path).await;
+    assert!(methods.iter().any(|method| method == "secret/set"));
+    assert!(methods.iter().any(|method| method == "secret/delete"));
+    assert!(methods.iter().any(|method| method == "secret/resolve"));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn secret_value_methods_and_identity_mint_require_the_unix_socket_surface() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    for surface in [
+        crate::daemon::identity::BoundarySurface::Websocket,
+        crate::daemon::identity::BoundarySurface::Console,
+        crate::daemon::identity::BoundarySurface::Host,
+    ] {
+        let mut refused = connection.clone();
+        refused.boundary_surface = surface;
+        refused.unix_socket_transport = false;
+        for method in ["secret/set", "secret/resolve", "identity/mint"] {
+            let error = app
+                .dispatch_request(&refused, method, None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, -32003);
+            assert!(error.message.contains(method));
+            assert!(error.message.contains("unix socket"));
+            assert!(!error.message.contains("invalid params"));
+        }
+    }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_process_json_rpc_cannot_impersonate_the_unix_socket_transport() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let plaintext = format!("in-process-secret-{}", uuid::Uuid::now_v7());
+
+    for method in ["secret/set", "secret/resolve", "identity/mint"] {
+        let local_error = app
+            .local_json_rpc_request(method, serde_json::json!(plaintext))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(local_error.contains(method), "{local_error}");
+        assert!(local_error.contains("unix socket"), "{local_error}");
+        assert!(!local_error.contains(&plaintext), "{local_error}");
+
+        let host_error = app
+            .dispatch_authenticated_json_rpc(
+                connection.resolved_principal.clone(),
+                method,
+                serde_json::json!(plaintext),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(host_error.contains(method), "{host_error}");
+        assert!(host_error.contains("unix socket"), "{host_error}");
+        assert!(!host_error.contains(&plaintext), "{host_error}");
+    }
+
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn secret_set_parse_errors_do_not_echo_the_value() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    let plaintext = format!("invalid-param-secret-{}", uuid::Uuid::now_v7());
+
+    let error = app
+        .dispatch_request(
+            &connection,
+            "secret/set",
+            Some(serde_json::json!(plaintext)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(
+        error.message.contains("invalid params"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains(&plaintext), "{}", error.message);
+
+    app.shutdown().await.unwrap();
+}
+
+#[test]
+fn json_rpc_debug_redacts_value_bearing_payloads() {
+    let plaintext = format!("debug-secret-{}", uuid::Uuid::now_v7());
+    let request = crate::adapters::app_server::connection::JsonRpcRequest {
+        id: crate::adapters::app_server::connection::RequestId::Integer(1),
+        method: "secret/set".to_string(),
+        params: Some(serde_json::json!({ "value": plaintext })),
+        trace: Some(serde_json::json!({ "secret": plaintext })),
+    };
+    let response = crate::adapters::app_server::connection::JsonRpcResponse {
+        id: crate::adapters::app_server::connection::RequestId::Integer(1),
+        result: serde_json::json!({ "token": plaintext }),
+    };
+
+    let request_debug = format!("{request:?}");
+    let response_debug = format!("{response:?}");
+    assert!(!request_debug.contains(&plaintext), "{request_debug}");
+    assert!(!response_debug.contains(&plaintext), "{response_debug}");
+    assert!(request_debug.contains("<redacted>"), "{request_debug}");
+    assert!(response_debug.contains("<redacted>"), "{response_debug}");
+}
+
+#[tokio::test]
+async fn identity_rpc_handlers_manage_principals_credentials_and_witness_effects() {
+    let app = test_app().await;
+    let store_path = app.session_store_path().to_path_buf();
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let initial = app
+        .dispatch_request(&connection, "identity/list", None)
+        .await
+        .unwrap();
+    assert!(
+        initial["principals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|principal| {
+                principal["principal_id"] == connection.resolved_principal.principal_id.as_str()
+                    && principal["kind"] == "operator"
+            })
+    );
+
+    let declared = app
+        .dispatch_request(
+            &connection,
+            "identity/declare",
+            Some(serde_json::json!({
+                "principalId": "adapter:rpc-test",
+                "kind": "adapter",
+                "display": "RPC test adapter",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declared["principal"]["principal_id"], "adapter:rpc-test");
+    assert_eq!(declared["principal"]["kind"], "adapter");
+    assert_eq!(
+        declared["principal"]["declared_by"],
+        connection.resolved_principal.principal_id.as_str()
+    );
+
+    let minted = app
+        .dispatch_request(
+            &connection,
+            "identity/mint",
+            Some(serde_json::json!({
+                "principalId": "adapter:rpc-test",
+                "expiresAtMs": null,
+            })),
+        )
+        .await
+        .unwrap();
+    let credential_id = minted["credential"]["credential_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let token = minted["token"].as_str().unwrap().to_string();
+    assert!(token.starts_with("verlet_id_"));
+    assert_eq!(
+        minted["credential"]["minted_by"],
+        connection.resolved_principal.principal_id.as_str()
+    );
+    assert_eq!(
+        minted["credential"]["token_digest"],
+        crate::daemon::identity::identity_token_digest(&token)
+    );
+
+    let listed = app
+        .dispatch_request(&connection, "identity/list", None)
+        .await
+        .unwrap();
+    assert!(
+        listed["principals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|principal| { principal["principal_id"] == "adapter:rpc-test" })
+    );
+    assert!(
+        listed["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|credential| {
+                credential["credential_id"] == credential_id
+                    && credential["token_digest"]
+                        == crate::daemon::identity::identity_token_digest(&token)
+            })
+    );
+    assert!(!listed.to_string().contains(&token));
+
+    let revoked = app
+        .dispatch_request(
+            &connection,
+            "identity/revoke",
+            Some(serde_json::json!({ "credentialId": credential_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked, serde_json::json!({ "revoked": true }));
+    assert!(
+        app.inner
+            .identity_authority
+            .verify_token(&token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let second_mint = app
+        .dispatch_request(
+            &connection,
+            "identity/mint",
+            Some(serde_json::json!({ "principalId": "adapter:rpc-test" })),
+        )
+        .await
+        .unwrap();
+    let second_token = second_mint["token"].as_str().unwrap().to_string();
+    app.dispatch_request(
+        &connection,
+        "identity/revoke",
+        Some(serde_json::json!({ "principalId": "adapter:rpc-test" })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.inner
+            .identity_authority
+            .verify_token(&second_token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let methods = identity_host_effect_methods(&store_path).await;
+    for expected in [
+        "identity/list",
+        "identity/declare",
+        "identity/mint",
+        "identity/revoke",
+    ] {
+        assert!(
+            methods.iter().any(|method| method == expected),
+            "{methods:?}"
+        );
+    }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn identity_revoke_rejects_zero_both_and_unknown_ids_as_invalid_params() {
+    let app = test_app().await;
+    let (connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    for params in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "credentialId": "credential_missing",
+            "principalId": "adapter:missing",
+        }),
+    ] {
+        let error = app
+            .dispatch_request(&connection, "identity/revoke", Some(params))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("exactly one"));
+    }
+
+    for params in [
+        serde_json::json!({ "credentialId": "credential_missing" }),
+        serde_json::json!({ "principalId": "adapter:missing" }),
+    ] {
+        let error = app
+            .dispatch_request(&connection, "identity/revoke", Some(params))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("not found"), "{}", error.message);
+    }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn non_operator_principals_are_refused_for_every_secret_and_identity_rpc() {
+    let app = test_app().await;
+    let adapter = crate::daemon::identity::ResolvedPrincipal {
+        principal_id: crate::daemon::identity::PrincipalId::new("adapter:unauthorized"),
+        kind: crate::daemon::identity::PrincipalKind::Adapter,
+        auth: crate::daemon::identity::AuthenticationPath::Credential {
+            credential_id: "credential_adapter_unauthorized".to_string(),
+        },
+    };
+    let (connection, _outbound_rx) = test_connection_for_principal(app.clone(), adapter).await;
+    initialize_for_test(&connection).await;
+
+    for method in [
+        "secret/list",
+        "secret/status",
+        "secret/set",
+        "secret/delete",
+        "secret/resolve",
+        "identity/list",
+        "identity/declare",
+        "identity/mint",
+        "identity/revoke",
+    ] {
+        let error = app
+            .dispatch_request(&connection, method, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32003);
+        assert_eq!(
+            error.message,
+            "request is not authorized for this principal"
+        );
+    }
+    app.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -18708,6 +19173,25 @@ async fn identity_sql_count(path: &std::path::Path, query: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn identity_host_effect_methods(path: &std::path::Path) -> Vec<String> {
+    let store = verlet_history_sqlite::SqliteSessionStore::open(path)
+        .await
+        .unwrap();
+    let connection = store.sqlite_database().connect().await.unwrap();
+    let mut rows = connection
+        .query(
+            "SELECT method FROM cooldis_identity_host_effects ORDER BY witnessed_at_ms, rowid",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut methods = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        methods.push(row.get(0).unwrap());
+    }
+    methods
+}
+
 async fn wait_for_identity_sql_count(path: &std::path::Path, query: &str, expected: i64) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
@@ -19990,6 +20474,7 @@ async fn test_connection_for_principal(
             resolved_principal,
             witnessed_session_id,
             boundary_surface: crate::daemon::identity::BoundarySurface::UnixSocket,
+            unix_socket_transport: true,
             outbound,
             handshake: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::adapters::app_server::connection::HandshakeState::default(),

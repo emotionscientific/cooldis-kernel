@@ -1,10 +1,10 @@
-//! The offline `identity` subcommand family.
+//! The `identity` subcommand family.
 
-use crate::daemon::identity::IdentityAuthority as _;
-
-/// Dispatch an offline identity-store command.
+/// Dispatch an identity command. Bootstrap stays offline; every other action
+/// uses the connected instance.
 pub(crate) async fn run_identity(
     mut args: Vec<std::ffi::OsString>,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if args.is_empty()
         || args
@@ -34,17 +34,32 @@ pub(crate) async fn run_identity(
         }
         return Ok(());
     }
-    match subcommand.to_string_lossy().as_ref() {
-        "bootstrap" => identity_bootstrap(args).await,
-        "declare" => identity_declare(args).await,
-        "mint" => identity_mint(args).await,
-        "revoke-credential" => identity_revoke_credential(args).await,
-        "revoke-principal" => identity_revoke_principal(args).await,
-        "list" => identity_list(args).await,
-        other => Err(crate::cli::usage_error(format!(
-            "unknown identity subcommand {other:?}; use `verlet identity --help`"
-        ))),
+    let action = subcommand.to_string_lossy();
+    if action == "bootstrap" {
+        return identity_bootstrap(args).await;
     }
+    if !matches!(
+        action.as_ref(),
+        "declare" | "mint" | "revoke-credential" | "revoke-principal" | "list"
+    ) {
+        return Err(crate::cli::usage_error(format!(
+            "unknown identity subcommand {action:?}; use `verlet identity --help`"
+        )));
+    }
+    let mut client = client.ok_or_else(|| {
+        crate::cli::usage_error("identity command did not receive an instance connection")
+    })?;
+    let result = match action.as_ref() {
+        "declare" => identity_declare(args, &mut client).await,
+        "mint" => identity_mint(args, &mut client).await,
+        "revoke-credential" => identity_revoke_credential(args, &mut client).await,
+        "revoke-principal" => identity_revoke_principal(args, &mut client).await,
+        "list" => identity_list(args, &mut client).await,
+        _ => unreachable!("validated identity action"),
+    };
+    let close = client.close().await;
+    result?;
+    close
 }
 
 /// Declare the first operator and print its credential once.
@@ -77,9 +92,10 @@ pub(crate) async fn identity_bootstrap(
     Ok(())
 }
 
-/// Declare an adapter principal in the offline identity store.
+/// Declare an adapter principal through the connected instance.
 pub(crate) async fn identity_declare(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_declare_args(args)?;
     if options.help {
@@ -95,19 +111,14 @@ pub(crate) async fn identity_declare(
     let display = options
         .display
         .ok_or_else(|| crate::cli::usage_error("identity declare requires --display <display>"))?;
-    let declared_by = options.declared_by.ok_or_else(|| {
-        crate::cli::usage_error("identity declare requires --declared-by <principal-id>")
-    })?;
-    let authority = open_identity_authority(options.state_home).await?;
-    let record = authority
-        .declare_principal(
-            &crate::daemon::identity::PrincipalId::new(declared_by),
-            &crate::daemon::identity::PrincipalId::new(principal_id),
-            kind,
-            &display,
-        )
-        .await
-        .map_err(identity_cli_error)?;
+    let result = client
+        .identity_declare(&principal_id, kind, &display)
+        .await?;
+    let record = identity_response_field::<crate::daemon::identity::PrincipalRecordV1>(
+        &result,
+        "principal",
+        "identity/declare",
+    )?;
     println!("declared principal {} kind=adapter", record.principal_id);
     Ok(())
 }
@@ -115,6 +126,7 @@ pub(crate) async fn identity_declare(
 /// Mint and print one credential for an active principal.
 pub(crate) async fn identity_mint(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_mint_args(args)?;
     if options.help {
@@ -124,18 +136,18 @@ pub(crate) async fn identity_mint(
     let principal_id = options
         .principal_id
         .ok_or_else(|| crate::cli::usage_error("identity mint requires <principal-id>"))?;
-    let minted_by = options.minted_by.ok_or_else(|| {
-        crate::cli::usage_error("identity mint requires --minted-by <principal-id>")
-    })?;
-    let authority = open_identity_authority(options.state_home).await?;
-    let (credential, token) = authority
-        .mint_credential(
-            &crate::daemon::identity::PrincipalId::new(minted_by),
-            &crate::daemon::identity::PrincipalId::new(principal_id),
-            options.expires_at_ms,
-        )
-        .await
-        .map_err(identity_cli_error)?;
+    let result = client
+        .identity_mint(&principal_id, options.expires_at_ms)
+        .await?;
+    let credential = identity_response_field::<crate::daemon::identity::IdentityCredentialV1>(
+        &result,
+        "credential",
+        "identity/mint",
+    )?;
+    let token = result
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| crate::cli::usage_error("identity/mint response did not include token"))?;
     println!("credential_id {}", credential.credential_id);
     eprintln!("WARNING: identity credential token is shown once; store it securely now.");
     println!("token {token}");
@@ -146,9 +158,10 @@ pub(crate) async fn identity_mint(
     Ok(())
 }
 
-/// Revoke one credential in the offline identity store.
+/// Revoke one credential through the connected instance.
 pub(crate) async fn identity_revoke_credential(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-credential")?;
     if options.help {
@@ -158,24 +171,15 @@ pub(crate) async fn identity_revoke_credential(
     let credential_id = options.subject_id.ok_or_else(|| {
         crate::cli::usage_error("identity revoke-credential requires <credential-id>")
     })?;
-    let revoked_by = options.revoked_by.ok_or_else(|| {
-        crate::cli::usage_error("identity revoke-credential requires --revoked-by <principal-id>")
-    })?;
-    let authority = open_identity_authority(options.state_home).await?;
-    authority
-        .revoke_credential(
-            &crate::daemon::identity::PrincipalId::new(revoked_by),
-            &credential_id,
-        )
-        .await
-        .map_err(identity_cli_error)?;
+    client.identity_revoke(Some(&credential_id), None).await?;
     println!("revoked credential {credential_id}");
     Ok(())
 }
 
-/// Revoke one principal in the offline identity store.
+/// Revoke one principal through the connected instance.
 pub(crate) async fn identity_revoke_principal(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_revoke_args(args, "identity revoke-principal")?;
     if options.help {
@@ -185,52 +189,45 @@ pub(crate) async fn identity_revoke_principal(
     let principal_id = options.subject_id.ok_or_else(|| {
         crate::cli::usage_error("identity revoke-principal requires <principal-id>")
     })?;
-    let revoked_by = options.revoked_by.ok_or_else(|| {
-        crate::cli::usage_error("identity revoke-principal requires --revoked-by <principal-id>")
-    })?;
-    let authority = open_identity_authority(options.state_home).await?;
-    authority
-        .revoke_principal(
-            &crate::daemon::identity::PrincipalId::new(revoked_by),
-            &crate::daemon::identity::PrincipalId::new(&principal_id),
-        )
-        .await
-        .map_err(identity_cli_error)?;
+    client.identity_revoke(None, Some(&principal_id)).await?;
     println!("revoked principal {principal_id}");
     Ok(())
 }
 
-/// Print redacted principal and credential records from the identity store.
+/// Print redacted principal and credential records from the connected instance.
 pub(crate) async fn identity_list(
     args: Vec<std::ffi::OsString>,
+    client: &mut crate::cli::InstanceClient,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_identity_list_args(args)?;
     if options.help {
         print_identity_list_help();
         return Ok(());
     }
-    let authority = open_identity_authority(options.state_home).await?;
-    let principals = authority
-        .list_principals()
-        .await
-        .map_err(identity_cli_error)?;
-    let mut credentials = Vec::new();
-    for principal in &principals {
-        for credential in authority
-            .list_credentials(&principal.principal_id)
-            .await
-            .map_err(identity_cli_error)?
-        {
-            credentials.push(serde_json::json!({
+    let result = client.identity_list().await?;
+    let principals = identity_response_field::<Vec<crate::daemon::identity::PrincipalRecordV1>>(
+        &result,
+        "principals",
+        "identity/list",
+    )?;
+    let credentials =
+        identity_response_field::<Vec<crate::daemon::identity::IdentityCredentialV1>>(
+            &result,
+            "credentials",
+            "identity/list",
+        )?
+        .into_iter()
+        .map(|credential| {
+            serde_json::json!({
                 "credential_id": credential.credential_id,
                 "principal_id": credential.principal_id,
                 "minted_by": credential.minted_by,
                 "minted_at_ms": credential.minted_at_ms,
                 "expires_at_ms": credential.expires_at_ms,
                 "revoked_at_ms": credential.revoked_at_ms,
-            }));
-        }
-    }
+            })
+        })
+        .collect::<Vec<_>>();
     let principals = principals
         .into_iter()
         .map(|principal| {
@@ -259,6 +256,19 @@ pub(crate) async fn identity_list(
     Ok(())
 }
 
+fn identity_response_field<T: serde::de::DeserializeOwned>(
+    result: &serde_json::Value,
+    field: &str,
+    method: &str,
+) -> crate::kernel::runtime_host::VerletResult<T> {
+    serde_json::from_value(result.get(field).cloned().ok_or_else(|| {
+        crate::cli::usage_error(format!("{method} response did not include {field}"))
+    })?)
+    .map_err(|error| {
+        crate::cli::usage_error(format!("invalid {method} response field {field}: {error}"))
+    })
+}
+
 #[derive(Debug)]
 struct IdentityBootstrapArgs {
     principal_id: Option<String>,
@@ -272,31 +282,24 @@ struct IdentityDeclareArgs {
     principal_id: Option<String>,
     kind: Option<crate::daemon::identity::PrincipalKind>,
     display: Option<String>,
-    declared_by: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 struct IdentityMintArgs {
     principal_id: Option<String>,
-    minted_by: Option<String>,
     expires_at_ms: Option<i64>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 struct IdentityRevokeArgs {
     subject_id: Option<String>,
-    revoked_by: Option<String>,
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
 #[derive(Debug)]
 struct IdentityListArgs {
-    state_home: Option<std::path::PathBuf>,
     help: bool,
 }
 
@@ -340,8 +343,6 @@ fn parse_identity_declare_args(
     let mut principal_id = None;
     let mut kind = None;
     let mut display = None;
-    let mut declared_by = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -352,14 +353,8 @@ fn parse_identity_declare_args(
                 kind = Some(parse_declarable_cli_kind(&value)?);
             }
             "--display" => display = Some(required_string_value(&mut iter, "--display")?),
-            "--declared-by" => {
-                declared_by = Some(required_string_value(&mut iter, "--declared-by")?)
-            }
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -373,8 +368,6 @@ fn parse_identity_declare_args(
         principal_id,
         kind,
         display,
-        declared_by,
-        state_home,
         help,
     })
 }
@@ -383,15 +376,12 @@ fn parse_identity_mint_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<IdentityMintArgs> {
     let mut principal_id = None;
-    let mut minted_by = None;
     let mut expires_at_ms = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--minted-by" => minted_by = Some(required_string_value(&mut iter, "--minted-by")?),
             "--expires-at-ms" => {
                 let value = required_string_value(&mut iter, "--expires-at-ms")?;
                 expires_at_ms = Some(value.parse::<i64>().map_err(|_| {
@@ -399,10 +389,7 @@ fn parse_identity_mint_args(
                 })?);
             }
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -414,9 +401,7 @@ fn parse_identity_mint_args(
     }
     Ok(IdentityMintArgs {
         principal_id,
-        minted_by,
         expires_at_ms,
-        state_home,
         help,
     })
 }
@@ -426,19 +411,13 @@ fn parse_identity_revoke_args(
     command: &str,
 ) -> crate::kernel::runtime_host::VerletResult<IdentityRevokeArgs> {
     let mut subject_id = None;
-    let mut revoked_by = None;
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
-            "--revoked-by" => revoked_by = Some(required_string_value(&mut iter, "--revoked-by")?),
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
@@ -448,28 +427,19 @@ fn parse_identity_revoke_args(
             _ => set_identity_subject(&mut subject_id, arg, command)?,
         }
     }
-    Ok(IdentityRevokeArgs {
-        subject_id,
-        revoked_by,
-        state_home,
-        help,
-    })
+    Ok(IdentityRevokeArgs { subject_id, help })
 }
 
 fn parse_identity_list_args(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<IdentityListArgs> {
-    let mut state_home = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--help" | "-h" => help = true,
             "--state-home" => {
-                state_home = Some(crate::cli::tool::required_path_value(
-                    &mut iter,
-                    "--state-home",
-                )?)
+                let _ = crate::cli::tool::required_path_value(&mut iter, "--state-home")?;
             }
             other => {
                 return Err(crate::cli::usage_error(format!(
@@ -478,7 +448,7 @@ fn parse_identity_list_args(
             }
         }
     }
-    Ok(IdentityListArgs { state_home, help })
+    Ok(IdentityListArgs { help })
 }
 
 fn set_identity_subject(
@@ -557,14 +527,15 @@ pub(crate) fn print_identity_help() {
 \n\
 Usage:\n\
   verlet identity bootstrap <principal-id> --display <display> [--state-home ~/.verlet/state]\n\
-  verlet identity declare <principal-id> --kind adapter --display <display> --declared-by <principal-id> [--state-home ~/.verlet/state]\n\
-  verlet identity mint <principal-id> --minted-by <principal-id> [--expires-at-ms <ms>] [--state-home ~/.verlet/state]\n\
-  verlet identity revoke-credential <credential-id> --revoked-by <principal-id> [--state-home ~/.verlet/state]\n\
-  verlet identity revoke-principal <principal-id> --revoked-by <principal-id> [--state-home ~/.verlet/state]\n\
+  verlet identity declare <principal-id> --kind adapter --display <display> [--state-home ~/.verlet/state]\n\
+  verlet identity mint <principal-id> [--expires-at-ms <ms>] [--state-home ~/.verlet/state]\n\
+  verlet identity revoke-credential <credential-id> [--state-home ~/.verlet/state]\n\
+  verlet identity revoke-principal <principal-id> [--state-home ~/.verlet/state]\n\
   verlet identity list [--state-home ~/.verlet/state]\n\
 \n\
-Manages daemon identity records directly in the offline session store. Stop the\n\
-daemon before running these commands. Credential tokens are printed only when minted.\n"
+Bootstrap directly initializes an offline store and requires the server to be\n\
+stopped. Every other command uses the connected instance and attributes the\n\
+action to its authenticated operator. Credential tokens are printed only when minted.\n"
     );
 }
 
@@ -577,7 +548,8 @@ Usage:\n\
   verlet identity bootstrap <principal-id> --display <display> [--state-home ~/.verlet/state]\n\
 \n\
 Declares the first operator and mints its credential atomically. The credential\n\
-token is shown once. Bootstrap refuses a store with an active operator.\n"
+token is shown once. Bootstrap refuses a store with an active operator. Stop the\n\
+running server before using bootstrap.\n"
     );
 }
 
@@ -587,9 +559,10 @@ pub(crate) fn print_identity_declare_help() {
         "verlet identity declare\n\
 \n\
 Usage:\n\
-  verlet identity declare <principal-id> --kind adapter --display <display> --declared-by <principal-id> [--state-home ~/.verlet/state]\n\
+  verlet identity declare <principal-id> --kind adapter --display <display> [--state-home ~/.verlet/state]\n\
 \n\
-Declares an adapter principal. Member principals are reserved in v0.\n"
+Declares an adapter principal through the connected instance. Member principals\n\
+are reserved in v0.\n"
     );
 }
 
@@ -599,9 +572,9 @@ pub(crate) fn print_identity_mint_help() {
         "verlet identity mint\n\
 \n\
 Usage:\n\
-  verlet identity mint <principal-id> --minted-by <principal-id> [--expires-at-ms <ms>] [--state-home ~/.verlet/state]\n\
+  verlet identity mint <principal-id> [--expires-at-ms <ms>] [--state-home ~/.verlet/state]\n\
 \n\
-Mints a credential for an active principal. The credential token is shown once.\n"
+Mints a credential through the connected instance. The token is shown once.\n"
     );
 }
 
@@ -611,7 +584,7 @@ pub(crate) fn print_identity_revoke_credential_help() {
         "verlet identity revoke-credential\n\
 \n\
 Usage:\n\
-  verlet identity revoke-credential <credential-id> --revoked-by <principal-id> [--state-home ~/.verlet/state]\n"
+  verlet identity revoke-credential <credential-id> [--state-home ~/.verlet/state]\n"
     );
 }
 
@@ -621,7 +594,7 @@ pub(crate) fn print_identity_revoke_principal_help() {
         "verlet identity revoke-principal\n\
 \n\
 Usage:\n\
-  verlet identity revoke-principal <principal-id> --revoked-by <principal-id> [--state-home ~/.verlet/state]\n"
+  verlet identity revoke-principal <principal-id> [--state-home ~/.verlet/state]\n"
     );
 }
 
@@ -649,5 +622,32 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("member principals are reserved"));
+    }
+
+    #[test]
+    fn acting_principal_flags_are_not_accepted() {
+        let declare = crate::cli::identity::parse_identity_declare_args(vec![
+            std::ffi::OsString::from("--declared-by"),
+            std::ffi::OsString::from("operator:forged"),
+        ])
+        .unwrap_err();
+        assert!(declare.to_string().contains("--declared-by"));
+
+        let mint = crate::cli::identity::parse_identity_mint_args(vec![
+            std::ffi::OsString::from("--minted-by"),
+            std::ffi::OsString::from("operator:forged"),
+        ])
+        .unwrap_err();
+        assert!(mint.to_string().contains("--minted-by"));
+
+        let revoke = crate::cli::identity::parse_identity_revoke_args(
+            vec![
+                std::ffi::OsString::from("--revoked-by"),
+                std::ffi::OsString::from("operator:forged"),
+            ],
+            "identity revoke-credential",
+        )
+        .unwrap_err();
+        assert!(revoke.to_string().contains("--revoked-by"));
     }
 }

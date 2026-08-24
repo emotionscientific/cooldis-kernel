@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+### Control plane
+
+- Added Host-authority `secret/list`, `secret/status`, `secret/set`,
+  `secret/delete`, Unix-only `secret/resolve`, and `identity/list`,
+  `identity/declare`, Unix-only `identity/mint`, and `identity/revoke` app-server
+  methods. Secret, non-bootstrap identity, and secret-bearing `tool run` CLI
+  paths now use the owning instance instead of opening its stores directly.
+
 ### Compatibility paths removed
 
+- `identity declare`, `identity mint`, and identity revocation commands no
+  longer accept `--declared-by`, `--minted-by`, or `--revoked-by`. The acting
+  principal is always the authenticated operator connection. `identity
+  bootstrap` remains the only offline identity command.
 - `verlet daemon run` was removed. Use the top-level `verlet serve` command;
   daemon config validation and service management remain under `verlet daemon`.
 - `verlet chat` no longer starts a private app-server. It discovers the project

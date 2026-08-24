@@ -717,34 +717,48 @@ pub(crate) async fn tool_run(
             let registry =
                 verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
             let record = registry.load_record(&registered_name)?;
-            let resolved_secrets = if !verlet_metadata::secret_store::required_secret_names(
-                &record.manifest,
-            )
-            .map_err(crate::cli::secret::secret_cli_error)?
-            .is_empty()
-            {
-                let secret_store =
-                    crate::cli::secret::open_secret_store(options.state_home.clone()).await?;
-                let resolution = verlet_metadata::secret_store::resolve_manifest_secret_resolution(
-                    &secret_store,
-                    &record.manifest,
+            let required_secret_names =
+                verlet_metadata::secret_store::required_secret_names(&record.manifest)
+                    .map_err(crate::cli::secret::secret_cli_error)?;
+            let resolved_secrets = if required_secret_names.is_empty() {
+                std::collections::BTreeMap::new()
+            } else {
+                let names = required_secret_names.into_iter().collect::<Vec<_>>();
+                let mut client = crate::cli::connect_instance(crate::cli::InstanceScope::User {
+                    state_home: options.state_home.clone(),
+                })
+                .await?;
+                let response = client.secret_resolve(&names).await;
+                let close = client.close().await;
+                let response = response?;
+                close?;
+                let values = serde_json::from_value::<std::collections::BTreeMap<String, String>>(
+                    response.get("values").cloned().ok_or_else(|| {
+                        crate::cli::usage_error("secret/resolve response did not include values")
+                    })?,
                 )
-                .await
-                .map_err(crate::cli::secret::secret_cli_error)?;
-                if !resolution.is_ready() {
+                .map_err(|error| {
+                    crate::cli::usage_error(format!(
+                        "invalid secret/resolve values response: {error}"
+                    ))
+                })?;
+                let missing = serde_json::from_value::<Vec<String>>(
+                    response.get("missing").cloned().ok_or_else(|| {
+                        crate::cli::usage_error("secret/resolve response did not include missing")
+                    })?,
+                )
+                .map_err(|error| {
+                    crate::cli::usage_error(format!(
+                        "invalid secret/resolve missing response: {error}"
+                    ))
+                })?;
+                if !missing.is_empty() {
                     return Err(crate::cli::usage_error(format!(
                         "missing required operation secrets: {}; import with `verlet secret import <name> --from-env <ENV>` or `verlet secret set <name> --value-stdin`",
-                        resolution
-                            .missing
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        missing.join(", ")
                     )));
                 }
-                resolution.values
-            } else {
-                std::collections::BTreeMap::new()
+                values
             };
             let mut config = registry.load_runtime_config_for_record(&record).await?;
             config = config.with_attachment_config(

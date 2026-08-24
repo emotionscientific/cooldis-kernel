@@ -59,12 +59,18 @@ pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
             crate::cli::tool::run_tool(args, client).await
         }
         "skill" => crate::cli::skill::run_skill(args).await,
-        "secret" => crate::cli::secret::run_secret(args).await,
+        "secret" => {
+            let client = client_command_preamble("secret", &args).await?;
+            crate::cli::secret::run_secret(args, client).await
+        }
         "auth" => {
             let client = client_command_preamble("auth", &args).await?;
             crate::cli::auth::run_auth(args, client).await
         }
-        "identity" => crate::cli::identity::run_identity(args).await,
+        "identity" => {
+            let client = client_command_preamble("identity", &args).await?;
+            crate::cli::identity::run_identity(args, client).await
+        }
         "console" => crate::cli::console::run_console(args).await,
         "chat" => {
             let client = client_command_preamble("chat", &args).await?;
@@ -324,6 +330,36 @@ async fn client_command_preamble(
                 state_home: option_path(args, "--state-home")?,
             }
         }
+        "secret"
+            if args.first().is_some_and(|subcommand| {
+                matches!(
+                    subcommand.to_string_lossy().as_ref(),
+                    "import" | "set" | "list" | "status" | "delete"
+                )
+            }) =>
+        {
+            InstanceScope::User {
+                state_home: option_path(args, "--state-home")?,
+            }
+        }
+        "identity"
+            if args.first().is_some_and(|subcommand| {
+                matches!(
+                    subcommand.to_string_lossy().as_ref(),
+                    "declare" | "mint" | "revoke-credential" | "revoke-principal" | "list"
+                )
+            }) =>
+        {
+            match option_path(args, "--state-home")? {
+                Some(state_home) => InstanceScope::Project {
+                    cwd: std::env::current_dir().map_err(io_error)?,
+                    config_path: None,
+                    runtime_home: None,
+                    state_home: Some(state_home),
+                },
+                None => InstanceScope::User { state_home: None },
+            }
+        }
         "tool"
             if args.first().is_some_and(|arg| arg == "source")
                 && args.get(1).is_some_and(|subcommand| {
@@ -434,21 +470,22 @@ pub(crate) async fn connect_instance(
             }
         }
 
-        if !discovery_roots
-            .iter()
-            .any(|root| root == &target.user_state_root)
-            && let Some(endpoint) = crate::adapters::app_server::instance::resolve_instance_endpoint(
-                &target.user_state_root,
-            )
-            && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok()
-        {
-            return Err(usage_error(format!(
-                "could not start a server for {}: user state root {} is owned by pid {}, socket {}; stop that process first",
-                target.state_root.display(),
-                target.user_state_root.display(),
-                endpoint.pid,
-                endpoint.unix_socket.display()
-            )));
+        for root in [&target.state_root, &target.user_state_root] {
+            if discovery_roots.iter().any(|candidate| candidate == root) {
+                continue;
+            }
+            if let Some(endpoint) =
+                crate::adapters::app_server::instance::resolve_instance_endpoint(root)
+                && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok()
+            {
+                return Err(usage_error(format!(
+                    "could not start a server for {}: instance root {} is owned by pid {}, socket {}; stop that process first",
+                    target.state_root.display(),
+                    root.display(),
+                    endpoint.pid,
+                    endpoint.unix_socket.display()
+                )));
+            }
         }
 
         spawn_instance_server(&target).map_err(|error| {
