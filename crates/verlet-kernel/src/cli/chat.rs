@@ -24,12 +24,6 @@ impl ChatInvocation {
             ChatInvocation::Chat => "verlet-chat",
         }
     }
-
-    fn private_connection_label(self) -> &'static str {
-        match self {
-            ChatInvocation::Chat => "local/private",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,53 +35,30 @@ pub(crate) enum ChatAttachTarget {
 pub(crate) async fn run(
     args: Vec<std::ffi::OsString>,
     invocation: ChatInvocation,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = crate::cli::console::parse_chat_args(args)?;
     if options.help {
         invocation.print_help();
         return Ok(());
     }
-    run_chat_console(options, invocation).await
+    run_chat_console(options, invocation, client).await
 }
 
 async fn run_chat_console(
     options: crate::cli::console::ChatArgs,
     invocation: ChatInvocation,
+    client: Option<crate::cli::InstanceClient>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     if let Some(raw_attach) = options.attach.clone() {
         let target = parse_attach_target(&raw_attach)?;
         return run_attached_chat(options, invocation, target).await;
     }
 
-    let launched = crate::cli::console::PrivateAppServer::start(&options).await?;
-    let socket_path = launched.socket_path().to_path_buf();
-    let result = async {
-        #[cfg(unix)]
-        {
-            let client = crate::adapters::operator_client::OperatorClient::connect_unix(
-                socket_path,
-                chat_connect_config(invocation),
-            )
-            .await?;
-            run_chat_client(
-                client,
-                options.prompt,
-                invocation.private_connection_label().to_string(),
-            )
-            .await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = socket_path;
-            Err(crate::cli::usage_error(
-                "private chat app-server sockets require a Unix platform",
-            ))
-        }
-    }
-    .await;
-    let shutdown = launched.shutdown().await;
-    result?;
-    shutdown
+    let client = client.ok_or_else(|| {
+        crate::cli::usage_error("chat command did not receive an instance connection")
+    })?;
+    run_chat_client(client, options.prompt, "project instance".to_string()).await
 }
 
 async fn run_attached_chat(

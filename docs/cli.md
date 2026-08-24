@@ -25,6 +25,7 @@ command-family overview.
 
 ```sh
 verlet console
+verlet serve
 verlet chat
 verlet init <name>
 verlet coupling init <name>
@@ -39,17 +40,43 @@ verlet secret import|set|list|status|delete
 and `/rpc` from the same listener, prints the URLs, and opens the browser by
 default.
 
-`verlet chat` starts the bundled terminal console. By default it launches a
-private local app-server; with `--attach` it connects to an existing
-`unix://...` or `ws://.../rpc` endpoint.
+`verlet chat` starts the bundled terminal console as a client of the project
+instance. `--attach` remains an explicit override for a specific `unix://...`
+or `ws://.../rpc` endpoint.
 
 `verlet coupling init <name>` scaffolds a Rust Wasm coupling package using the
 SDK `#[coupling]` macro, fixture JSON, schemas, and a native testkit test. The
 generated package is validated with `verlet tool build --package`.
 
-`verlet auth` stores local model-provider credentials in the user metadata
-store. `verlet secret` stores named runtime secrets used by tools and adapters.
-Both redact stored values in status and list output.
+`verlet auth` manages model-provider credentials through the running instance.
+`verlet tool source` manages project MCP sources through that same RPC surface.
+`verlet secret` still opens the user metadata store directly in this release.
+All status and list output redacts stored values.
+
+## Server And Client Commands
+
+`verlet serve` runs the app-server and configured IO routes in the foreground.
+It idles out only when `serve --idle-timeout <duration>` or
+`daemon.idle_timeout` is configured. `verlet console` runs the same app-server
+in-process with the browser UI and a loopback WebSocket listener, and never
+idles out.
+
+`verlet auth`, `verlet tool source`, and `verlet chat` are clients. They read
+the endpoint record for their scope and connect to its Unix socket. Project
+commands use the same project and state-root resolution as `verlet console`.
+Auth first checks the current project instance because that instance also owns
+the user metadata root. If no project instance is reachable, auth checks the
+user-root endpoint record. Outside a Verlet project, a user-scoped command
+starts its server from the Verlet home with project and user state sharing the
+user state root, and creates nothing under the arbitrary current directory.
+
+When no matching instance is reachable, a client starts `verlet serve`
+detached, writes its stdout and stderr to `<state_root>/serve.log`, waits up to
+15 seconds for the endpoint, and continues. Auto-started servers use a 10 minute
+idle timeout unless `daemon.idle_timeout` selects another human duration such
+as `2s` or `30m`. A new Unix or WebSocket RPC connection resets the timer.
+Threads running turns with no attached client still count as idle, so their
+durable records survive when the server exits.
 
 ## Advanced Commands
 
@@ -59,7 +86,8 @@ verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <path> | --jou
 verlet debug rpc call <method> [PARAMS_JSON]
 verlet debug rpc turn (--thread <id> | --new) <text>
 verlet debug rpc tail --thread <id>
-verlet daemon run|config|service
+verlet serve [--config <path>] [--idle-timeout <duration>]
+verlet daemon config|service
 ```
 
 `verlet rpc` is the app-server control plane for scripts, local hosts, MCP,

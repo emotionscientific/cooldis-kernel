@@ -90,7 +90,9 @@ For the detailed repository map, see [docs/repository-map.md](docs/repository-ma
 ## The Console
 
 The web console lives in this repository at [apps/console](apps/console) and
-ships inside the kernel release: `verlet console`.
+ships inside the kernel release as `verlet console`. See the
+[CLI server and client command model](docs/cli.md#server-and-client-commands)
+for foreground and endpoint-discovered use.
 
 ## Current Status
 

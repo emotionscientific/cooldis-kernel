@@ -63,7 +63,7 @@ Expected dry response text starts with `local:`.
 
 ### Live Provider Path
 
-The live path uses `verlet daemon run` with a provider config. This example is
+The live path uses `verlet serve` with a provider config. This example is
 provider-neutral and uses an OpenAI Chat Completions-compatible endpoint:
 
 ```toml
@@ -87,7 +87,7 @@ max_tokens = 4096
 Run the daemon:
 
 ```sh
-verlet daemon run --config verlet.toml
+verlet serve --config verlet.toml
 ```
 
 Then submit a real model-backed turn:
@@ -159,7 +159,7 @@ Use the same ACP adapter command, but point it at a provider-backed daemon:
 ```sh
 # Use a daemon config whose app-server listen value is:
 # listen = "unix:///tmp/verlet-acp.sock"
-verlet daemon run --config verlet.toml
+verlet serve --config verlet.toml
 
 verlet-acp-agent \
   --socket /tmp/verlet-acp.sock \
@@ -233,7 +233,7 @@ Use the same MCP server command against a provider-backed daemon:
 ```sh
 # Use a daemon config whose app-server listen value is:
 # listen = "unix:///tmp/verlet-mcp.sock"
-verlet daemon run --config verlet.toml
+verlet serve --config verlet.toml
 verlet-mcp-server --socket /tmp/verlet-mcp.sock
 ```
 

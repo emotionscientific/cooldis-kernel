@@ -30,9 +30,8 @@
           </div>
         {:else}
           <p>
-            Not connected. Start a daemon with
-            <span class="mono">verlet daemon run --config &lt;verlet.toml&gt;</span>
-            and it will be picked up automatically.
+            Connection lost. Restart <span class="mono">verlet console</span>
+            and reload this page.
           </p>
         {/if}
       </div>

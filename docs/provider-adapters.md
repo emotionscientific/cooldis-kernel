@@ -111,9 +111,9 @@ tool result so truncation can never split a tool call/result pair.
 
 ## Replay-Fidelity Transform
 
-Canonical history can carry content the target API cannot represent —
-thinking from another provider, assistant images, cache controls, tool calls
-whose results were never recorded, assistant messages that ended in an error.
+Canonical history can carry content the target API cannot represent: thinking
+from another provider, assistant images, cache controls, tool calls whose
+results were never recorded, or assistant messages that ended in an error.
 `normalize_history_for_target` (adapters/provider_transform.rs) runs on every
 turn between request construction and provider context truncation, and again
 after truncation, normalizing the compiled history for the target:
@@ -123,7 +123,7 @@ after truncation, normalizing the compiled history for the target:
   verbatim so builders can replay it faithfully;
 - errored assistants (stop reason error/cancelled) drop with their tool
   results; dangling tool calls, unpaired tool results, and duplicate
-  tool-call ids drop rather than guessing a pairing — the transform never
+  tool-call ids drop rather than guessing a pairing; the transform never
   creates content (no synthetic tool results);
 - historical user images drop for non-image targets; the latest user message
   (when it is the final compiled message) is exempt so unsupported
@@ -182,12 +182,12 @@ a gateway compatibility path. OpenAI Compatible/OpenAI-compatible MODEL smokes r
 separate Chat Completions-compatible lane and do not count as OpenAI Responses
 or Anthropic Messages protocol evidence.
 
-`verlet chat` can route its private Codex-shaped app-server through any
-wire-compatible provider endpoint. These paths use the same provider adapter
+`verlet serve` and `verlet console` can route their Codex-shaped app-server
+through any wire-compatible provider endpoint. `verlet chat` connects as a
+client. These paths use the same provider adapter
 boundary: gateways remain wire-compatible endpoints, and Verlet still stores
 canonical provider-neutral history rather than provider-native JSON. See
-[Verlet RPC Control Plane](app-server.md) for the local config shape and
-command-line flags.
+[Verlet RPC Control Plane](app-server.md) for the server config shape.
 
 `LocalOfflineProviderClient` is the deterministic local provider shape for tests
 and future local runtimes. It intentionally supports only text completion and

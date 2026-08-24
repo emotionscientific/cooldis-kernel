@@ -12,6 +12,7 @@ mod identity;
 mod import;
 mod rpc;
 mod secret;
+mod serve;
 mod skill;
 mod tool;
 
@@ -53,15 +54,25 @@ pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
         "blob" => crate::cli::blob::run_blob(args).await,
         "coupling" => crate::cli::coupling::run_coupling(args).await,
         "import" => crate::cli::import::run_import(args).await,
-        "tool" => crate::cli::tool::run_tool(args).await,
+        "tool" => {
+            let client = client_command_preamble("tool", &args).await?;
+            crate::cli::tool::run_tool(args, client).await
+        }
         "skill" => crate::cli::skill::run_skill(args).await,
         "secret" => crate::cli::secret::run_secret(args).await,
-        "auth" => crate::cli::auth::run_auth(args).await,
+        "auth" => {
+            let client = client_command_preamble("auth", &args).await?;
+            crate::cli::auth::run_auth(args, client).await
+        }
         "identity" => crate::cli::identity::run_identity(args).await,
         "console" => crate::cli::console::run_console(args).await,
-        "chat" => run_chat(args).await,
+        "chat" => {
+            let client = client_command_preamble("chat", &args).await?;
+            run_chat(args, client).await
+        }
         "debug" => crate::cli::debug_rpc::run_debug(args).await,
         "daemon" => crate::cli::daemon::run_daemon(args).await,
+        "serve" => crate::cli::serve::run_serve(args).await,
         "host" => crate::cli::host::run_host(args).await,
         "rpc" => crate::cli::rpc::run_rpc(args).await,
         other => Err(usage_error(format!(
@@ -225,9 +236,7 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
             crate::cli::debug_rpc::print_debug_rpc_help()
         }
         [command] if command == "daemon" => crate::cli::daemon::print_daemon_help(),
-        [command, subcommand] if command == "daemon" && subcommand == "run" => {
-            crate::cli::daemon::print_daemon_help()
-        }
+        [command] if command == "serve" => crate::cli::serve::print_serve_help(),
         [command, subcommand, action]
             if command == "daemon" && subcommand == "config" && action == "validate" =>
         {
@@ -250,8 +259,343 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
     Ok(())
 }
 
-async fn run_chat(args: Vec<std::ffi::OsString>) -> crate::kernel::runtime_host::VerletResult<()> {
-    chat::run(args, chat::ChatInvocation::Chat).await
+async fn run_chat(
+    args: Vec<std::ffi::OsString>,
+    client: Option<InstanceClient>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    chat::run(args, chat::ChatInvocation::Chat, client).await
+}
+
+#[cfg(unix)]
+pub(crate) type InstanceClient =
+    crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>;
+
+#[cfg(not(unix))]
+pub(crate) type InstanceClient =
+    crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>;
+
+#[derive(Debug)]
+pub(crate) enum InstanceScope {
+    Project {
+        cwd: std::path::PathBuf,
+        config_path: Option<std::path::PathBuf>,
+        runtime_home: Option<std::path::PathBuf>,
+        state_home: Option<std::path::PathBuf>,
+    },
+    User {
+        state_home: Option<std::path::PathBuf>,
+    },
+}
+
+struct InstanceTarget {
+    project_root: std::path::PathBuf,
+    state_root: std::path::PathBuf,
+    user_state_root: std::path::PathBuf,
+    runtime_home: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
+    idle_timeout: Option<std::time::Duration>,
+}
+
+const AUTO_SPAWN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const INSTANCE_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const INSTANCE_START_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+async fn client_command_preamble(
+    command: &str,
+    args: &[std::ffi::OsString],
+) -> crate::kernel::runtime_host::VerletResult<Option<InstanceClient>> {
+    if args
+        .iter()
+        .any(|arg| arg.as_os_str() == "--help" || arg.as_os_str() == "-h")
+    {
+        return Ok(None);
+    }
+    let scope = match command {
+        "auth"
+            if args.first().is_some_and(|subcommand| {
+                matches!(
+                    subcommand.to_string_lossy().as_ref(),
+                    "login" | "status" | "set" | "delete"
+                )
+            }) =>
+        {
+            InstanceScope::User {
+                state_home: option_path(args, "--state-home")?,
+            }
+        }
+        "tool"
+            if args.first().is_some_and(|arg| arg == "source")
+                && args.get(1).is_some_and(|subcommand| {
+                    matches!(
+                        subcommand.to_string_lossy().as_ref(),
+                        "add" | "discover" | "list" | "show" | "remove"
+                    )
+                }) =>
+        {
+            InstanceScope::Project {
+                cwd: std::env::current_dir().map_err(io_error)?,
+                config_path: None,
+                runtime_home: None,
+                state_home: option_path(args, "--state-home")?,
+            }
+        }
+        "chat" if !has_option(args, "--attach") => InstanceScope::Project {
+            cwd: option_path(args, "--cwd")?.unwrap_or(std::env::current_dir().map_err(io_error)?),
+            config_path: option_path(args, "--config")?,
+            runtime_home: option_path(args, "--runtime-home")?,
+            state_home: option_path(args, "--state-home")?,
+        },
+        _ => return Ok(None),
+    };
+    connect_instance(scope).await.map(Some)
+}
+
+fn has_option(args: &[std::ffi::OsString], name: &str) -> bool {
+    args.iter().any(|arg| arg.as_os_str() == name)
+}
+
+fn option_path(
+    args: &[std::ffi::OsString],
+    name: &str,
+) -> crate::kernel::runtime_host::VerletResult<Option<std::path::PathBuf>> {
+    let Some(index) = args.iter().position(|arg| arg.as_os_str() == name) else {
+        return Ok(None);
+    };
+    args.get(index + 1)
+        .map(std::path::PathBuf::from)
+        .map(Some)
+        .ok_or_else(|| usage_error(format!("{name} requires a value")))
+}
+
+pub(crate) async fn connect_instance(
+    scope: InstanceScope,
+) -> crate::kernel::runtime_host::VerletResult<InstanceClient> {
+    let (target, discovery_roots) = match scope {
+        InstanceScope::Project {
+            cwd,
+            config_path,
+            runtime_home,
+            state_home,
+        } => {
+            let target =
+                resolve_project_instance_target(cwd, config_path, runtime_home, state_home, None)?;
+            let roots = vec![target.state_root.clone()];
+            (target, roots)
+        }
+        InstanceScope::User { state_home } => {
+            // Auth prefers the current project instance when it owns the
+            // requested user root, then checks the user-root endpoint.
+            let cwd = std::env::current_dir().map_err(io_error)?;
+            let project = crate::daemon::daemon_config::discover_verlet_project(&cwd)?;
+            if !project.found_project {
+                let target = resolve_user_home_instance_target(state_home)?;
+                let root = target.user_state_root.clone();
+                (target, vec![root])
+            } else {
+                let mut target = resolve_project_instance_target(cwd, None, None, None, None)?;
+                let requested_user_root = match state_home {
+                    Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
+                    None => target.user_state_root.clone(),
+                };
+                let mut roots = Vec::new();
+                if target.user_state_root == requested_user_root {
+                    roots.push(target.state_root.clone());
+                }
+                if !roots.iter().any(|root| root == &requested_user_root) {
+                    roots.push(requested_user_root.clone());
+                }
+                target.user_state_root = requested_user_root;
+                (target, roots)
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    {
+        let _ = discovery_roots;
+        return Err(usage_error(format!(
+            "could not start a server for {}: local instance routing requires a Unix socket",
+            target.state_root.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    {
+        let mut last_error = None;
+        for root in &discovery_roots {
+            if let Some(endpoint) =
+                crate::adapters::app_server::instance::resolve_instance_endpoint(root)
+            {
+                match connect_instance_endpoint(&endpoint).await {
+                    Ok(client) => return Ok(client),
+                    Err(error) => last_error = Some(error.to_string()),
+                }
+            }
+        }
+
+        if !discovery_roots
+            .iter()
+            .any(|root| root == &target.user_state_root)
+            && let Some(endpoint) = crate::adapters::app_server::instance::resolve_instance_endpoint(
+                &target.user_state_root,
+            )
+            && std::os::unix::net::UnixStream::connect(&endpoint.unix_socket).is_ok()
+        {
+            return Err(usage_error(format!(
+                "could not start a server for {}: user state root {} is owned by pid {}, socket {}; stop that process first",
+                target.state_root.display(),
+                target.user_state_root.display(),
+                endpoint.pid,
+                endpoint.unix_socket.display()
+            )));
+        }
+
+        spawn_instance_server(&target).map_err(|error| {
+            usage_error(format!(
+                "could not start a server for {}: {error}",
+                target.state_root.display()
+            ))
+        })?;
+        let deadline = tokio::time::Instant::now() + INSTANCE_START_TIMEOUT;
+        loop {
+            if let Some(endpoint) =
+                crate::adapters::app_server::instance::resolve_instance_endpoint(&target.state_root)
+            {
+                match connect_instance_endpoint(&endpoint).await {
+                    Ok(client) => return Ok(client),
+                    Err(error) => last_error = Some(error.to_string()),
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(usage_error(format!(
+                    "could not start a server for {}: timed out after 15s{}",
+                    target.state_root.display(),
+                    last_error
+                        .as_deref()
+                        .map(|error| format!("; last connection error: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+            tokio::time::sleep(INSTANCE_START_POLL_INTERVAL).await;
+        }
+    }
+}
+
+fn resolve_project_instance_target(
+    cwd: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
+    runtime_home: Option<std::path::PathBuf>,
+    state_home: Option<std::path::PathBuf>,
+    user_state_home: Option<std::path::PathBuf>,
+) -> crate::kernel::runtime_host::VerletResult<InstanceTarget> {
+    let resolved = crate::cli::console::resolve_instance_app_server_config(
+        cwd,
+        config_path,
+        runtime_home,
+        state_home,
+        user_state_home,
+    )?;
+    Ok(InstanceTarget {
+        project_root: resolved.project_root,
+        state_root: crate::cli::console::absolute_path(&resolved.config.state_home)?,
+        user_state_root: crate::cli::console::absolute_path(&resolved.config.user_state_home)?,
+        runtime_home: crate::cli::console::absolute_path(&resolved.config.runtime_home)?,
+        cwd: crate::cli::console::absolute_path(&resolved.config.cwd)?,
+        config_path: resolved.config_path,
+        idle_timeout: resolved.idle_timeout,
+    })
+}
+
+fn resolve_user_home_instance_target(
+    state_home: Option<std::path::PathBuf>,
+) -> crate::kernel::runtime_host::VerletResult<InstanceTarget> {
+    let user_home =
+        crate::cli::console::absolute_path(&crate::cli::console::default_user_verlet_home()?)?;
+    let user_state_root = match state_home {
+        Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
+        None => user_home.join("state"),
+    };
+    let user_config = user_home.join("config.toml");
+    let (config_path, idle_timeout) = if user_config.is_file() {
+        let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(&user_config))?;
+        let idle_timeout = loaded.config.idle_timeout()?;
+        (loaded.path, idle_timeout)
+    } else {
+        (None, None)
+    };
+    Ok(InstanceTarget {
+        project_root: user_home.clone(),
+        state_root: user_state_root.clone(),
+        user_state_root,
+        runtime_home: user_home.join("runtime"),
+        cwd: user_home,
+        config_path,
+        idle_timeout,
+    })
+}
+
+#[cfg(unix)]
+async fn connect_instance_endpoint(
+    endpoint: &crate::adapters::app_server::instance::InstanceEndpoint,
+) -> crate::kernel::runtime_host::VerletResult<InstanceClient> {
+    crate::adapters::operator_client::OperatorClient::connect_unix(
+        endpoint.unix_socket.clone(),
+        crate::adapters::operator_client::OperatorConnectConfig {
+            client_name: "verlet-cli".to_string(),
+            ..crate::adapters::operator_client::OperatorConnectConfig::default()
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+fn spawn_instance_server(target: &InstanceTarget) -> crate::kernel::runtime_host::VerletResult<()> {
+    std::fs::create_dir_all(&target.project_root).map_err(io_error)?;
+    std::fs::create_dir_all(&target.state_root).map_err(io_error)?;
+    let log_path = target.state_root.join("serve.log");
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(io_error)?;
+    let stderr = stdout.try_clone().map_err(io_error)?;
+    let mut command = std::process::Command::new(std::env::current_exe().map_err(io_error)?);
+    command
+        .arg("serve")
+        .arg("--idle-timeout")
+        .arg(
+            humantime::format_duration(target.idle_timeout.unwrap_or(AUTO_SPAWN_IDLE_TIMEOUT))
+                .to_string(),
+        )
+        .arg("--cwd")
+        .arg(&target.cwd)
+        .arg("--runtime-home")
+        .arg(&target.runtime_home)
+        .arg("--state-home")
+        .arg(&target.state_root)
+        .arg("--user-state-home")
+        .arg(&target.user_state_root)
+        .current_dir(&target.project_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr));
+    if let Some(config_path) = &target.config_path {
+        command.arg("--config").arg(config_path);
+    }
+    {
+        use std::os::unix::process::CommandExt as _;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    command.spawn().map(drop).map_err(io_error)
 }
 
 fn usage_error(message: impl Into<String>) -> crate::kernel::runtime_host::VerletError {
@@ -335,7 +679,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "verlet debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <verlet.toml>]",
     "verlet debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <verlet.toml>]",
     "verlet debug rpc tail --thread <id> [--url <ws-url> | --config <verlet.toml>]",
-    "verlet daemon run [--config verlet.toml]",
+    "verlet serve [--config verlet.toml] [--idle-timeout <duration>]",
     "verlet daemon config validate [--config verlet.toml]",
     "verlet daemon service print [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]",
     "verlet daemon service install [--target launchd|systemd] --config verlet.toml [--label com.verlet.daemon]",

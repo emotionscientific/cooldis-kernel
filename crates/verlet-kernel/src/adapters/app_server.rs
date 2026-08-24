@@ -885,6 +885,7 @@ impl crate::adapters::agent_loop::TurnEndpointRouter for AppServerTurnEndpointRo
 struct VerletAppServerInner {
     supervisor: crate::kernel::supervisor::VerletSupervisor,
     tasks: std::sync::Arc<crate::adapters::app_server::lifecycle::InstanceTaskSet>,
+    client_connections: std::sync::Arc<ClientConnectionTracker>,
     shutdown: tokio::sync::Mutex<bool>,
     dispatch_gate: tokio::sync::RwLock<()>,
     /// Process-wide claim on this instance's roots (EMO-552). `None` for
@@ -951,6 +952,105 @@ struct VerletAppServerInner {
     subscriptions:
         tokio::sync::Mutex<crate::adapters::app_server::subscriptions::AppServerSubscriptions>,
     state: tokio::sync::RwLock<crate::adapters::app_server::threads::AppServerState>,
+}
+
+struct ClientConnectionTracker {
+    active: std::sync::atomic::AtomicUsize,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+impl ClientConnectionTracker {
+    fn new() -> Self {
+        let (changes, _) = tokio::sync::watch::channel(0);
+        Self {
+            active: std::sync::atomic::AtomicUsize::new(0),
+            changes,
+        }
+    }
+
+    fn enter(self: &std::sync::Arc<Self>) -> ClientConnectionGuard {
+        self.active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.changed();
+        ClientConnectionGuard {
+            tracker: std::sync::Arc::clone(self),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn accept_unix(
+        self: &std::sync::Arc<Self>,
+        listener: &tokio::net::UnixListener,
+    ) -> std::io::Result<(
+        tokio::net::UnixStream,
+        tokio::net::unix::SocketAddr,
+        ClientConnectionGuard,
+    )> {
+        let (stream, peer) = listener.accept().await?;
+        let connection = self.enter();
+        Ok((stream, peer, connection))
+    }
+
+    async fn accept_tcp(
+        self: &std::sync::Arc<Self>,
+        listener: &tokio::net::TcpListener,
+    ) -> std::io::Result<(
+        tokio::net::TcpStream,
+        std::net::SocketAddr,
+        ClientConnectionGuard,
+    )> {
+        let (stream, peer) = listener.accept().await?;
+        let connection = self.enter();
+        Ok((stream, peer, connection))
+    }
+
+    async fn wait_for_idle_timeout(&self, idle_timeout: std::time::Duration) {
+        let mut changes = self.changes.subscribe();
+        loop {
+            if self.active.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                let timeout = tokio::time::sleep(idle_timeout);
+                tokio::pin!(timeout);
+                tokio::select! {
+                    () = &mut timeout => {
+                        let still_idle = self.active.load(std::sync::atomic::Ordering::Acquire) == 0;
+                        let unchanged = !changes.has_changed().unwrap_or(false);
+                        if still_idle && unchanged {
+                            return;
+                        }
+                    }
+                    changed = changes.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+            } else if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|version| *version += 1);
+    }
+}
+
+struct ClientConnectionGuard {
+    tracker: std::sync::Arc<ClientConnectionTracker>,
+}
+
+impl Drop for ClientConnectionGuard {
+    fn drop(&mut self) {
+        let decremented = self.tracker.active.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |active| active.checked_sub(1),
+        );
+        debug_assert!(decremented.is_ok(), "client connection count underflow");
+        if decremented.is_ok() {
+            self.tracker.changed();
+        }
+    }
 }
 
 impl VerletAppServerInner {
@@ -1384,6 +1484,7 @@ impl VerletAppServer {
                 tasks: std::sync::Arc::new(
                     crate::adapters::app_server::lifecycle::InstanceTaskSet::new(),
                 ),
+                client_connections: std::sync::Arc::new(ClientConnectionTracker::new()),
                 shutdown: tokio::sync::Mutex::new(false),
                 dispatch_gate: tokio::sync::RwLock::new(()),
                 root_reservation: config.root_reservation,
@@ -1586,14 +1687,15 @@ impl VerletAppServer {
 
         let inner = std::sync::Arc::downgrade(&self.inner);
         let tasks = std::sync::Arc::downgrade(&self.inner.tasks);
+        let client_connections = std::sync::Arc::clone(&self.inner.client_connections);
         let cancellation = self.inner.tasks.cancellation();
         if !self.inner.tasks.spawn(async move {
             loop {
                 let accepted = tokio::select! {
                     _ = cancellation.cancelled() => return,
-                    accepted = listener.accept() => accepted,
+                    accepted = client_connections.accept_unix(&listener) => accepted,
                 };
-                let (stream, _) = match accepted {
+                let (stream, _, connection) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         eprintln!("Verlet endpoint socket accept failed: {error}");
@@ -1615,6 +1717,7 @@ impl VerletAppServer {
                 };
                 let app = VerletAppServer { inner };
                 if !tasks.spawn(async move {
+                    let _connection = connection;
                     if let Err(error) = app.handle_unix_stream(stream, peer_uid).await {
                         eprintln!("Verlet endpoint connection failed: {error}");
                     }
@@ -1680,6 +1783,7 @@ impl VerletAppServer {
         &self,
         stream: tokio::net::TcpStream,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
+        let _connection = self.inner.client_connections.enter();
         let mut stream = stream;
         let authentication = async {
             let Some((resolved_principal, _)) = self
@@ -1754,6 +1858,21 @@ impl VerletAppServer {
         instance::unregister_instance_endpoint(&self.inner.endpoint.instance_id);
         *shutdown = true;
         Ok(())
+    }
+
+    pub async fn wait_for_idle_timeout(&self, idle_timeout: std::time::Duration) {
+        self.inner
+            .client_connections
+            .wait_for_idle_timeout(idle_timeout)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_client_connections_for_test(&self) -> usize {
+        self.inner
+            .client_connections
+            .active
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn supervisor(&self) -> crate::kernel::supervisor::VerletSupervisor {
@@ -1849,9 +1968,9 @@ impl VerletAppServer {
         loop {
             let accepted = tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),
-                accepted = listener.accept() => accepted,
+                accepted = self.inner.client_connections.accept_unix(&listener) => accepted,
             };
-            let (stream, _) = accepted.map_err(|err| {
+            let (stream, _, connection) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server connection: {err}"
                 ))
@@ -1866,6 +1985,7 @@ impl VerletAppServer {
                 .uid();
             let app = self.clone();
             self.inner.tasks.spawn(async move {
+                let _connection = connection;
                 if let Err(err) = app.handle_unix_stream(stream, peer_uid).await {
                     eprintln!("verlet app-server connection failed: {err}");
                 }
@@ -1912,15 +2032,16 @@ impl VerletAppServer {
         loop {
             let accepted = tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),
-                accepted = listener.accept() => accepted,
+                accepted = self.inner.client_connections.accept_tcp(&listener) => accepted,
             };
-            let (stream, peer) = accepted.map_err(|err| {
+            let (stream, peer, connection) = accepted.map_err(|err| {
                 crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
                     "failed to accept Verlet app-server websocket connection: {err}"
                 ))
             })?;
             let app = self.clone();
             self.inner.tasks.spawn(async move {
+                let _connection = connection;
                 if let Err(err) = app.handle_tcp_stream(stream).await {
                     eprintln!("verlet app-server websocket connection from {peer} failed: {err}");
                 }

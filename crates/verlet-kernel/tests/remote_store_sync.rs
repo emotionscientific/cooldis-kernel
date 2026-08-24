@@ -1297,10 +1297,10 @@ provider = "local"
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
     model_catalog_test_support::disable_for_tokio_command(&mut command);
     let mut child = command
-        .arg("daemon")
-        .arg("run")
+        .arg("serve")
         .arg("--config")
         .arg(&config_path)
+        .env("VERLET_HOME", root.join("user-home"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

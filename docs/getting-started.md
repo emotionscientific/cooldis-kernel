@@ -26,6 +26,7 @@ verlet blob --help
 verlet tool --help
 verlet auth --help
 verlet rpc --help
+verlet serve --help
 verlet daemon --help
 ```
 

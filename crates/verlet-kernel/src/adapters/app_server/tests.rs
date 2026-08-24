@@ -6007,6 +6007,8 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
     config.state_home = root.join("state");
     config.user_state_home = root.join("user-state");
     config.agent_registry_root = root.join("agents");
+    // lexicon-allow: capsule - existing app-server config field
+    let operation_bindings = config.capsule_bindings.clone();
     let project_store = verlet_metadata::provider_store::SqliteMetadataStore::in_memory()
         .await
         .unwrap();
@@ -6063,7 +6065,7 @@ async fn model_select_mid_turn_keeps_running_turn_on_its_start_endpoint() {
         crate::adapters::app_server::runtime_factory_from_provider_parts_with_turn_endpoint_router(
             runtime_config,
             client.clone(),
-            crate::adapters::app_server::CapsuleBindingsConfig::default(),
+            operation_bindings,
             router.clone(),
         );
     let app = crate::adapters::app_server::VerletAppServer::with_runtime_factory_and_metadata_stores_and_router(
@@ -22856,4 +22858,115 @@ fn text_from_canonical_messages(messages: &[verlet_history::CanonicalMessage]) -
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_starts_at_zero_and_restarts_after_each_connection() {
+    let tracker = std::sync::Arc::new(crate::adapters::app_server::ClientConnectionTracker::new());
+    let first = tracker.enter();
+    let waiter = {
+        let tracker = std::sync::Arc::clone(&tracker);
+        tokio::spawn(async move {
+            tracker
+                .wait_for_idle_timeout(std::time::Duration::from_millis(100))
+                .await;
+        })
+    };
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(!waiter.is_finished());
+
+    drop(first);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(99)).await;
+    assert!(!waiter.is_finished());
+
+    let second = tracker.enter();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(!waiter.is_finished());
+
+    drop(second);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    waiter.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tracked_accepts_count_unix_and_console_websocket_clients_before_return() {
+    let root = unique_test_root("app-server-tracked-accept");
+    std::fs::create_dir_all(&root).unwrap();
+    let unix_path =
+        crate::adapters::app_server::instance::instance_unix_socket_path(&root).unwrap();
+    let unix_listener = tokio::net::UnixListener::bind(&unix_path).unwrap();
+    let unix_tracker =
+        std::sync::Arc::new(crate::adapters::app_server::ClientConnectionTracker::new());
+    let unix_connect = tokio::spawn({
+        let unix_path = unix_path.clone();
+        async move { tokio::net::UnixStream::connect(unix_path).await.unwrap() }
+    });
+    let (_, _, unix_connection) = unix_tracker.accept_unix(&unix_listener).await.unwrap();
+    assert_eq!(
+        unix_tracker
+            .active
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    drop(unix_connection);
+    assert_eq!(
+        unix_tracker
+            .active
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    drop(unix_connect.await.unwrap());
+
+    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_addr = tcp_listener.local_addr().unwrap();
+    let tcp_tracker =
+        std::sync::Arc::new(crate::adapters::app_server::ClientConnectionTracker::new());
+    let tcp_connect =
+        tokio::spawn(async move { tokio::net::TcpStream::connect(tcp_addr).await.unwrap() });
+    let (_, _, tcp_connection) = tcp_tracker.accept_tcp(&tcp_listener).await.unwrap();
+    assert_eq!(
+        tcp_tracker
+            .active
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    drop(tcp_connection);
+    assert_eq!(
+        tcp_tracker
+            .active
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    drop(tcp_connect.await.unwrap());
+    let _ = std::fs::remove_file(unix_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn idle_timeout_counts_in_process_json_rpc_requests() {
+    let app = test_app().await;
+    let dispatch = app.inner.dispatch_gate.write().await;
+    let request = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.local_json_rpc_request("account/read", serde_json::json!({}))
+                .await
+        })
+    };
+    for _ in 0..100 {
+        if app.active_client_connections_for_test() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(app.active_client_connections_for_test(), 1);
+
+    drop(dispatch);
+    request.await.unwrap().unwrap();
+    assert_eq!(app.active_client_connections_for_test(), 0);
+    app.shutdown().await.unwrap();
 }

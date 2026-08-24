@@ -30,18 +30,18 @@ appears only after the stores are open and the Unix socket is bound. Explicit
 server shutdown removes records still owned by that `instance_id`.
 
 A client discovers an instance by reading this record, checking that `pid` is
-live, and then connecting to `unix_socket`. If that connection fails, slice 2
-may try `ws_url` when present. Clients do not scan ports or guess paths. A dead
-PID makes the record stale, but clients leave it in place so the next server
-can overwrite it. PID reuse can make the liveness check appear positive, so a
-successful connection remains the final authority.
+live, and then connecting to `unix_socket`. Clients do not scan ports, guess
+paths, or fall back to a private chat server. A dead PID makes the record stale,
+but clients leave it in place so the next server can overwrite it. PID reuse can
+make the liveness check appear positive, so a successful connection remains the
+final authority.
 
 A configured short Unix listener is used directly. WebSocket listeners and
 configured Unix paths that exceed the platform limit use
 `<state_root>/verlet.sock` when it fits. Deep roots use a deterministic hash in
 the same runtime directory selected by `default_verlet_daemon_socket_path`,
 with the system temporary directory as a final short-path fallback. This keeps
-`console`, TCP WebSocket `rpc`, daemon, private chat, and hosted instances
+`console`, `serve`, TCP WebSocket `rpc`, and hosted instances
 discoverable through a real Unix socket.
 
 ### Standalone RPC quick start
@@ -102,9 +102,10 @@ injects it into `index.html`, and rejects `/rpc` WebSocket upgrades that do not
 present the token through `Sec-WebSocket-Protocol`. Query-string tokens are not
 accepted.
 
-`verlet chat` starts the bundled terminal console. It launches a private app
-server on a temporary Unix socket by default, or attaches to an existing
-endpoint with `--attach`:
+`verlet chat` starts the bundled terminal console and connects to the project
+instance discovered through its endpoint record. If no instance is reachable,
+the shared CLI preamble starts an idle-bounded `verlet serve`. `--attach`
+overrides discovery with a specific endpoint:
 
 ```sh
 cargo run --bin verlet -- chat
@@ -117,8 +118,8 @@ With a prompt argument, it opens the terminal console and submits that prompt:
 cargo run --bin verlet -- chat "hello from verlet"
 ```
 
-`verlet debug rpc` connects to a running standalone or daemon WebSocket app
-server instead of starting a private one. It is useful for protocol debugging
+`verlet debug rpc` connects to a running standalone or server WebSocket app
+server. It is useful for protocol debugging
 and for checking live state from scripts. Export the credential first so each
 command presents it:
 
@@ -168,7 +169,7 @@ as-shipped addendum).
 
 ### Modes
 
-`[daemon.identity]` in the daemon config used by `verlet daemon run` selects
+`[daemon.identity]` in the daemon config used by `verlet serve` selects
 the mode (see `daemon/daemon_config.rs`):
 
 - `local` (default when the section is absent): a synthesized single-operator
@@ -268,8 +269,9 @@ shutdown fails.
 
 ### Bootstrap and credentials
 
-Identity commands edit the offline session store, so stop the daemon first and
-pass the same state home configured at `[daemon.runtime].state_home`:
+Identity commands still edit the offline session store in this slice, so stop
+the server first and pass the same state home configured at
+`[daemon.runtime].state_home`:
 
 ```toml
 [daemon.identity]
@@ -300,7 +302,7 @@ verlet identity mint adapter:gateway \
   --state-home /var/lib/verlet/state
 
 verlet daemon config validate --config verlet.toml
-verlet daemon run --config verlet.toml
+verlet serve --config verlet.toml
 ```
 
 `bootstrap` declares the first operator and mints its credential atomically.
@@ -395,116 +397,28 @@ Result:
 `principalId` and `kind` identify the resolved principal for this authenticated
 session; `kind` is `operator` or `adapter`.
 
+
 ## Provider Config
 
-The chat command can point its private app-server runtime at a live
-provider endpoint. Put non-secret settings in a local `verlet.json`:
+Configure the server in `verlet.toml`, then run `verlet serve` or
+`verlet console`. Client commands do not create a separate provider runtime.
 
-```json
-{
-  "chat": {
-    "provider": "openai",
-    "base_url": "https://api.openai.com",
-    "api_key_env": "OPENAI_API_KEY",
-    "model": "gpt-4.1-mini",
-    "stream": true,
-    "max_tokens": 4096
-  }
-}
+```toml
+[daemon.provider]
+provider = "openai_chat_completions"
+base_url = "https://api.openai.com"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-4.1-mini"
+stream = true
+max_tokens = 4096
 ```
 
-Then run interactive chat:
-
-```sh
-cargo run --bin verlet -- chat
-```
-
-Or pass the provider config on the command line:
-
-```sh
-cargo run --bin verlet -- chat \
-  --provider openai \
-  --base-url https://api.openai.com \
-  --api-key-env OPENAI_API_KEY \
-  --env-file /path/to/local/.env \
-  --model gpt-4.1-mini
-```
-
-It can also talk directly to OpenAI Chat Completions-compatible endpoints:
-
-```json
-{
-  "chat": {
-    "provider": "openai_chat_completions",
-    "base_url": "https://api.openai.com",
-    "api_key_env": "OPENAI_API_KEY",
-    "model": "gpt-4.1-mini",
-    "stream": false,
-    "max_tokens": 4096
-  }
-}
-```
-
-Anthropic Messages-compatible endpoints use the Anthropic provider shape:
-
-```json
-{
-  "chat": {
-    "provider": "anthropic",
-    "base_url": "https://api.anthropic.com",
-    "api_key_env": "ANTHROPIC_API_KEY",
-    "model": "claude-sonnet-4-5-20250929",
-    "stream": true,
-    "max_tokens": 4096
-  }
-}
-```
-
-AWS Bedrock Anthropic uses the Bedrock Runtime `InvokeModel` and
-`InvokeModelWithResponseStream` paths with AWS SigV4 credentials:
-
-```json
-{
-  "chat": {
-    "provider": "anthropic_bedrock",
-    "region": "us-east-1",
-    "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "stream": true,
-    "max_tokens": 4096
-  }
-}
-```
-
-The Sonnet 4.5 Bedrock raw model ID is
-`anthropic.claude-sonnet-4-5-20250929-v1:0`, but Bedrock accounts can require
-an inference profile ID. Verlet defaults to the documented global profile,
-`global.anthropic.claude-sonnet-4-5-20250929-v1:0`; use a regional profile
-such as `us.anthropic.claude-sonnet-4-5-20250929-v1:0` when data routing
-requires it. `anthropic_bedrock` reads credentials from `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
-`AWS_BEDROCK_REGION`/`AWS_REGION`/`AWS_DEFAULT_REGION`. For the local shared
-1Password item, run the child command through `scripts/with-bedrock-env.sh`.
-Streaming uses `InvokeModelWithResponseStream` and decodes AWS
-`application/vnd.amazon.eventstream` frames into the same Anthropic Messages
-stream events as the native Anthropic adapter.
-
-Provider config resolution is:
-
-- `--config <file>`, otherwise `./verlet.json` if it exists;
-- command-line flags override the config file;
-- `--env-file <file>`, `VERLET_CHAT_ENV_FILE`, otherwise `./.env`;
-- base URLs resolve from `base_url`, provider-specific local env, or command
-  line flags;
-- keys resolve from `api_key`, `api_key_env`, or provider-standard env vars
-  such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and AWS Bedrock env vars;
-- models resolve from `model`, command line flags, or provider-specific local
-  env;
-- `max_tokens` defaults to `4096`;
-- streaming defaults to enabled for hosted providers, including
-  `anthropic_bedrock`; local/offline mode remains non-streaming.
-
-Keep real secrets in the environment or a local ignored env file, not in
-committed `verlet.json`.
+Keep real secrets in the environment or in the provider credential store.
+`verlet auth` writes credentials through `modelProvider/auth/*` on the running
+instance, so it can run while `serve` or `console` owns the metadata stores.
+`verlet tool source` uses `mcpSource/*` for the same reason. `verlet chat`
+connects through the shared client preamble. None of these commands requires
+stopping the server or opening a second app-server.
 
 The app-server opens project metadata at `state_home/metadata.sqlite3` and user
 metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
@@ -1371,56 +1285,8 @@ Run the focused MCP server tests:
 cargo test mcp_server
 ```
 
-Run a one-shot local/offline chat proof:
+Run the client-routing subprocess tests:
 
 ```sh
-cargo run --bin verlet -- chat "hello from local chat"
-```
-
-Run an OpenAI Responses-compatible chat proof with a local env file:
-
-```sh
-cargo run --bin verlet -- chat \
-  --provider openai \
-  --base-url https://api.openai.com \
-  --api-key-env OPENAI_API_KEY \
-  --env-file /path/to/local/.env \
-  --model gpt-4.1-mini \
-  "Reply with exactly COOL_CHAT_OPENAI_OK and no other text."
-```
-
-The expected response is exactly:
-
-```text
-COOL_CHAT_OPENAI_OK
-```
-
-Run an OpenAI Chat Completions-compatible proof:
-
-```sh
-cargo run --bin verlet -- chat \
-  --provider openai_chat_completions \
-  --base-url https://api.openai.com \
-  --api-key-env OPENAI_API_KEY \
-  --no-stream \
-  "Reply with exactly COOL_CHAT_COMPLETIONS_OK and no other text."
-```
-
-Run an Anthropic Messages proof:
-
-```sh
-cargo run --bin verlet -- chat \
-  --provider anthropic \
-  --api-key-env ANTHROPIC_API_KEY \
-  --model claude-sonnet-4-5-20250929 \
-  "Reply with exactly COOL_CHAT_ANTHROPIC_OK and no other text."
-```
-
-Run an Anthropic Bedrock proof:
-
-```sh
-scripts/with-bedrock-env.sh cargo run --bin verlet -- chat \
-  --provider anthropic_bedrock \
-  --model global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
-  "Reply with exactly COOL_CHAT_BEDROCK_OK and no other text."
+cargo nextest run -p verlet --test verlet_client_routing --test daemon_smoke
 ```

@@ -356,10 +356,6 @@ pub(crate) fn parse_secret_list_args(
     Ok(SecretListArgs { state_home, help })
 }
 
-pub(crate) fn default_project_state_home() -> std::path::PathBuf {
-    std::path::PathBuf::from(".verlet/state")
-}
-
 pub(crate) fn default_user_state_home()
 -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
     Ok(crate::cli::console::default_user_verlet_home()?.join("state"))
@@ -391,39 +387,10 @@ pub(crate) async fn open_secret_store(
     })
 }
 
-pub(crate) async fn open_provider_store(
-    state_home: Option<std::path::PathBuf>,
-) -> crate::kernel::runtime_host::VerletResult<verlet_metadata::provider_store::SqliteMetadataStore>
-{
-    let store = verlet_metadata::provider_store::SqliteMetadataStore::open(
-        metadata_store_path_for_state_home(state_home, default_user_state_home()?),
-    )
-    .await
-    .map_err(|err| {
-        if crate::adapters::app_server::instance::turso_cross_process_lock_error(&err.to_string()) {
-            crate::adapters::app_server::instance::cross_process_database_guidance()
-        } else {
-            provider_cli_error(err)
-        }
-    })?;
-    verlet_metadata::provider_store::seed_default_llm_providers(&store)
-        .await
-        .map_err(provider_cli_error)?;
-    Ok(store)
-}
-
 pub(crate) fn secret_cli_error(
     err: impl std::fmt::Display,
 ) -> crate::kernel::runtime_host::VerletError {
     crate::kernel::runtime_host::VerletError::RuntimeFactory(format!("secret store failed: {err}"))
-}
-
-pub(crate) fn provider_cli_error(
-    err: impl std::fmt::Display,
-) -> crate::kernel::runtime_host::VerletError {
-    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-        "provider store failed: {err}"
-    ))
 }
 
 pub(crate) fn secret_source_display(

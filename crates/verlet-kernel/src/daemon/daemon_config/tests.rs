@@ -629,6 +629,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
     let discovered = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(discovered.root, workspace);
     assert_eq!(discovered.config_path, None);
+    assert!(discovered.found_project);
 
     let configured = root.join("configured");
     let configured_nested = configured.join("a/b");
@@ -642,6 +643,7 @@ fn discovers_project_root_from_nearest_config_then_dot_verlet() {
         discovered.config_path,
         Some(discovered.root.join("verlet.toml"))
     );
+    assert!(discovered.found_project);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -658,6 +660,7 @@ fn project_discovery_ignores_legacy_config() {
     let legacy_only = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
     assert_eq!(legacy_only.root, nested);
     assert_eq!(legacy_only.config_path, None);
+    assert!(!legacy_only.found_project);
 
     std::fs::write(&canonical, "").unwrap();
     let both = crate::daemon::daemon_config::discover_verlet_project(&nested).unwrap();
@@ -1203,18 +1206,40 @@ fn renders_launchd_and_systemd_services() {
         &spec,
     );
     assert!(launchd.contains("<string>com.example.verlet</string>"));
-    assert!(launchd.contains("<string>daemon</string>"));
+    assert!(launchd.contains("<string>serve</string>"));
+    assert!(launchd.contains("<string>--no-idle-timeout</string>"));
     assert!(launchd.contains("<string>--config</string>"));
 
     let systemd = crate::daemon::daemon_config::render_verlet_daemon_service(
         crate::daemon::daemon_config::VerletDaemonServiceTarget::Systemd,
         &spec,
     );
-    assert!(
-        systemd
-            .contains("ExecStart=/usr/local/bin/verlet daemon run --config /Users/me/verlet.toml")
-    );
+    assert!(systemd.contains(
+        "ExecStart=/usr/local/bin/verlet serve --no-idle-timeout --config /Users/me/verlet.toml"
+    ));
     assert!(systemd.contains("WorkingDirectory=/Users/me/project"));
+}
+
+#[test]
+fn daemon_idle_timeout_uses_human_duration_syntax() {
+    let config =
+        crate::daemon::daemon_config::decode_daemon_config("[daemon]\nidle_timeout = \"2s\"\n")
+            .unwrap();
+
+    assert_eq!(
+        config.idle_timeout().unwrap(),
+        Some(std::time::Duration::from_secs(2))
+    );
+
+    let invalid =
+        crate::daemon::daemon_config::decode_daemon_config("[daemon]\nidle_timeout = \"later\"\n")
+            .unwrap();
+    assert!(
+        invalid
+            .validation_errors()
+            .iter()
+            .any(|error| error.starts_with("idle_timeout:"))
+    );
 }
 
 #[test]

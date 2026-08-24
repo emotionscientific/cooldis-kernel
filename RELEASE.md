@@ -57,6 +57,10 @@ After installation, the normal local entrypoint is:
 verlet console
 ```
 
+The foreground server entrypoint is `verlet serve`. Releases do not include a
+`verlet daemon run` compatibility alias. `verlet daemon` contains only config
+validation and service-file management.
+
 ## Local Packaging
 
 Build the host target:
@@ -88,7 +92,8 @@ scripts/smoke-install.sh "$archive"
 
 The package smoke verifies the canonical CLI help surface, including
 `verlet commands`, `verlet chat --help`, `verlet auth --help`,
-`verlet tool manual --help`, and `verlet debug rpc --help`.
+`verlet serve --help`, `verlet tool manual --help`, and
+`verlet debug rpc --help`.
 
 ## Async Publishing
 
