@@ -419,6 +419,24 @@ mod tests {
     }
 
     #[test]
+    fn renders_non_utf8_match_lines_lossily_without_confusing_char_and_byte_caps() {
+        let root = tempfile::tempdir().unwrap();
+        let mut content = "🙂".repeat(crate::MAX_LINE_CHARS).into_bytes();
+        content.extend_from_slice(&[0xff]);
+        content.extend_from_slice(b"hit\n");
+        std::fs::write(root.path().join("invalid.txt"), content).unwrap();
+
+        let output = crate::run(args("hit"), &fs(root.path())).unwrap();
+
+        assert_eq!(
+            output.text,
+            format!("invalid.txt:1: {}…", "🙂".repeat(crate::MAX_LINE_CHARS))
+        );
+        assert!(output.text.len() > crate::MAX_LINE_CHARS);
+        assert!(output.text.len() < verlet_tool_core::MAX_RESULT_BYTES);
+    }
+
+    #[test]
     fn optional_glob_filters_root_relative_file_paths() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
@@ -458,6 +476,44 @@ mod tests {
         assert!(glob_error
             .to_string()
             .starts_with("invalid arguments: invalid glob pattern"));
+    }
+
+    #[test]
+    fn zero_limit_is_rejected_and_maximum_u64_bounds_are_safe() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), "before\nhit\nafter\n").unwrap();
+
+        let mut zero_search = args("hit");
+        zero_search.limit = Some(0);
+        let zero = crate::run(zero_search, &fs(root.path())).unwrap_err();
+        let mut maximum_search = args("hit");
+        maximum_search.limit = Some(u64::MAX);
+        maximum_search.context = Some(u64::MAX);
+        let maximum = crate::run(maximum_search, &fs(root.path())).unwrap();
+
+        assert_eq!(
+            zero.to_string(),
+            "invalid arguments: limit must be at least 1"
+        );
+        assert_eq!(
+            maximum.text,
+            "file.txt:1- before\nfile.txt:2: hit\nfile.txt:3- after"
+        );
+        assert!(!maximum.limit_reached);
+    }
+
+    #[test]
+    fn multibyte_clipped_rows_still_obey_the_result_byte_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let line = format!("{}hit\n", "🙂".repeat(crate::MAX_LINE_CHARS + 1));
+        let line_count = 2200;
+        std::fs::write(root.path().join("large.txt"), line.repeat(line_count)).unwrap();
+        let mut search = args("hit");
+        search.limit = Some(line_count as u64);
+
+        let error = crate::run(search, &fs(root.path())).unwrap_err();
+
+        assert!(matches!(error, verlet_tool_core::ToolError::ResultTooLarge));
     }
 
     #[test]

@@ -84,6 +84,13 @@ pub fn run(
         ));
     }
 
+    let stat = fs.stat(&args.path)?;
+    if !stat.is_file {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "path {:?} is not a file",
+            args.path
+        )));
+    }
     let bytes = fs.read_file(&args.path)?;
     let content = String::from_utf8_lossy(&bytes);
     let lines = content.split('\n').collect::<Vec<_>>();
@@ -212,6 +219,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_directory_with_a_stable_error() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = crate::run(args(".", None, None), &fs(root.path())).unwrap_err();
+
+        assert_eq!(error.to_string(), "path \".\" is not a file");
+    }
+
+    #[test]
     fn rejects_a_result_larger_than_the_cap() {
         let root = tempfile::tempdir().unwrap();
         let content = vec![b'x'; verlet_tool_core::MAX_RESULT_BYTES + 1];
@@ -233,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn applies_the_result_cap_after_lossy_utf8_expansion() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![0xff; verlet_tool_core::MAX_RESULT_BYTES / 3 + 1];
+        assert!(bytes.len() < verlet_tool_core::MAX_RESULT_BYTES);
+        std::fs::write(root.path().join("invalid.txt"), bytes).unwrap();
+
+        let error = crate::run(args("invalid.txt", None, None), &fs(root.path())).unwrap_err();
+
+        assert!(matches!(error, verlet_tool_core::ToolError::ResultTooLarge));
+    }
+
+    #[test]
     fn rejects_zero_offset_and_limit() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file.txt"), "content").unwrap();
@@ -248,6 +276,26 @@ mod tests {
         assert_eq!(
             limit_error.to_string(),
             "invalid arguments: limit must be at least 1"
+        );
+    }
+
+    #[test]
+    fn maximum_u64_limit_is_bounded_by_the_available_lines() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), "one\ntwo").unwrap();
+
+        let output =
+            crate::run(args("file.txt", Some(1), Some(u64::MAX)), &fs(root.path())).unwrap();
+        let offset_error = crate::run(
+            args("file.txt", Some(u64::MAX), Some(u64::MAX)),
+            &fs(root.path()),
+        )
+        .unwrap_err();
+
+        assert_eq!(output.text, "one\ntwo");
+        assert_eq!(
+            offset_error.to_string(),
+            format!("offset {} is past end of file (2 total lines)", u64::MAX)
         );
     }
 }

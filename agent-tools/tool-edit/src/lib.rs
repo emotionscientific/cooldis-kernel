@@ -109,6 +109,13 @@ pub fn run(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let stat = fs.stat(&args.path)?;
+    if !stat.is_file {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "path {:?} is not a file",
+            args.path
+        )));
+    }
     let bytes = fs.read_file(&args.path)?;
     let (bom, text_bytes) = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         (&bytes[..3], &bytes[3..])
@@ -560,6 +567,58 @@ mod tests {
             std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
             "XYZ789\ncoffee\n"
         );
+    }
+
+    #[test]
+    fn normalized_spans_remain_byte_aligned_after_multibyte_prefixes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("file.txt"),
+            "🙂 préface\nconsole.log(‘hello’);\n終わり\n",
+        )
+        .unwrap();
+
+        crate::run(
+            args(
+                "file.txt",
+                &[("console.log('hello');", "console.log('world');")],
+            ),
+            &fs(root.path()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+            "🙂 préface\nconsole.log('world');\n終わり\n"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_and_empty_files_return_structured_errors() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("invalid.txt"), [0xff]).unwrap();
+        std::fs::write(root.path().join("empty.txt"), b"").unwrap();
+        let fs = fs(root.path());
+
+        let invalid = crate::run(args("invalid.txt", &[("x", "y")]), &fs).unwrap_err();
+        let empty = crate::run(args("empty.txt", &[("x", "y")]), &fs).unwrap_err();
+
+        assert!(invalid
+            .to_string()
+            .starts_with("file invalid.txt is not valid UTF-8:"));
+        assert_eq!(
+            empty.to_string(),
+            "edits[0].old_text \"x\" was not found in empty.txt"
+        );
+    }
+
+    #[test]
+    fn rejects_a_directory_with_the_shared_file_error_shape() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = crate::run(args(".", &[("x", "y")]), &fs(root.path())).unwrap_err();
+
+        assert_eq!(error.to_string(), "path \".\" is not a file");
     }
 
     #[test]

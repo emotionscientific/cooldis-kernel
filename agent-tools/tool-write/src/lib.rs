@@ -60,13 +60,21 @@ pub fn run(
     fs: &dyn verlet_tool_core::ToolFs,
 ) -> Result<WriteOutput, verlet_tool_core::ToolError> {
     let replaced = fs.exists(&args.path)?;
-    if replaced && !args.overwrite {
+    if replaced {
         let stat = fs.stat(&args.path)?;
-        return Err(verlet_tool_core::ToolError::Failed(format!(
-            "file {} exists ({} bytes); read it first and pass overwrite: true to replace it",
-            args.path.display(),
-            stat.size
-        )));
+        if !stat.is_file {
+            return Err(verlet_tool_core::ToolError::Failed(format!(
+                "path {:?} is not a file",
+                args.path
+            )));
+        }
+        if !args.overwrite {
+            return Err(verlet_tool_core::ToolError::Failed(format!(
+                "file {} exists ({} bytes); read it first and pass overwrite: true to replace it",
+                args.path.display(),
+                stat.size
+            )));
+        }
     }
 
     if let Some(parent) = args.path.parent() {
@@ -161,5 +169,14 @@ mod tests {
 
         assert_eq!(output.bytes_written, 2);
         assert!(!output.replaced);
+    }
+
+    #[test]
+    fn rejects_a_directory_with_the_shared_file_error_shape() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = crate::run(args("", "content", false), &fs(root.path())).unwrap_err();
+
+        assert_eq!(error.to_string(), "path \"\" is not a file");
     }
 }

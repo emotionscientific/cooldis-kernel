@@ -290,35 +290,42 @@ impl StdFs {
     fn resolve(&self, path: &std::path::Path) -> Result<std::path::PathBuf, ToolFsError> {
         let root = lexical_normalize(&self.root);
         let canonical_root = self.canonical_root()?;
-        let normalized = if path.is_absolute() {
-            lexical_normalize(path)
+        let relative = if path.is_absolute() {
+            path.strip_prefix(&root)
+                .or_else(|_| path.strip_prefix(&canonical_root))
+                .map_err(|_| ToolFsError::Denied(path.to_path_buf()))?
         } else {
-            lexical_normalize(&root.join(path))
+            path
         };
-        let relative = normalized
-            .strip_prefix(&root)
-            .or_else(|_| normalized.strip_prefix(&canonical_root))
-            .map_err(|_| ToolFsError::Denied(path.to_path_buf()))?;
-
-        let components = relative.iter().collect::<Vec<_>>();
         let mut resolved = canonical_root.clone();
-        for (index, component) in components.iter().enumerate() {
-            resolved.push(component);
-            match std::fs::symlink_metadata(&resolved) {
-                Ok(_) => {
-                    resolved = std::fs::canonicalize(&resolved)
-                        .map_err(|error| map_io_error(path, error))?;
-                    if !resolved.starts_with(&canonical_root) {
+        for component in relative.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if resolved == canonical_root
+                        || !resolved.pop()
+                        || !resolved.starts_with(&canonical_root)
+                    {
                         return Err(ToolFsError::Denied(path.to_path_buf()));
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    for missing in &components[index + 1..] {
-                        resolved.push(missing);
+                std::path::Component::Normal(part) => {
+                    resolved.push(part);
+                    match std::fs::symlink_metadata(&resolved) {
+                        Ok(_) => {
+                            resolved = std::fs::canonicalize(&resolved)
+                                .map_err(|error| map_io_error(path, error))?;
+                            if !resolved.starts_with(&canonical_root) {
+                                return Err(ToolFsError::Denied(path.to_path_buf()));
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(map_io_error(path, error)),
                     }
-                    return Ok(resolved);
                 }
-                Err(error) => return Err(map_io_error(path, error)),
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    return Err(ToolFsError::Denied(path.to_path_buf()));
+                }
             }
         }
 
@@ -504,19 +511,94 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_escape_is_denied() {
+    fn symlink_chain_escape_is_denied() {
         let outer = tempfile::tempdir().unwrap();
         let root = outer.path().join("root");
         let outside = outer.path().join("outside");
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink("second-link", root.join("first-link")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("second-link")).unwrap();
+        let fs = crate::StdFs::new(&root).unwrap();
+
+        let error = crate::ToolFs::read_file(&fs, std::path::Path::new("first-link/secret.txt"))
+            .unwrap_err();
+        assert!(matches!(error, crate::ToolFsError::Denied(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_after_an_escaping_symlink_is_denied_before_lexical_collapse() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        let outside = outer.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("secret.txt"), "inside").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         let fs = crate::StdFs::new(&root).unwrap();
 
         let error =
-            crate::ToolFs::read_file(&fs, std::path::Path::new("link/secret.txt")).unwrap_err();
+            crate::ToolFs::read_file(&fs, std::path::Path::new("link/../secret.txt")).unwrap_err();
+
         assert!(matches!(error, crate::ToolFsError::Denied(_)));
+    }
+
+    #[test]
+    fn absolute_paths_use_component_prefixes_and_missing_parents_cannot_escape() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        let colliding_root = outer.path().join("rootx");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&colliding_root).unwrap();
+        std::fs::write(root.join("inside.txt"), "inside").unwrap();
+        std::fs::write(colliding_root.join("outside.txt"), "outside").unwrap();
+        let fs = crate::StdFs::new(&root).unwrap();
+
+        assert_eq!(
+            crate::ToolFs::read_file(&fs, &root.join("inside.txt")).unwrap(),
+            b"inside"
+        );
+        let prefix_collision =
+            crate::ToolFs::read_file(&fs, &colliding_root.join("outside.txt")).unwrap_err();
+        let missing_tail = crate::ToolFs::write_file(
+            &fs,
+            std::path::Path::new("missing/../../outside.txt"),
+            b"escape",
+        )
+        .unwrap_err();
+
+        assert!(matches!(prefix_collision, crate::ToolFsError::Denied(_)));
+        assert!(matches!(missing_tail, crate::ToolFsError::Denied(_)));
+    }
+
+    #[test]
+    fn gitignore_matches_git_for_anchoring_directory_rules_and_pruned_negation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("nested/dir")).unwrap();
+        std::fs::create_dir(root.path().join("pruned")).unwrap();
+        std::fs::write(
+            root.path().join(".gitignore"),
+            "/foo\ndir/\npruned/\n!pruned/keep.txt\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("foo"), "ignored").unwrap();
+        std::fs::write(root.path().join("nested/foo"), "visible").unwrap();
+        std::fs::write(root.path().join("dir"), "visible file").unwrap();
+        std::fs::write(root.path().join("nested/dir/child"), "ignored").unwrap();
+        std::fs::write(root.path().join("pruned/keep.txt"), "still ignored").unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![".gitignore", "dir", "nested/foo"]
+        );
     }
 
     #[cfg(unix)]

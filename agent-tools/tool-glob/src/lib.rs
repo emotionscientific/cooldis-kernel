@@ -225,6 +225,22 @@ mod tests {
             .starts_with("invalid arguments: invalid glob pattern"));
     }
 
+    #[test]
+    fn zero_limit_is_rejected_and_maximum_u64_limit_is_safe() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), "content").unwrap();
+
+        let zero = crate::run(args("**", Some(0)), &fs(root.path())).unwrap_err();
+        let maximum = crate::run(args("**", Some(u64::MAX)), &fs(root.path())).unwrap();
+
+        assert_eq!(
+            zero.to_string(),
+            "invalid arguments: limit must be at least 1"
+        );
+        assert_eq!(maximum.paths, vec!["file.txt"]);
+        assert!(!maximum.limit_reached);
+    }
+
     struct RecordingFs {
         inner: verlet_tool_core::StdFs,
         read_dirs: std::cell::RefCell<Vec<std::path::PathBuf>>,
