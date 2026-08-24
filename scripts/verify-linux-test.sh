@@ -189,6 +189,8 @@ case "${1:-}" in
     expect_arg -c "${1-}"
     shift
     (($# == 1)) || die 'container command must be one bash -c argument'
+    bash -n <<<"$1" \
+      || die 'container command is not syntactically valid Bash'
     [[ "$1" == *"trap 'exit 130' INT"* ]] \
       || die 'container command does not map Ctrl-C to status 130'
     [[ "$1" == *"trap 'exit 143' TERM"* ]] \
@@ -201,6 +203,30 @@ case "${1:-}" in
       || die 'container command does not settle platform-specific lane locks'
     [[ "$1" == *'bash scripts/verify.sh'* ]] \
       || die 'container command does not run the full verifier'
+    [[ "$1" == *'ps -eo pid,pgid,sid,stat,args'* ]] \
+      || die 'container command does not capture process snapshots'
+    [[ "$1" == *'>> "$snapshot_log"'* ]] \
+      || die 'process snapshots are not appended to the diagnostic log'
+    [[ "$1" == *'date -u +%Y-%m-%dT%H:%M:%SZ'* ]] \
+      || die 'process snapshots do not carry UTC timestamps'
+    [[ "$1" == *'snapshot_limit_bytes=$((20 * 1024 * 1024))'* ]] \
+      || die 'process snapshot log is not bounded to about 20 MB'
+    [[ "$1" == *'mktemp "$snapshot_log.trim.XXXXXX"'* ]] \
+      && [[ "$1" == *'rm -f "$snapshot_log".trim.* 2>/dev/null || true'* ]] \
+      || die 'snapshot trim files are not unique and cleaned across runs'
+    [[ "$1" == *"trap 'stop_snapshot_sleep; exit 0' HUP INT QUIT TERM"* ]] \
+      || die 'stopping the snapshot watcher can orphan its sleep process'
+    [[ "$1" == *'if ((verify_status == 137)); then'* ]] \
+      || die 'container command does not diagnose a killed verifier'
+    [[ "$1" == *"grep -n '^=== process snapshot ' \"\$snapshot_log\" 2>/dev/null | tail -n 3"* ]] \
+      || die 'killed verifier diagnostics do not select recent snapshots'
+    [[ "$1" == *'capture Docker Desktop VM dmesg before the VM restarts'* ]] \
+      || die 'killed verifier diagnostics omit the dmesg reminder'
+    [[ "$1" == *'print_process_snapshot_diagnostics >&2 || true'* ]] \
+      || die 'snapshot diagnostics can replace the verifier status on output failure'
+    [[ "$1" == *'if ((verify_status == 0)); then'* ]] \
+      && [[ "$1" == *'rm -f "$snapshot_log" || true'* ]] \
+      || die 'clean verification does not remove the snapshot log'
     [[ "$1" == *'exit "$verify_status"'* ]] \
       || die 'container command does not preserve the verifier status'
     exit "${FAKE_DOCKER_RUN_EXIT:-0}"
@@ -272,6 +298,17 @@ assert_file_contains "$TMP_DIR/main-dry.out" \
   'poisoned toolchain cache fails closed with the documented reset command'
 assert_file_contains "$TMP_DIR/main-dry.out" 'verify_status=' \
   'container shutdown preserves the verify status while locks settle'
+assert_file_contains "$TMP_DIR/main-dry.out" \
+  'ps -eo pid,pgid,sid,stat,args' \
+  'container bootstrap captures process identity snapshots'
+# This is a literal from the generated command.
+# shellcheck disable=SC2016
+assert_file_contains "$TMP_DIR/main-dry.out" \
+  'snapshot_limit_bytes=$((20 * 1024 * 1024))' \
+  'container bootstrap bounds the process snapshot log'
+assert_file_contains "$TMP_DIR/main-dry.out" \
+  'capture Docker Desktop VM dmesg before the VM restarts' \
+  'container bootstrap carries the host dmesg reminder'
 assert_file_contains "$TMP_DIR/main-dry.out" "trap \\'exit 130\\' INT" \
   'container bootstrap maps Ctrl-C to status 130 while blocked'
 assert_file_contains "$TMP_DIR/main-dry.out" "trap \\'exit 143\\' TERM" \
