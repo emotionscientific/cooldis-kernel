@@ -8,6 +8,8 @@ TAG="${GITHUB_REF_NAME:-}"
 CHANNEL="${VERLET_RELEASE_CHANNEL:-stable}"
 BASE_URL=""
 
+source "$ROOT/scripts/release-version.sh"
+
 usage() {
   cat <<'USAGE'
 write-release-manifest.sh - write latest.json for Verlet release assets.
@@ -62,7 +64,7 @@ sha256_from_file() {
 }
 
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/verlet-kernel/Cargo.toml" | head -n 1
+  read_verlet_workspace_version "$ROOT/Cargo.toml"
 )"
 if [[ -z "$VERSION" ]]; then
   echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${1:-${GITHUB_REF_NAME:-}}"
 
+source "$ROOT/scripts/release-version.sh"
+
 usage() {
   cat <<'USAGE'
 check-release-tag.sh - validate a Verlet release tag against the kernel version.
@@ -29,7 +31,7 @@ if [[ -z "$TAG" ]]; then
 fi
 
 VERSION="$(
-  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/verlet-kernel/Cargo.toml" | head -n 1
+  read_verlet_workspace_version "$ROOT/Cargo.toml"
 )"
 if [[ -z "$VERSION" ]]; then
   echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
