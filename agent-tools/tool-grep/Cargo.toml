@@ -1,0 +1,28 @@
+[package]
+name = "verlet-tool-grep"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Content search tool on the ripgrep engine (model-facing `grep`)"
+
+[dependencies]
+verlet-tool-core = { path = "../tool-core" }
+globset = { workspace = true }
+grep-regex = { workspace = true }
+grep-searcher = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+cli = ["verlet-tool-core/std-fs"]
+
+[[bin]]
+name = "tool-grep"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+verlet-tool-core = { path = "../tool-core", features = ["std-fs"] }
+verlet-tool-glob = { path = "../tool-glob" }

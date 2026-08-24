@@ -21,6 +21,12 @@ members = [
     "crates/verlet-io-pgqrs",
     "crates/verlet-io-telegram",
     "tools/trace-ab",
+    "agent-tools/tool-core",
+    "agent-tools/tool-read",
+    "agent-tools/tool-write",
+    "agent-tools/tool-edit",
+    "agent-tools/tool-glob",
+    "agent-tools/tool-grep",
 ]
 default-members = ["crates/verlet-kernel"]
 resolver = "3"
@@ -41,9 +47,13 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures-executor = "0.3"
 futures-util = "0.3.32"
 getrandom = "0.3"
+globset = "0.4.20"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
 hex = "0.4"
 hmac = "0.13"
 humantime = "2.3"
+ignore = "0.4.33"
 libc = "0.2"
 log = "0.4"
 object_store = { version = "0.13.2", features = ["aws"] }
