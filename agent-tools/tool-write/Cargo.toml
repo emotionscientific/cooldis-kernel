@@ -1,0 +1,20 @@
+[package]
+name = "verlet-tool-write"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "File creation tool with overwrite guard (model-facing `write`)"
+
+[dependencies]
+verlet-tool-core = { path = "../tool-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+cli = ["verlet-tool-core/std-fs"]
+
+[[bin]]
+name = "tool-write"
+path = "src/main.rs"
+required-features = ["cli"]

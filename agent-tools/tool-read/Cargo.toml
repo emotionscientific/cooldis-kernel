@@ -1,0 +1,20 @@
+[package]
+name = "verlet-tool-read"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Line-range file read tool (model-facing `read`)"
+
+[dependencies]
+verlet-tool-core = { path = "../tool-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+cli = ["verlet-tool-core/std-fs"]
+
+[[bin]]
+name = "tool-read"
+path = "src/main.rs"
+required-features = ["cli"]

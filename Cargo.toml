@@ -21,6 +21,12 @@ members = [
     "crates/verlet-io-pgqrs",
     "crates/verlet-io-telegram",
     "tools/trace-ab",
+    "agent-tools/tool-core",
+    "agent-tools/tool-read",
+    "agent-tools/tool-write",
+    "agent-tools/tool-edit",
+    "agent-tools/tool-glob",
+    "agent-tools/tool-grep",
 ]
 default-members = ["crates/verlet-kernel"]
 resolver = "3"

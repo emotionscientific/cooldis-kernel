@@ -6105,6 +6105,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "verlet-tool-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "verlet-tool-edit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-tool-core",
+]
+
+[[package]]
+name = "verlet-tool-glob"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-tool-core",
+]
+
+[[package]]
+name = "verlet-tool-grep"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-tool-core",
+]
+
+[[package]]
+name = "verlet-tool-read"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-tool-core",
+]
+
+[[package]]
+name = "verlet-tool-write"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-tool-core",
+]
+
+[[package]]
 name = "verlet-trace-ab"
 version = "0.5.0"
 dependencies = [

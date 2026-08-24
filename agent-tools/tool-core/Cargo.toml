@@ -1,0 +1,17 @@
+[package]
+name = "verlet-tool-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Shared trait and contract types for the standalone agent file tools"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+# Native std::fs backend (`StdFs`). Off by default so tool cores stay
+# wasm32-compilable without it.
+std-fs = []
