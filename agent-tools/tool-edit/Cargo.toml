@@ -9,6 +9,8 @@ description = "Exact-match file edit tool (model-facing `edit`)"
 verlet-tool-core = { path = "../tool-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+similar = { version = "3.2", default-features = false, features = ["std", "text"] }
+unicode-normalization = "0.1"
 
 [features]
 default = []
@@ -18,3 +20,7 @@ cli = ["verlet-tool-core/std-fs"]
 name = "tool-edit"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[dev-dependencies]
+tempfile = "3"
+verlet-tool-core = { path = "../tool-core", features = ["std-fs"] }
