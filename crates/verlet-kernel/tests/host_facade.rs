@@ -261,8 +261,7 @@ provider = "local_offline"
         .unwrap();
     assert!(status.success(), "host process exited with {status}");
 
-    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
-    drop(rebound);
+    support::address::assert_addr_released(addr).await;
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -331,8 +330,7 @@ provider = "local_offline"
     assert!(!output.status.success(), "host boot unexpectedly succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("verlet host listening"), "{stderr}");
-    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
-    drop(rebound);
+    support::address::assert_addr_released(addr).await;
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -13,6 +13,8 @@
 
 #![allow(dead_code)]
 
+#[path = "address.rs"]
+pub(crate) mod address;
 #[path = "event_trace.rs"]
 pub(crate) mod event_trace;
 #[path = "fault.rs"]
