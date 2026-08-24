@@ -60,7 +60,7 @@ fn cli_returns_json_and_exit_one_for_a_tool_error() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
         serde_json::json!({
-            "error": "offset 2 is past end of file (1 total lines)"
+            "error": "Offset 2 is beyond end of file (1 lines total)"
         })
     );
 }

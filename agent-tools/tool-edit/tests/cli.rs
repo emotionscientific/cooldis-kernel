@@ -8,7 +8,7 @@ fn cli_edits_a_file_within_its_confined_root() {
         "root": root.path(),
         "args": {
             "path": "file.txt",
-            "edits": [{"old_text": "world", "new_text": "there"}]
+            "edits": [{"oldText": "world", "newText": "there"}]
         }
     });
 
@@ -27,7 +27,14 @@ fn cli_edits_a_file_within_its_confined_root() {
     assert!(output.status.success(), "{output:?}");
     let value = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
     assert_eq!(value["ok"]["edits_applied"], 1);
-    assert!(value["ok"]["diff"].as_str().unwrap().contains("+there"));
+    assert_eq!(
+        value["ok"]["text"],
+        "Successfully replaced 1 block(s) in file.txt."
+    );
+    assert!(value["ok"]["details"]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("+2 there"));
     assert_eq!(
         std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
         "hello\nthere\n"

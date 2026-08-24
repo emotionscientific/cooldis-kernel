@@ -1,28 +1,19 @@
-//! `read` — line-range file access.
+//! `read` — Pi-compatible line-range file access.
 //!
-//! Ported from Pi's read tool (`core/tools/read.ts`), slimmed per design:
+//! Image viewing remains a separate optional package. Text behavior follows
+//! Pi, including automatic complete-line head truncation at 2,000 lines or
+//! 50 KiB and addressable continuation notices.
 //!
-//! - **No image branch.** Image viewing is a separate optional package.
-//! - **No smart truncation messaging.** The lossless spill coupling owns
-//!   context protection. `read` keeps `offset`/`limit` because line
-//!   addressing is the primitive that makes spill files (and any large
-//!   file) walkable; the result reports the range returned and the total
-//!   line count so the model can continue on its own.
-//!
-//! Pinned semantics (implementation ticket must match, with fixtures):
+//! Pinned semantics:
 //! - `offset` is 1-indexed; `offset` past end of file is an error naming
 //!   the file's total line count.
-//! - No `limit` → to end of file, subject to `MAX_RESULT_BYTES` (error,
-//!   not silent truncation, when exceeded — the model narrows with
-//!   offset/limit).
+//! - No `limit` → to end of file before Pi's automatic truncation.
 //! - Content is returned verbatim (no line numbering, no tab expansion);
 //!   UTF-8 with lossy replacement for invalid bytes.
-//! - Trailer line `[lines {start}-{end} of {total}]` is appended after a
-//!   blank line whenever the returned range is not the whole file.
+//! - Caller limits and automatic truncation use Pi's exact continuation text.
 //! - Line accounting follows Pi's newline split: an empty file is one empty
 //!   logical line, and a terminal newline creates a final empty line.
-//! - The result byte cap applies to the final rendered text, after lossy UTF-8
-//!   conversion and after adding any partial-range trailer.
+//! - The 4 MiB result cap remains only as a final structured-result backstop.
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ReadArgs {
@@ -30,9 +21,9 @@ pub struct ReadArgs {
     /// within the granted scope).
     pub path: std::path::PathBuf,
     /// Line number to start reading from (1-indexed).
-    pub offset: Option<u64>,
+    pub offset: Option<i64>,
     /// Maximum number of lines to read.
-    pub limit: Option<u64>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -46,15 +37,15 @@ pub struct ReadOutput {
     pub end_line: u64,
     /// Total lines in the file.
     pub total_lines: u64,
+    /// Present only when automatic 2,000-line/50 KiB truncation occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<verlet_tool_core::TruncationResult>,
 }
 
 pub fn contract() -> verlet_tool_core::ToolContract {
     verlet_tool_core::ToolContract {
         name: "read",
-        description: "Read the contents of a text file. Returns the file verbatim. \
-                      For large files use offset (1-indexed start line) and limit \
-                      (max lines) to read in ranges; the result reports which lines \
-                      of how many were returned.",
+        description: "Read the contents of a file. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -72,52 +63,87 @@ pub fn run(
     args: ReadArgs,
     fs: &dyn verlet_tool_core::ToolFs,
 ) -> Result<ReadOutput, verlet_tool_core::ToolError> {
-    let offset = args.offset.unwrap_or(1);
-    if offset == 0 {
-        return Err(verlet_tool_core::ToolError::InvalidArgs(
-            "offset must be at least 1".to_owned(),
-        ));
-    }
-    if args.limit == Some(0) {
-        return Err(verlet_tool_core::ToolError::InvalidArgs(
-            "limit must be at least 1".to_owned(),
-        ));
-    }
-
-    let stat = fs.stat(&args.path)?;
-    if !stat.is_file {
-        return Err(verlet_tool_core::ToolError::Failed(format!(
-            "path {:?} is not a file",
-            args.path
-        )));
-    }
-    let bytes = fs.read_file(&args.path)?;
+    let input_path = args.path;
+    let path = verlet_tool_core::normalize_tool_path(&input_path);
+    let bytes = fs.read_file(&path)?;
     let content = String::from_utf8_lossy(&bytes);
     let lines = content.split('\n').collect::<Vec<_>>();
     let total_lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+    let requested_offset = args.offset;
+    let start_index_i64 = match requested_offset {
+        Some(offset) if offset != 0 => offset.saturating_sub(1).max(0),
+        _ => 0,
+    };
 
-    if offset > total_lines {
-        return Err(offset_past_end(offset, total_lines));
+    if i128::from(start_index_i64) >= lines.len() as i128 {
+        return Err(offset_past_end(requested_offset.unwrap_or(1), total_lines));
     }
 
-    let start_index = usize::try_from(offset - 1)
+    let start_index = usize::try_from(start_index_i64)
         .map_err(|_| verlet_tool_core::ToolError::InvalidArgs("offset is too large".to_owned()))?;
-    let available = lines.len() - start_index;
-    let selected_count = match args.limit {
-        Some(limit) => usize::try_from(limit).unwrap_or(usize::MAX).min(available),
-        None => available,
-    };
-    let end_index = start_index + selected_count;
-    let mut text = lines[start_index..end_index].join("\n");
-    let end_line = u64::try_from(end_index).unwrap_or(u64::MAX);
-
-    if offset != 1 || end_line != total_lines {
-        if text.ends_with('\n') {
-            text.push('\n');
-        } else {
-            text.push_str("\n\n");
+    let (end_index, user_limit_end) = match args.limit {
+        Some(limit) => {
+            let numeric_end =
+                (start_index_i64 as i128 + i128::from(limit)).min(lines.len() as i128);
+            let slice_end = if numeric_end < 0 {
+                (lines.len() as i128 + numeric_end).max(0)
+            } else {
+                numeric_end
+            }
+            .clamp(0, lines.len() as i128) as usize;
+            (slice_end.max(start_index), Some(numeric_end))
         }
-        text.push_str(&format!("[lines {offset}-{end_line} of {total_lines}]"));
+        None => (lines.len(), None),
+    };
+    let selected_content = lines[start_index..end_index].join("\n");
+    let truncation = verlet_tool_core::truncate_head(
+        &selected_content,
+        verlet_tool_core::DEFAULT_MAX_LINES,
+        verlet_tool_core::DEFAULT_MAX_BYTES,
+    );
+    let start_line = u64::try_from(start_index.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut end_line = u64::try_from(end_index).unwrap_or(u64::MAX);
+    let mut text;
+    let mut truncation_details = None;
+
+    if truncation.first_line_exceeds_limit {
+        let first_line_size = lines.get(start_index).map_or(0, |line| line.len());
+        text = format!(
+            "[Line {start_line} is {}, exceeds {} limit. Use bash: sed -n '{start_line}p' {} | head -c {}]",
+            verlet_tool_core::format_size(first_line_size),
+            verlet_tool_core::format_size(verlet_tool_core::DEFAULT_MAX_BYTES),
+            input_path.display(),
+            verlet_tool_core::DEFAULT_MAX_BYTES,
+        );
+        end_line = start_line.saturating_sub(1);
+        truncation_details = Some(truncation);
+    } else if truncation.truncated {
+        let output_lines = u64::try_from(truncation.output_lines).unwrap_or(u64::MAX);
+        end_line = start_line.saturating_add(output_lines).saturating_sub(1);
+        let next_offset = end_line.saturating_add(1);
+        text = truncation.content.clone();
+        if truncation.truncated_by == Some(verlet_tool_core::TruncatedBy::Lines) {
+            text.push_str(&format!(
+                "\n\n[Showing lines {start_line}-{end_line} of {total_lines}. Use offset={next_offset} to continue.]"
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n\n[Showing lines {start_line}-{end_line} of {total_lines} ({} limit). Use offset={next_offset} to continue.]",
+                verlet_tool_core::format_size(verlet_tool_core::DEFAULT_MAX_BYTES),
+            ));
+        }
+        truncation_details = Some(truncation);
+    } else if let Some(numeric_end) = user_limit_end {
+        text = truncation.content;
+        if numeric_end < lines.len() as i128 {
+            let remaining = lines.len() as i128 - numeric_end;
+            let next_offset = numeric_end + 1;
+            text.push_str(&format!(
+                "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            ));
+        }
+    } else {
+        text = truncation.content;
     }
     if text.len() > verlet_tool_core::MAX_RESULT_BYTES {
         return Err(verlet_tool_core::ToolError::ResultTooLarge);
@@ -125,15 +151,16 @@ pub fn run(
 
     Ok(ReadOutput {
         text,
-        start_line: offset,
+        start_line,
         end_line,
         total_lines,
+        truncation: truncation_details,
     })
 }
 
-fn offset_past_end(offset: u64, total_lines: u64) -> verlet_tool_core::ToolError {
+fn offset_past_end(offset: i64, total_lines: u64) -> verlet_tool_core::ToolError {
     verlet_tool_core::ToolError::Failed(format!(
-        "offset {offset} is past end of file ({total_lines} total lines)"
+        "Offset {offset} is beyond end of file ({total_lines} lines total)"
     ))
 }
 
@@ -143,7 +170,7 @@ mod tests {
         verlet_tool_core::StdFs::new(root).unwrap()
     }
 
-    fn args(path: &str, offset: Option<u64>, limit: Option<u64>) -> crate::ReadArgs {
+    fn args(path: &str, offset: Option<i64>, limit: Option<i64>) -> crate::ReadArgs {
         crate::ReadArgs {
             path: std::path::PathBuf::from(path),
             offset,
@@ -165,6 +192,7 @@ mod tests {
                 start_line: 1,
                 end_line: 3,
                 total_lines: 3,
+                truncation: None,
             }
         );
     }
@@ -179,10 +207,11 @@ mod tests {
         assert_eq!(
             output,
             crate::ReadOutput {
-                text: "two\nthree\n\n[lines 2-3 of 4]".to_owned(),
+                text: "two\nthree\n\n[1 more lines in file. Use offset=4 to continue.]".to_owned(),
                 start_line: 2,
                 end_line: 3,
                 total_lines: 4,
+                truncation: None,
             }
         );
     }
@@ -196,7 +225,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "offset 3 is past end of file (2 total lines)"
+            "Offset 3 is beyond end of file (2 lines total)"
         );
     }
 
@@ -214,28 +243,34 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 total_lines: 1,
+                truncation: None,
             }
         );
     }
 
     #[test]
-    fn rejects_a_directory_with_a_stable_error() {
+    fn a_directory_reaches_the_backend_read_error() {
         let root = tempfile::tempdir().unwrap();
 
         let error = crate::run(args(".", None, None), &fs(root.path())).unwrap_err();
 
-        assert_eq!(error.to_string(), "path \".\" is not a file");
+        assert!(!error.to_string().contains("is not a file"));
     }
 
     #[test]
-    fn rejects_a_result_larger_than_the_cap() {
+    fn reports_an_oversized_first_line_with_pi_text() {
+        // Pi behavior sheet item 9; source: core/tools/read.ts:297-301.
         let root = tempfile::tempdir().unwrap();
-        let content = vec![b'x'; verlet_tool_core::MAX_RESULT_BYTES + 1];
+        let content = vec![b'x'; verlet_tool_core::DEFAULT_MAX_BYTES + 1];
         std::fs::write(root.path().join("large.txt"), content).unwrap();
 
-        let error = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap_err();
+        let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
 
-        assert!(matches!(error, verlet_tool_core::ToolError::ResultTooLarge));
+        assert_eq!(
+            output.text,
+            "[Line 1 is 50.0KB, exceeds 50.0KB limit. Use bash: sed -n '1p' large.txt | head -c 51200]"
+        );
+        assert!(output.truncation.unwrap().first_line_exceeds_limit);
     }
 
     #[test]
@@ -249,45 +284,46 @@ mod tests {
     }
 
     #[test]
-    fn applies_the_result_cap_after_lossy_utf8_expansion() {
+    fn byte_truncation_uses_complete_lines_and_pi_notice() {
+        // Pi behavior sheet item 9; source: core/tools/read.ts:294-312.
         let root = tempfile::tempdir().unwrap();
-        let bytes = vec![0xff; verlet_tool_core::MAX_RESULT_BYTES / 3 + 1];
-        assert!(bytes.len() < verlet_tool_core::MAX_RESULT_BYTES);
-        std::fs::write(root.path().join("invalid.txt"), bytes).unwrap();
+        let line = format!("{}\n", "x".repeat(1024));
+        std::fs::write(root.path().join("large.txt"), line.repeat(60)).unwrap();
 
-        let error = crate::run(args("invalid.txt", None, None), &fs(root.path())).unwrap_err();
+        let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
 
-        assert!(matches!(error, verlet_tool_core::ToolError::ResultTooLarge));
+        assert!(output.text.ends_with(
+            "\n\n[Showing lines 1-49 of 61 (50.0KB limit). Use offset=50 to continue.]"
+        ));
     }
 
     #[test]
-    fn rejects_zero_offset_and_limit() {
+    fn zero_and_negative_offsets_start_at_the_first_line_and_zero_limit_is_empty() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file.txt"), "content").unwrap();
         let fs = fs(root.path());
 
-        let offset_error = crate::run(args("file.txt", Some(0), None), &fs).unwrap_err();
-        let limit_error = crate::run(args("file.txt", None, Some(0)), &fs).unwrap_err();
+        let zero_offset = crate::run(args("file.txt", Some(0), None), &fs).unwrap();
+        let negative_offset = crate::run(args("file.txt", Some(-5), None), &fs).unwrap();
+        let zero_limit = crate::run(args("file.txt", None, Some(0)), &fs).unwrap();
 
+        assert_eq!(zero_offset.text, "content");
+        assert_eq!(negative_offset.text, "content");
         assert_eq!(
-            offset_error.to_string(),
-            "invalid arguments: offset must be at least 1"
-        );
-        assert_eq!(
-            limit_error.to_string(),
-            "invalid arguments: limit must be at least 1"
+            zero_limit.text,
+            "\n\n[1 more lines in file. Use offset=1 to continue.]"
         );
     }
 
     #[test]
-    fn maximum_u64_limit_is_bounded_by_the_available_lines() {
+    fn maximum_i64_limit_is_bounded_by_the_available_lines() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file.txt"), "one\ntwo").unwrap();
 
         let output =
-            crate::run(args("file.txt", Some(1), Some(u64::MAX)), &fs(root.path())).unwrap();
+            crate::run(args("file.txt", Some(1), Some(i64::MAX)), &fs(root.path())).unwrap();
         let offset_error = crate::run(
-            args("file.txt", Some(u64::MAX), Some(u64::MAX)),
+            args("file.txt", Some(i64::MAX), Some(i64::MAX)),
             &fs(root.path()),
         )
         .unwrap_err();
@@ -295,7 +331,56 @@ mod tests {
         assert_eq!(output.text, "one\ntwo");
         assert_eq!(
             offset_error.to_string(),
-            format!("offset {} is past end of file (2 total lines)", u64::MAX)
+            format!("Offset {} is beyond end of file (2 lines total)", i64::MAX)
         );
+    }
+
+    #[test]
+    fn automatically_truncates_at_two_thousand_lines_with_pi_notice() {
+        // Pi behavior sheet item 9; source: core/tools/read.ts:294-312.
+        let root = tempfile::tempdir().unwrap();
+        let content = (1..=2001)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.path().join("large.txt"), content).unwrap();
+
+        let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
+
+        assert!(output.text.ends_with(
+            "line 2000\n\n[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]"
+        ));
+    }
+
+    #[test]
+    fn contract_and_benign_path_normalization_match_pi() {
+        // Pi behavior sheet items 1 and 4; source: read.ts:209-222 and path-utils.ts:40-49.
+        let contract = crate::contract();
+        assert_eq!(
+            contract.description,
+            "Read the contents of a file. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        );
+        assert_eq!(
+            contract.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+                    "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
+                    "limit": {"type": "number", "description": "Maximum number of lines to read"}
+                },
+                "required": ["path"]
+            })
+        );
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("unicode space.txt"), "ok").unwrap();
+
+        let output = crate::run(
+            args("@unicode\u{202f}space.txt", None, None),
+            &fs(root.path()),
+        )
+        .unwrap();
+
+        assert_eq!(output.text, "ok");
     }
 }

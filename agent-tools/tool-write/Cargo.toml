@@ -3,7 +3,7 @@ name = "verlet-tool-write"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "File creation tool with overwrite guard (model-facing `write`)"
+description = "Pi-compatible file creation and overwrite tool (model-facing `write`)"
 
 [dependencies]
 verlet-tool-core = { path = "../tool-core" }

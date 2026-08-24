@@ -3,7 +3,7 @@ name = "verlet-tool-glob"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Glob file finder (model-facing `glob`, attachable as `find`)"
+description = "Glob file finder (model-facing `find`)"
 
 [dependencies]
 verlet-tool-core = { path = "../tool-core" }

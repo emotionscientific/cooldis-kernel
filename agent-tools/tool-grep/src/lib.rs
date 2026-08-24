@@ -9,20 +9,21 @@
 //! bounded `file:line` rows.
 //!
 //! Pinned semantics (mirroring Pi's flags):
-//! - Regex by default; `literal: true` = fixed-string. `ignore_case`
-//!   as named. Same walk rules as `tool-glob` (gitignore, hidden files
+//! - Regex by default; `literal: true` = fixed-string. Public argument
+//!   `ignoreCase` matches Pi. Same walk rules as `tool-glob` (gitignore, hidden files
 //!   included, `.git/` skipped), with optional `glob` file filter.
 //! - Output rows: `path:line: text` with root-relative paths; `context`
-//!   adds N lines before/after with `path:line- text` separators, blocks
-//!   joined by `--` lines (rg's grouped format).
-//! - Match lines longer than 500 chars are clipped with `…`.
+//!   emits one independent block per match and formats non-match rows as
+//!   `path-line- text`, with no block separators.
+//! - Lines longer than 500 UTF-16 code units are clipped with Pi's suffix.
 //! - `limit` (default 100) caps match count; search stops early when
-//!   reached and the result carries `limit_reached`.
+//!   reached and emits Pi's actionable notice.
+//! - Final text is complete-line head-truncated at 50 KiB.
 //! - Binary files (NUL in first 8KB) are skipped.
 //! - Deterministic file order (same as glob's sort), so identical state
 //!   yields identical output on every backend.
 
-pub const DEFAULT_LIMIT: u64 = 100;
+pub const DEFAULT_LIMIT: i64 = 100;
 pub const MAX_LINE_CHARS: usize = 500;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
@@ -34,14 +35,14 @@ pub struct GrepArgs {
     pub path: Option<std::path::PathBuf>,
     /// Filter files by glob pattern, e.g. `*.ts`.
     pub glob: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "ignoreCase")]
     pub ignore_case: bool,
     #[serde(default)]
     pub literal: bool,
     /// Lines of context before and after each match (default 0).
-    pub context: Option<u64>,
+    pub context: Option<i64>,
     /// Maximum number of matches (default 100).
-    pub limit: Option<u64>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -50,22 +51,21 @@ pub struct GrepOutput {
     pub text: String,
     pub match_count: u64,
     pub limit_reached: bool,
+    pub truncated: bool,
+    pub lines_truncated: bool,
 }
 
 pub fn contract() -> verlet_tool_core::ToolContract {
     verlet_tool_core::ToolContract {
         name: "grep",
-        description: "Search file contents for a pattern. Returns matching lines \
-                      with file paths and line numbers. Regex by default; set \
-                      literal for exact strings. Respects .gitignore. Stops at \
-                      the match limit and says so.",
+        description: "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
                 "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
                 "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"},
-                "ignore_case": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+                "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
                 "literal": {"type": "boolean", "description": "Treat pattern as literal string instead of regex (default: false)"},
                 "context": {"type": "number", "description": "Number of lines to show before and after each match (default: 0)"},
                 "limit": {"type": "number", "description": "Maximum number of matches to return (default: 100)"}
@@ -80,12 +80,8 @@ pub fn run(
     args: GrepArgs,
     fs: &dyn verlet_tool_core::ToolFs,
 ) -> Result<GrepOutput, verlet_tool_core::ToolError> {
-    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
-    if limit == 0 {
-        return Err(verlet_tool_core::ToolError::InvalidArgs(
-            "limit must be at least 1".to_owned(),
-        ));
-    }
+    let effective_limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
+    let limit = u64::try_from(effective_limit).unwrap_or(u64::MAX);
 
     let mut matcher_builder = grep_regex::RegexMatcherBuilder::new();
     matcher_builder
@@ -110,15 +106,25 @@ pub fn run(
                 })
         })
         .transpose()?;
-    let root = args.path.unwrap_or_else(|| std::path::PathBuf::from("."));
-    let files = verlet_tool_core::walk_files(&root, fs)?;
-    let context = usize::try_from(args.context.unwrap_or(0)).unwrap_or(usize::MAX);
+    let input_root = args.path.unwrap_or_else(|| std::path::PathBuf::from("."));
+    let root = verlet_tool_core::normalize_tool_path(&input_root);
+    let files = verlet_tool_core::walk_files(&root, fs).map_err(|error| match error {
+        verlet_tool_core::ToolError::Fs(verlet_tool_core::ToolFsError::NotFound(_)) => {
+            verlet_tool_core::ToolError::Failed(format!("Path not found: {}", root.display()))
+        }
+        error => error,
+    })?;
+    let context = usize::try_from(args.context.unwrap_or(0).max(0)).unwrap_or(usize::MAX);
     let mut blocks = Vec::new();
     let mut rows = Vec::new();
     let mut match_count = 0_u64;
     let mut limit_reached = false;
+    let mut lines_truncated = false;
 
     for file in files {
+        if file.is_dir {
+            continue;
+        }
         if glob_matcher
             .as_ref()
             .is_some_and(|glob| !glob.is_match(std::path::Path::new(&file.relative_path)))
@@ -153,20 +159,20 @@ pub fn run(
         let lines = file_lines(&bytes);
         if context == 0 {
             for line_number in sink.lines {
-                rows.push(render_line(
+                let (row, truncated) = render_line(
                     &file.relative_path,
                     line_number,
                     true,
                     line_at(&lines, line_number),
-                ));
+                );
+                rows.push(row);
+                lines_truncated |= truncated;
             }
         } else {
-            blocks.extend(render_context_blocks(
-                &file.relative_path,
-                &lines,
-                &sink.lines,
-                context,
-            ));
+            let (file_blocks, truncated) =
+                render_context_blocks(&file.relative_path, &lines, &sink.lines, context);
+            blocks.extend(file_blocks);
+            lines_truncated |= truncated;
         }
 
         if match_count >= limit {
@@ -175,15 +181,52 @@ pub fn run(
         }
     }
 
-    let text = if context == 0 {
+    if match_count == 0 {
+        return Ok(GrepOutput {
+            text: "No matches found".to_owned(),
+            match_count,
+            limit_reached: false,
+            truncated: false,
+            lines_truncated: false,
+        });
+    }
+
+    let raw_output = if context == 0 {
         rows.join("\n")
     } else {
         blocks
             .into_iter()
             .map(|block| block.join("\n"))
             .collect::<Vec<_>>()
-            .join("\n--\n")
+            .join("\n")
     };
+    let truncation = verlet_tool_core::truncate_head(
+        &raw_output,
+        usize::MAX,
+        verlet_tool_core::DEFAULT_MAX_BYTES,
+    );
+    let mut text = truncation.content.clone();
+    let mut notices = Vec::new();
+    if limit_reached {
+        notices.push(format!(
+            "{effective_limit} matches limit reached. Use limit={} for more, or refine pattern",
+            effective_limit.saturating_mul(2),
+        ));
+    }
+    if truncation.truncated {
+        notices.push(format!(
+            "{} limit reached",
+            verlet_tool_core::format_size(verlet_tool_core::DEFAULT_MAX_BYTES)
+        ));
+    }
+    if lines_truncated {
+        notices.push(format!(
+            "Some lines truncated to {MAX_LINE_CHARS} chars. Use read tool to see full lines"
+        ));
+    }
+    if !notices.is_empty() {
+        text.push_str(&format!("\n\n[{}]", notices.join(". ")));
+    }
     if text.len() > verlet_tool_core::MAX_RESULT_BYTES {
         return Err(verlet_tool_core::ToolError::ResultTooLarge);
     }
@@ -192,6 +235,8 @@ pub fn run(
         text,
         match_count,
         limit_reached,
+        truncated: truncation.truncated,
+        lines_truncated,
     })
 }
 
@@ -219,53 +264,46 @@ fn render_context_blocks(
     lines: &[&[u8]],
     matches: &[u64],
     context: usize,
-) -> Vec<Vec<String>> {
+) -> (Vec<Vec<String>>, bool) {
     if matches.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let line_count = u64::try_from(lines.len()).unwrap_or(u64::MAX);
     let context = u64::try_from(context).unwrap_or(u64::MAX);
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut blocks = Vec::new();
+    let mut any_truncated = false;
     for &line_number in matches {
         let start = line_number.saturating_sub(context).max(1);
         let end = line_number.saturating_add(context).min(line_count);
-        match ranges.last_mut() {
-            Some((_, previous_end)) if start <= previous_end.saturating_add(1) => {
-                *previous_end = (*previous_end).max(end);
-            }
-            _ => ranges.push((start, end)),
+        let mut block = Vec::new();
+        for current in start..=end {
+            let (row, truncated) = render_line(
+                path,
+                current,
+                current == line_number,
+                line_at(lines, current),
+            );
+            block.push(row);
+            any_truncated |= truncated;
         }
+        blocks.push(block);
     }
-
-    ranges
-        .into_iter()
-        .map(|(start, end)| {
-            (start..=end)
-                .map(|line_number| {
-                    render_line(
-                        path,
-                        line_number,
-                        matches.binary_search(&line_number).is_ok(),
-                        line_at(lines, line_number),
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    (blocks, any_truncated)
 }
 
-fn render_line(path: &str, line_number: u64, is_match: bool, bytes: &[u8]) -> String {
+fn render_line(path: &str, line_number: u64, is_match: bool, bytes: &[u8]) -> (String, bool) {
     let text = String::from_utf8_lossy(bytes);
     let text = text.strip_suffix('\r').unwrap_or(&text);
-    let mut clipped = text.chars().take(MAX_LINE_CHARS).collect::<String>();
-    if text.chars().count() > MAX_LINE_CHARS {
-        clipped.push('…');
+    let (mut clipped, was_truncated) = verlet_tool_core::truncate_utf16(text, MAX_LINE_CHARS);
+    if was_truncated {
+        clipped.push_str("... [truncated]");
     }
-    if is_match {
+    let row = if is_match {
         format!("{path}:{line_number}: {clipped}")
     } else {
-        format!("{path}:{line_number}- {clipped}")
-    }
+        format!("{path}-{line_number}- {clipped}")
+    };
+    (row, was_truncated)
 }
 
 fn line_at<'a>(lines: &'a [&'a [u8]], line_number: u64) -> &'a [u8] {
@@ -315,7 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn renders_grouped_context_blocks_with_separators() {
+    fn renders_independent_context_blocks_without_separators() {
+        // Pi behavior sheet items 26 and 27; source: core/tools/grep.ts:255-273,321-338.
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("file.txt"),
@@ -329,18 +368,38 @@ mod tests {
 
         assert_eq!(
             output.text,
-            "file.txt:1- before a\n\
+            "file.txt-1- before a\n\
              file.txt:2: hit one\n\
-             file.txt:3- after a\n\
-             --\n\
-             file.txt:6- before b\n\
+             file.txt-3- after a\n\
+             file.txt-6- before b\n\
              file.txt:7: hit two\n\
-             file.txt:8- after b"
+             file.txt-8- after b"
         );
     }
 
     #[test]
-    fn clips_long_rendered_lines_at_five_hundred_characters() {
+    fn overlapping_context_is_repeated_for_each_match() {
+        // Pi behavior sheet item 27; source: core/tools/grep.ts:321-338.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("file.txt"),
+            "before\nhit one\nhit two\nafter\n",
+        )
+        .unwrap();
+        let mut search = args("hit");
+        search.context = Some(1);
+
+        let output = crate::run(search, &fs(root.path())).unwrap();
+
+        assert_eq!(
+            output.text,
+            "file.txt-1- before\nfile.txt:2: hit one\nfile.txt-3- hit two\nfile.txt-2- hit one\nfile.txt:3: hit two\nfile.txt-4- after"
+        );
+    }
+
+    #[test]
+    fn clips_long_rendered_lines_at_five_hundred_utf16_units() {
+        // Pi behavior sheet item 28; source: core/tools/truncate.ts:264-275.
         let root = tempfile::tempdir().unwrap();
         let line = format!("{}needle", "x".repeat(crate::MAX_LINE_CHARS));
         std::fs::write(root.path().join("long.txt"), line).unwrap();
@@ -349,7 +408,10 @@ mod tests {
 
         assert_eq!(
             output.text,
-            format!("long.txt:1: {}…", "x".repeat(crate::MAX_LINE_CHARS))
+            format!(
+                "long.txt:1: {}... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
+                "x".repeat(crate::MAX_LINE_CHARS)
+            )
         );
     }
 
@@ -367,6 +429,17 @@ mod tests {
     }
 
     #[test]
+    fn no_matches_uses_pi_text() {
+        // Pi behavior sheet item 25; source: core/tools/grep.ts:303-318.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), "haystack\n").unwrap();
+
+        let output = crate::run(args("needle"), &fs(root.path())).unwrap();
+
+        assert_eq!(output.text, "No matches found");
+    }
+
+    #[test]
     fn match_limit_stops_before_reading_the_next_file() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.txt"), "hit\n").unwrap();
@@ -380,7 +453,10 @@ mod tests {
 
         let output = crate::run(search, &recording).unwrap();
 
-        assert_eq!(output.text, "a.txt:1: hit");
+        assert_eq!(
+            output.text,
+            "a.txt:1: hit\n\n[1 matches limit reached. Use limit=2 for more, or refine pattern]"
+        );
         assert_eq!(output.match_count, 1);
         assert!(output.limit_reached);
         assert!(!recording
@@ -413,7 +489,9 @@ mod tests {
 
         assert_eq!(
             output.text,
-            "late-nul.dat:1: ".to_owned() + &"x".repeat(500) + "…"
+            "late-nul.dat:1: ".to_owned()
+                + &"x".repeat(500)
+                + "... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]"
         );
         assert_eq!(output.match_count, 1);
     }
@@ -430,7 +508,10 @@ mod tests {
 
         assert_eq!(
             output.text,
-            format!("invalid.txt:1: {}…", "🙂".repeat(crate::MAX_LINE_CHARS))
+            format!(
+                "invalid.txt:1: {}... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
+                "🙂".repeat(crate::MAX_LINE_CHARS / 2)
+            )
         );
         assert!(output.text.len() > crate::MAX_LINE_CHARS);
         assert!(output.text.len() < verlet_tool_core::MAX_RESULT_BYTES);
@@ -479,41 +560,47 @@ mod tests {
     }
 
     #[test]
-    fn zero_limit_is_rejected_and_maximum_u64_bounds_are_safe() {
+    fn numeric_edges_clamp_like_pi() {
+        // Pi behavior sheet item 32; source: core/tools/grep.ts:193-195.
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file.txt"), "before\nhit\nafter\n").unwrap();
 
         let mut zero_search = args("hit");
         zero_search.limit = Some(0);
-        let zero = crate::run(zero_search, &fs(root.path())).unwrap_err();
+        zero_search.context = Some(-10);
+        let zero = crate::run(zero_search, &fs(root.path())).unwrap();
         let mut maximum_search = args("hit");
-        maximum_search.limit = Some(u64::MAX);
-        maximum_search.context = Some(u64::MAX);
+        maximum_search.limit = Some(i64::MAX);
+        maximum_search.context = Some(i64::MAX);
         let maximum = crate::run(maximum_search, &fs(root.path())).unwrap();
 
         assert_eq!(
-            zero.to_string(),
-            "invalid arguments: limit must be at least 1"
+            zero.text,
+            "file.txt:2: hit\n\n[1 matches limit reached. Use limit=2 for more, or refine pattern]"
         );
         assert_eq!(
             maximum.text,
-            "file.txt:1- before\nfile.txt:2: hit\nfile.txt:3- after"
+            "file.txt-1- before\nfile.txt:2: hit\nfile.txt-3- after"
         );
         assert!(!maximum.limit_reached);
     }
 
     #[test]
-    fn multibyte_clipped_rows_still_obey_the_result_byte_cap() {
+    fn result_is_head_truncated_at_fifty_kibibytes() {
+        // Pi behavior sheet item 25; source: core/tools/grep.ts:338-366.
         let root = tempfile::tempdir().unwrap();
         let line = format!("{}hit\n", "🙂".repeat(crate::MAX_LINE_CHARS + 1));
         let line_count = 2200;
         std::fs::write(root.path().join("large.txt"), line.repeat(line_count)).unwrap();
         let mut search = args("hit");
-        search.limit = Some(line_count as u64);
+        search.limit = Some(line_count as i64);
 
-        let error = crate::run(search, &fs(root.path())).unwrap_err();
+        let output = crate::run(search, &fs(root.path())).unwrap();
 
-        assert!(matches!(error, verlet_tool_core::ToolError::ResultTooLarge));
+        assert!(output.truncated);
+        assert!(output.text.ends_with(
+            "\n\n[2200 matches limit reached. Use limit=4400 for more, or refine pattern. 50.0KB limit reached. Some lines truncated to 500 chars. Use read tool to see full lines]"
+        ));
     }
 
     #[test]
@@ -553,7 +640,45 @@ mod tests {
             .map(|line| line.split(':').next().unwrap().to_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(glob.paths, grep_paths);
+        assert_eq!(
+            glob.paths
+                .into_iter()
+                .filter(|path| !path.ends_with('/'))
+                .collect::<Vec<_>>(),
+            grep_paths
+        );
+    }
+
+    #[test]
+    fn contract_and_camel_case_schema_match_pi() {
+        // Pi behavior sheet items 1 and 24; source: core/tools/grep.ts:24-36,128-138.
+        let contract = crate::contract();
+        assert_eq!(
+            contract.description,
+            "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars."
+        );
+        assert_eq!(
+            contract.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+                    "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
+                    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"},
+                    "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal string instead of regex (default: false)"},
+                    "context": {"type": "number", "description": "Number of lines to show before and after each match (default: 0)"},
+                    "limit": {"type": "number", "description": "Maximum number of matches to return (default: 100)"}
+                },
+                "required": ["pattern"]
+            })
+        );
+        let parsed: crate::GrepArgs = serde_json::from_value(serde_json::json!({
+            "pattern": "needle",
+            "ignoreCase": true
+        }))
+        .unwrap();
+        assert!(parsed.ignore_case);
     }
 
     struct RecordingFs {

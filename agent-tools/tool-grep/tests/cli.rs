@@ -28,7 +28,9 @@ fn cli_greps_from_its_confined_root() {
             "ok": {
                 "text": "file.txt:2: needle",
                 "match_count": 1,
-                "limit_reached": false
+                "limit_reached": false,
+                "truncated": false,
+                "lines_truncated": false
             }
         })
     );
