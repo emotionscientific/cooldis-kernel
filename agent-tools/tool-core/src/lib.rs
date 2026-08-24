@@ -85,7 +85,9 @@ pub struct WalkFile {
 ///
 /// Directory walks include hidden files, skip every `.git` directory, apply
 /// root `.git/info/exclude` plus nested `.gitignore` files, prune ignored
-/// directories, and return files sorted by root-relative path.
+/// directories, skip listed entries that disappear before they can be
+/// resolved, and return files sorted by root-relative path. Stat errors other
+/// than [`ToolFsError::NotFound`] still fail the walk.
 pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFile>, ToolError> {
     let stat = fs.stat(root)?;
     if stat.is_file {
@@ -150,7 +152,11 @@ fn walk_directory(
             walk_directory(fs, &path, &relative, ignore_matchers, files)?;
             ignore_matchers.truncate(matcher_count);
         } else if !is_ignored(ignore_matchers, &path, false) {
-            let stat = fs.stat(&path)?;
+            let stat = match fs.stat(&path) {
+                Ok(stat) => stat,
+                Err(ToolFsError::NotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
             if stat.is_file {
                 files.push(WalkFile {
                     path,
@@ -511,5 +517,47 @@ mod tests {
         let error =
             crate::ToolFs::read_file(&fs, std::path::Path::new("link/secret.txt")).unwrap_err();
         assert!(matches!(error, crate::ToolFsError::Denied(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_a_dangling_symlink_and_returns_real_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("real.txt"), "real").unwrap();
+        std::os::unix::fs::symlink(
+            root.path().join("missing-target"),
+            root.path().join("broken-link"),
+        )
+        .unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["real.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_still_propagates_denied_entry_stats() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        let outside = outer.path().join("outside.txt");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escaped-link")).unwrap();
+        let fs = crate::StdFs::new(&root).unwrap();
+
+        let error = crate::walk_files(std::path::Path::new("."), &fs).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::ToolError::Fs(crate::ToolFsError::Denied(_))
+        ));
     }
 }
