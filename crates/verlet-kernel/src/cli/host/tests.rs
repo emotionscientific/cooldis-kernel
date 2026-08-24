@@ -729,8 +729,7 @@ async fn pending_config_failure_releases_reservations_before_listener_bind() {
         "{error}"
     );
 
-    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
-    drop(rebound);
+    crate::support::address::assert_addr_released(addr).await;
     let (_, successor) = crate::cli::host::hosted_instance_config(&first).unwrap();
     drop(successor);
     std::fs::remove_dir_all(root).unwrap();

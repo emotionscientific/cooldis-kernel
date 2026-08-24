@@ -11,6 +11,8 @@
 //! `scenario_unit_harness()` that returns `false`, so integration binaries skip
 //! the scenario bodies that need those seams.
 
+#[path = "address.rs"]
+pub(crate) mod address;
 #[path = "event_trace.rs"]
 pub(crate) mod event_trace;
 #[path = "fault.rs"]

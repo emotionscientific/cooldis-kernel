@@ -7,6 +7,8 @@ use verlet::daemon::remote_store::lease::SyncCredentialAuthority as _;
 use verlet::daemon::remote_store::propagator::StreamPropagator as _;
 use verlet_history::EventStore as _;
 
+#[path = "support/address.rs"]
+mod address_test_support;
 #[path = "support/model_catalog.rs"]
 mod model_catalog_test_support;
 
@@ -717,8 +719,7 @@ async fn localhost_http_projection_preserves_wire_records_and_releases_tasks_and
 
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    let rebound = tokio::net::TcpListener::bind(addr).await.unwrap();
-    drop(rebound);
+    address_test_support::assert_addr_released(addr).await;
 }
 
 #[cfg(unix)]
