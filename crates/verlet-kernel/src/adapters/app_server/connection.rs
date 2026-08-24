@@ -346,6 +346,67 @@ pub(crate) struct ModelProviderAuthDeleteParams {
     pub(crate) provider_id: String,
 }
 
+// EMO-593: secret/* params. Values travel over the local unix socket only
+// (see `require_unix_socket_surface`); responses never echo secret values.
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretStatusParams {
+    pub(crate) name: String,
+}
+
+/// Params for `secret/set`. `source` records how the client obtained the
+/// value (`env`, `stdin`, `local`); `source_name` is the env-var name when
+/// `source` is `env` (the CLI reads the variable locally, the server never
+/// sees the client environment).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSetParams {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) source: verlet_metadata::secret_store::SecretSourceKind,
+    #[serde(default)]
+    pub(crate) source_name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretDeleteParams {
+    pub(crate) name: String,
+}
+
+// EMO-593: identity/* params. The acting principal (declared_by, minted_by,
+// revoker) is always the connection's authenticated principal, never a
+// parameter.
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityDeclareParams {
+    pub(crate) principal_id: String,
+    pub(crate) kind: crate::daemon::identity::PrincipalKind,
+    pub(crate) display: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityMintParams {
+    pub(crate) principal_id: String,
+    #[serde(default)]
+    pub(crate) expires_at_ms: Option<i64>,
+}
+
+/// Params for `identity/revoke`. Exactly one of `credential_id` (revoke a
+/// credential) or `principal_id` (revoke a principal and all its
+/// credentials) must be set; the handler rejects zero or both.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityRevokeParams {
+    #[serde(default)]
+    pub(crate) credential_id: Option<String>,
+    #[serde(default)]
+    pub(crate) principal_id: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MandateStartParams {
@@ -895,6 +956,32 @@ pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
         "modelProvider/catalog",
         crate::daemon::identity::AuthorityClass::Host,
     ),
+    ("secret/list", crate::daemon::identity::AuthorityClass::Host),
+    (
+        "secret/status",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    ("secret/set", crate::daemon::identity::AuthorityClass::Host),
+    (
+        "secret/delete",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/list",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/declare",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/mint",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
+    (
+        "identity/revoke",
+        crate::daemon::identity::AuthorityClass::Host,
+    ),
     (
         "experimentalFeature/list",
         crate::daemon::identity::AuthorityClass::Interactive,
@@ -1133,6 +1220,17 @@ pub(crate) const HOST_EFFECT_METHODS: &[&str] = &[
     "modelProvider/auth/setOAuth",
     "modelProvider/auth/delete",
     "modelProvider/catalog",
+    // Secret store projections and mutations (EMO-593). Same treatment as
+    // modelProvider/*: reads of secret-adjacent state are witnessed too.
+    "secret/list",
+    "secret/status",
+    "secret/set",
+    "secret/delete",
+    // Identity authority operations (EMO-593): witnessed operator events.
+    "identity/list",
+    "identity/declare",
+    "identity/mint",
+    "identity/revoke",
     // Runtime construction, reconstruction, and standing-grant changes.
     "thread/start",
     "thread/spawn",
@@ -1609,6 +1707,34 @@ impl crate::adapters::app_server::VerletAppServer {
                 self.model_provider_auth_delete(params).await
             }
             "modelProvider/catalog" => self.model_provider_catalog().await,
+            "secret/list" => self.secret_list().await,
+            "secret/status" => {
+                let params: SecretStatusParams = parse_params(params)?;
+                self.secret_status(params).await
+            }
+            "secret/set" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: SecretSetParams = parse_params(params)?;
+                self.secret_set(params).await
+            }
+            "secret/delete" => {
+                let params: SecretDeleteParams = parse_params(params)?;
+                self.secret_delete(params).await
+            }
+            "identity/list" => self.identity_list().await,
+            "identity/declare" => {
+                let params: IdentityDeclareParams = parse_params(params)?;
+                self.identity_declare(connection, params).await
+            }
+            "identity/mint" => {
+                require_unix_socket_surface(connection, method)?;
+                let params: IdentityMintParams = parse_params(params)?;
+                self.identity_mint(connection, params).await
+            }
+            "identity/revoke" => {
+                let params: IdentityRevokeParams = parse_params(params)?;
+                self.identity_revoke(connection, params).await
+            }
             "experimentalFeature/list" => Ok(serde_json::json!({ "data": [], "nextCursor": null })),
             "experimentalFeature/enablement/set" => {
                 let params: ExperimentalFeatureEnablementSetParams = parse_params(params)?;
@@ -2259,6 +2385,115 @@ impl crate::adapters::app_server::VerletAppServer {
             .registry_root
             .clone()
             .unwrap_or_else(crate::agent::manifest::default_operations_registry_root)
+    }
+
+    /// EMO-593: list secret statuses from the user secret store.
+    /// Response: `{ "data": [SecretStatus...], "nextCursor": null }`; the
+    /// serialized `SecretStatus.value` is always redacted.
+    pub(crate) async fn secret_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: secret/list is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: status for one secret by name.
+    /// Response: `{ "status": SecretStatus | null }`.
+    pub(crate) async fn secret_status(
+        &self,
+        params: SecretStatusParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = params;
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: secret/status is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: create or update a secret via `SqliteSecretStore::set_secret`.
+    /// Unix-socket-only (gated in dispatch). Response: `{ "status": SecretStatus }`
+    /// with the value redacted; the plaintext value must never be echoed,
+    /// logged, or journaled.
+    pub(crate) async fn secret_set(
+        &self,
+        params: SecretSetParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = params;
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: secret/set is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: delete a secret by name.
+    /// Response: `{ "deleted": bool }` (false when the name did not exist).
+    pub(crate) async fn secret_delete(
+        &self,
+        params: SecretDeleteParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = params;
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: secret/delete is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: list declared principals and credentials from the identity
+    /// authority. Response:
+    /// `{ "principals": [PrincipalRecordV1...], "credentials": [IdentityCredentialV1...] }`.
+    /// Credentials carry `token_digest` only; bearer secrets are never stored
+    /// and never listed.
+    pub(crate) async fn identity_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: identity/list is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: declare a principal. `declared_by` is the connection's
+    /// authenticated principal. Response: `{ "principal": PrincipalRecordV1 }`.
+    pub(crate) async fn identity_declare(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityDeclareParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = (connection, params);
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: identity/declare is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: mint a credential. `minted_by` is the connection's
+    /// authenticated principal. Unix-socket-only (gated in dispatch) because
+    /// the response carries the bearer secret, shown exactly once:
+    /// `{ "credential": IdentityCredentialV1, "token": "<bearer secret>" }`.
+    pub(crate) async fn identity_mint(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityMintParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = (connection, params);
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: identity/mint is not implemented yet",
+        ))
+    }
+
+    /// EMO-593: revoke a credential (`credential_id`) or a principal and all
+    /// its credentials (`principal_id`); exactly one must be set. The revoker
+    /// is the connection's authenticated principal.
+    /// Response: `{ "revoked": true }`.
+    pub(crate) async fn identity_revoke(
+        &self,
+        connection: &ConnectionState,
+        params: IdentityRevokeParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let _ = (connection, params);
+        Err(jsonrpc_error(
+            -32603,
+            "EMO-593: identity/revoke is not implemented yet",
+        ))
     }
 
     pub(crate) async fn model_provider_list(&self) -> Result<serde_json::Value, JsonRpcErrorError> {
@@ -6246,6 +6481,26 @@ where
     };
     serde_json::from_value(value)
         .map_err(|err| jsonrpc_error(-32602, format!("invalid params: {err}")))
+}
+
+/// EMO-593: methods whose request or response carries secret material
+/// (`secret/set` values, `identity/mint` bearer tokens) are only served over
+/// the instance unix socket. Every other boundary surface is refused with an
+/// error that names the unix socket.
+pub(crate) fn require_unix_socket_surface(
+    connection: &ConnectionState,
+    method: &str,
+) -> Result<(), JsonRpcErrorError> {
+    if matches!(
+        connection.boundary_surface,
+        crate::daemon::identity::BoundarySurface::UnixSocket
+    ) {
+        return Ok(());
+    }
+    Err(jsonrpc_error(
+        METHOD_NOT_AUTHORIZED_CODE,
+        format!("{method} carries secret values and is only served over the instance unix socket"),
+    ))
 }
 
 pub(crate) fn jsonrpc_error(code: i64, message: impl Into<String>) -> JsonRpcErrorError {
