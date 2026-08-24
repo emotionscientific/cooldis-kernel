@@ -148,9 +148,74 @@ else
   ln -s \"\$pinned_toolchain\" \"\$stable_toolchain\"
 fi
 rustup target list --installed --toolchain stable | grep -Fx wasm32-unknown-unknown >/dev/null
+snapshot_log=$CACHE_ROOT/verify-process-snapshots.log
+snapshot_limit_bytes=\$((20 * 1024 * 1024))
+cleanup_snapshot_trims() {
+  rm -f \"\$snapshot_log\".trim.* 2>/dev/null || true
+}
+capture_process_snapshot() {
+  {
+    printf '\\n=== process snapshot %s ===\\n' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+    ps -eo pid,pgid,sid,stat,args
+  } >> \"\$snapshot_log\" 2>/dev/null
+}
+bound_snapshot_log() {
+  snapshot_size=\$(stat -c %s \"\$snapshot_log\" 2>/dev/null) || return 0
+  if ((snapshot_size > snapshot_limit_bytes)); then
+    if snapshot_tmp=\$(mktemp \"\$snapshot_log.trim.XXXXXX\" 2>/dev/null); then
+      if tail -c \"\$snapshot_limit_bytes\" \"\$snapshot_log\" > \"\$snapshot_tmp\" 2>/dev/null; then
+        mv \"\$snapshot_tmp\" \"\$snapshot_log\" 2>/dev/null \
+          || rm -f \"\$snapshot_tmp\" 2>/dev/null \
+          || true
+      else
+        rm -f \"\$snapshot_tmp\" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+print_process_snapshot_diagnostics() {
+  printf '\\nverify shell exited 137; recent in-container process snapshots:\\n'
+  if [[ ! -s \"\$snapshot_log\" ]]; then
+    printf '(process snapshot log is missing or empty)\\n'
+  elif snapshot_tail_line=\$(grep -n '^=== process snapshot ' \"\$snapshot_log\" 2>/dev/null | tail -n 3 | head -n 1 | cut -d: -f1); then
+    tail -n \"+\$snapshot_tail_line\" \"\$snapshot_log\" 2>/dev/null \
+      || printf '(process snapshot log became unavailable while reading it)\\n'
+  else
+    tail -n 400 \"\$snapshot_log\" 2>/dev/null \
+      || printf '(process snapshot log became unavailable while reading it)\\n'
+  fi
+  printf 'process snapshot log: %s (Docker volume $VOLUME)\\n' \"\$snapshot_log\"
+  printf 'reminder: capture Docker Desktop VM dmesg before the VM restarts.\\n'
+}
+cleanup_snapshot_trims
+: > \"\$snapshot_log\" 2>/dev/null || true
+(
+  snapshot_sleep_pid=
+  stop_snapshot_sleep() {
+    if [[ -n \"\$snapshot_sleep_pid\" ]]; then
+      kill \"\$snapshot_sleep_pid\" 2>/dev/null || true
+      wait \"\$snapshot_sleep_pid\" 2>/dev/null || true
+    fi
+  }
+  trap 'stop_snapshot_sleep; exit 0' HUP INT QUIT TERM
+  while :; do
+    capture_process_snapshot || true
+    bound_snapshot_log || true
+    sleep 1 &
+    snapshot_sleep_pid=\$!
+    wait \"\$snapshot_sleep_pid\" || exit 0
+    snapshot_sleep_pid=
+  done
+) &
+snapshot_watcher_pid=\$!
 set +e
 bash scripts/verify.sh
 verify_status=\$?
+kill \"\$snapshot_watcher_pid\" 2>/dev/null || true
+wait \"\$snapshot_watcher_pid\" 2>/dev/null || true
+cleanup_snapshot_trims
+capture_process_snapshot || true
+bound_snapshot_log || true
 set -e
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if ! compgen -G '$CARGO_LANE_ROOT/*.lock' >/dev/null; then
@@ -163,6 +228,13 @@ if compgen -G '$CARGO_LANE_ROOT/*.lock' >/dev/null; then
   if ((verify_status == 0)); then
     verify_status=1
   fi
+fi
+if ((verify_status == 137)); then
+  print_process_snapshot_diagnostics >&2 || true
+fi
+if ((verify_status == 0)); then
+  rm -f \"\$snapshot_log\" || true
+  cleanup_snapshot_trims
 fi
 exit \"\$verify_status\""
 
