@@ -27,8 +27,10 @@ fn cli_globs_from_its_confined_root() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
         serde_json::json!({
             "ok": {
+                "text": "nested/file.txt",
                 "paths": ["nested/file.txt"],
-                "limit_reached": false
+                "limit_reached": false,
+                "truncated": false
             }
         })
     );

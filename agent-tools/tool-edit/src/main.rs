@@ -3,5 +3,5 @@
 //! Input: {"root": "/abs/dir", "args": {...EditArgs}}
 
 fn main() -> std::process::ExitCode {
-    verlet_tool_core::run_cli(verlet_tool_edit::run)
+    verlet_tool_core::run_cli_with_parser(verlet_tool_edit::parse_cli_args, verlet_tool_edit::run)
 }

@@ -1,20 +1,12 @@
-//! `write` — create or overwrite a file, with an overwrite guard.
-//!
-//! Ported from Pi's write tool (`core/tools/write.ts`) with one deliberate
-//! deviation: Pi's write overwrites unconditionally; ours refuses to
-//! overwrite an existing file unless the model says so.
+//! `write` — create or overwrite a file with Pi-compatible behavior.
 //!
 //! Pinned semantics:
 //! - Parent directories are created as needed (`mkdir -p`).
-//! - If the target exists and `overwrite` is not `true`, the call fails
-//!   with an error stating the file exists, its size, and that the model
-//!   should read it first and pass `overwrite: true` to replace it. This
-//!   is the stateless half of clobber protection; the stateful half
-//!   ("was this path actually read this thread?") is a controller
-//!   coupling on the record, out of scope here.
+//! - Existing files are overwritten unconditionally; there is no prior-read
+//!   or stale-file guard in Pi.
 //! - Content is written exactly as given (no trailing-newline fixups).
-//! - Result reports bytes written and whether a file was created or
-//!   replaced.
+//! - Model-facing text reports JavaScript UTF-16 code units as "bytes", while
+//!   the structured receipt retains the true UTF-8 byte count.
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct WriteArgs {
@@ -23,31 +15,27 @@ pub struct WriteArgs {
     pub path: std::path::PathBuf,
     /// Full file content.
     pub content: String,
-    /// Must be `true` to replace an existing file. Default: false.
-    #[serde(default)]
-    pub overwrite: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct WriteOutput {
+    /// Pi-compatible model-facing primary output.
+    pub text: String,
+    /// True UTF-8 byte count retained as a structured receipt.
     pub bytes_written: u64,
-    /// True when an existing file was replaced (only possible with
-    /// `overwrite: true`).
+    /// Whether the target existed immediately before the unconditional write.
     pub replaced: bool,
 }
 
 pub fn contract() -> verlet_tool_core::ToolContract {
     verlet_tool_core::ToolContract {
         name: "write",
-        description: "Write content to a file, creating parent directories as \
-                      needed. Fails if the file already exists unless overwrite \
-                      is true; read the existing file before overwriting it.",
+        description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path of the file to write (relative or absolute)"},
-                "content": {"type": "string", "description": "Full content to write"},
-                "overwrite": {"type": "boolean", "description": "Set true to replace an existing file (default false)"}
+                "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+                "content": {"type": "string", "description": "Content to write to the file"}
             },
             "required": ["path", "content"]
         }),
@@ -59,32 +47,23 @@ pub fn run(
     args: WriteArgs,
     fs: &dyn verlet_tool_core::ToolFs,
 ) -> Result<WriteOutput, verlet_tool_core::ToolError> {
-    let replaced = fs.exists(&args.path)?;
-    if replaced {
-        let stat = fs.stat(&args.path)?;
-        if !stat.is_file {
-            return Err(verlet_tool_core::ToolError::Failed(format!(
-                "path {:?} is not a file",
-                args.path
-            )));
-        }
-        if !args.overwrite {
-            return Err(verlet_tool_core::ToolError::Failed(format!(
-                "file {} exists ({} bytes); read it first and pass overwrite: true to replace it",
-                args.path.display(),
-                stat.size
-            )));
-        }
-    }
+    let input_path = args.path;
+    let path = verlet_tool_core::normalize_tool_path(&input_path);
+    let replaced = fs.exists(&path).unwrap_or(false);
 
-    if let Some(parent) = args.path.parent() {
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs.mkdir(parent, true)?;
         }
     }
-    fs.write_file(&args.path, args.content.as_bytes())?;
+    fs.write_file(&path, args.content.as_bytes())?;
 
     Ok(WriteOutput {
+        text: format!(
+            "Successfully wrote {} bytes to {}",
+            verlet_tool_core::utf16_len(&args.content),
+            input_path.display()
+        ),
         bytes_written: u64::try_from(args.content.len()).unwrap_or(u64::MAX),
         replaced,
     })
@@ -96,11 +75,10 @@ mod tests {
         verlet_tool_core::StdFs::new(root).unwrap()
     }
 
-    fn args(path: &str, content: &str, overwrite: bool) -> crate::WriteArgs {
+    fn args(path: &str, content: &str) -> crate::WriteArgs {
         crate::WriteArgs {
             path: std::path::PathBuf::from(path),
             content: content.to_owned(),
-            overwrite,
         }
     }
 
@@ -109,7 +87,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         let output = crate::run(
-            args("nested/deeper/file.txt", "exact content", false),
+            args("nested/deeper/file.txt", "exact content"),
             &fs(root.path()),
         )
         .unwrap();
@@ -117,6 +95,7 @@ mod tests {
         assert_eq!(
             output,
             crate::WriteOutput {
+                text: "Successfully wrote 13 bytes to nested/deeper/file.txt".to_owned(),
                 bytes_written: 13,
                 replaced: false,
             }
@@ -128,55 +107,71 @@ mod tests {
     }
 
     #[test]
-    fn refuses_an_existing_file_without_overwrite() {
+    fn overwrites_an_existing_file_unconditionally() {
+        // Pi behavior sheet item 12; source: core/tools/write.ts:208-231.
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file.txt"), "old").unwrap();
 
-        let error = crate::run(args("file.txt", "new", false), &fs(root.path())).unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "file file.txt exists (3 bytes); read it first and pass overwrite: true to replace it"
-        );
-        assert_eq!(std::fs::read(root.path().join("file.txt")).unwrap(), b"old");
-    }
-
-    #[test]
-    fn replaces_an_existing_file_when_allowed() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("file.txt"), "old").unwrap();
-
-        let output = crate::run(args("file.txt", "replacement", true), &fs(root.path())).unwrap();
+        let output = crate::run(args("file.txt", "new"), &fs(root.path())).unwrap();
 
         assert_eq!(
             output,
             crate::WriteOutput {
-                bytes_written: 11,
+                text: "Successfully wrote 3 bytes to file.txt".to_owned(),
+                bytes_written: 3,
                 replaced: true,
             }
         );
-        assert_eq!(
-            std::fs::read(root.path().join("file.txt")).unwrap(),
-            b"replacement"
-        );
+        assert_eq!(std::fs::read(root.path().join("file.txt")).unwrap(), b"new");
     }
 
     #[test]
-    fn reports_utf8_bytes_written() {
+    fn reports_utf16_units_in_text_and_utf8_bytes_in_the_receipt() {
+        // Pi behavior sheet item 13; source: core/tools/write.ts:224-231.
         let root = tempfile::tempdir().unwrap();
 
-        let output = crate::run(args("unicode.txt", "é", false), &fs(root.path())).unwrap();
+        let output = crate::run(args("unicode.txt", "é🙂"), &fs(root.path())).unwrap();
 
-        assert_eq!(output.bytes_written, 2);
+        assert_eq!(output.text, "Successfully wrote 3 bytes to unicode.txt");
+        assert_eq!(output.bytes_written, 6);
         assert!(!output.replaced);
     }
 
     #[test]
-    fn rejects_a_directory_with_the_shared_file_error_shape() {
+    fn an_existing_directory_reaches_the_backend_write_error() {
         let root = tempfile::tempdir().unwrap();
 
-        let error = crate::run(args("", "content", false), &fs(root.path())).unwrap_err();
+        let error = crate::run(args("", "content"), &fs(root.path())).unwrap_err();
 
-        assert_eq!(error.to_string(), "path \"\" is not a file");
+        assert!(!error.to_string().contains("is not a file"));
+    }
+
+    #[test]
+    fn contract_and_path_normalization_match_pi() {
+        // Pi behavior sheets items 1, 4, and 12; source: write.ts:15-18,187-231.
+        let root = tempfile::tempdir().unwrap();
+        let contract = crate::contract();
+        assert_eq!(
+            contract.description,
+            "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
+        );
+        assert_eq!(
+            contract.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+                    "content": {"type": "string", "description": "Content to write to the file"}
+                },
+                "required": ["path", "content"]
+            })
+        );
+
+        crate::run(args("@unicode\u{2009}space.txt", "new"), &fs(root.path())).unwrap();
+
+        assert_eq!(
+            std::fs::read(root.path().join("unicode space.txt")).unwrap(),
+            b"new"
+        );
     }
 }

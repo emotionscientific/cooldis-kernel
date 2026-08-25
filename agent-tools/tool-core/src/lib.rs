@@ -11,12 +11,170 @@
 //! The trait is synchronous on purpose: wasm guests block on host calls,
 //! and async hosts wrap tool runs in `spawn_blocking` at the boundary.
 
-/// Hard cap on a single tool result, in bytes. Protects the record and the
-/// wire, not the context window: context protection is the lossless spill
-/// coupling's job, which is assumed present system-wide. Tools that hit
-/// this cap return [`ToolError::ResultTooLarge`] rather than truncating
-/// silently.
+/// Hard backstop on a single structured tool result, in bytes. Pi-compatible
+/// read, grep, and find output is truncated at its smaller tool-specific
+/// limits first. This cap protects the record and wire from unexpectedly large
+/// receipts and edit details.
 pub const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Pi's automatic head-truncation line limit.
+pub const DEFAULT_MAX_LINES: usize = 2000;
+
+/// Pi's automatic head-truncation byte limit (50 KiB).
+pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TruncatedBy {
+    Lines,
+    Bytes,
+}
+
+/// Structured receipt for Pi-compatible complete-line head truncation.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TruncationResult {
+    pub content: String,
+    pub truncated: bool,
+    pub truncated_by: Option<TruncatedBy>,
+    pub total_lines: usize,
+    pub total_bytes: usize,
+    pub output_lines: usize,
+    pub output_bytes: usize,
+    pub last_line_partial: bool,
+    pub first_line_exceeds_limit: bool,
+    pub max_lines: usize,
+    pub max_bytes: usize,
+}
+
+/// Port of Pi `core/tools/truncate.ts::truncateHead`.
+pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
+    let total_bytes = content.len();
+    let mut lines = if content.is_empty() {
+        Vec::new()
+    } else {
+        content.split('\n').collect::<Vec<_>>()
+    };
+    if content.ends_with('\n') {
+        lines.pop();
+    }
+    let total_lines = lines.len();
+
+    if total_lines <= max_lines && total_bytes <= max_bytes {
+        return TruncationResult {
+            content: content.to_owned(),
+            truncated: false,
+            truncated_by: None,
+            total_lines,
+            total_bytes,
+            output_lines: total_lines,
+            output_bytes: total_bytes,
+            last_line_partial: false,
+            first_line_exceeds_limit: false,
+            max_lines,
+            max_bytes,
+        };
+    }
+
+    if lines
+        .first()
+        .is_some_and(|first_line| first_line.len() > max_bytes)
+    {
+        return TruncationResult {
+            content: String::new(),
+            truncated: true,
+            truncated_by: Some(TruncatedBy::Bytes),
+            total_lines,
+            total_bytes,
+            output_lines: 0,
+            output_bytes: 0,
+            last_line_partial: false,
+            first_line_exceeds_limit: true,
+            max_lines,
+            max_bytes,
+        };
+    }
+
+    let mut output_lines = Vec::new();
+    let mut output_bytes = 0_usize;
+    let mut truncated_by = TruncatedBy::Lines;
+    for (index, line) in lines.iter().take(max_lines).enumerate() {
+        let line_bytes = line.len().saturating_add(usize::from(index > 0));
+        if output_bytes.saturating_add(line_bytes) > max_bytes {
+            truncated_by = TruncatedBy::Bytes;
+            break;
+        }
+        output_lines.push(*line);
+        output_bytes = output_bytes.saturating_add(line_bytes);
+    }
+    if output_lines.len() >= max_lines && output_bytes <= max_bytes {
+        truncated_by = TruncatedBy::Lines;
+    }
+    let output = output_lines.join("\n");
+
+    TruncationResult {
+        output_bytes: output.len(),
+        content: output,
+        truncated: true,
+        truncated_by: Some(truncated_by),
+        total_lines,
+        total_bytes,
+        output_lines: output_lines.len(),
+        last_line_partial: false,
+        first_line_exceeds_limit: false,
+        max_lines,
+        max_bytes,
+    }
+}
+
+/// Format a byte count exactly like Pi's `formatSize` helper.
+pub fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// JavaScript string length: UTF-16 code units, not UTF-8 bytes or Unicode
+/// scalar values.
+pub fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// Port of JavaScript `slice(0, maxUnits)` for model-facing text. A split
+/// surrogate is decoded lossily because Rust strings cannot contain an
+/// unpaired surrogate and UTF-8 encoders render one as U+FFFD.
+pub fn truncate_utf16(text: &str, max_units: usize) -> (String, bool) {
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    if units.len() <= max_units {
+        return (text.to_owned(), false);
+    }
+    (String::from_utf16_lossy(&units[..max_units]), true)
+}
+
+/// Apply the authority-preserving subset of Pi's path normalization: strip one
+/// leading `@` and map Unicode space variants to ASCII space. Tilde and file
+/// URLs deliberately remain literal so normalization cannot introduce ambient
+/// host authority outside the confinement root.
+pub fn normalize_tool_path(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(path) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let mut normalized = path
+        .chars()
+        .map(|character| match character {
+            '\u{00a0}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+            character => character,
+        })
+        .collect::<String>();
+    if normalized.starts_with('@') {
+        normalized.remove(0);
+    }
+    std::path::PathBuf::from(normalized)
+}
 
 /// Minimal synchronous filesystem access for tool cores.
 ///
@@ -79,6 +237,7 @@ pub enum ToolError {
 pub struct WalkFile {
     pub path: std::path::PathBuf,
     pub relative_path: String,
+    pub is_dir: bool,
 }
 
 /// Walk a file or directory using only [`ToolFs`].
@@ -86,8 +245,9 @@ pub struct WalkFile {
 /// Directory walks include hidden files, skip every `.git` directory, apply
 /// root `.git/info/exclude` plus nested `.gitignore` files, prune ignored
 /// directories, skip listed entries that disappear before they can be
-/// resolved, and return files sorted by root-relative path. Stat errors other
-/// than [`ToolFsError::NotFound`] still fail the walk.
+/// resolved, and return files and directories sorted by root-relative path.
+/// Directory relative paths carry a trailing `/`. Stat errors other than
+/// [`ToolFsError::NotFound`] still fail the walk.
 pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFile>, ToolError> {
     let stat = fs.stat(root)?;
     if stat.is_file {
@@ -99,6 +259,7 @@ pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFil
         return Ok(vec![WalkFile {
             path: root.to_path_buf(),
             relative_path,
+            is_dir: false,
         }]);
     }
     if !stat.is_dir {
@@ -147,6 +308,11 @@ fn walk_directory(
                 continue;
             }
 
+            files.push(WalkFile {
+                path: path.clone(),
+                relative_path: format!("{}/", relative_path_string(&relative)),
+                is_dir: true,
+            });
             let matcher_count = ignore_matchers.len();
             add_ignore_file(fs, &path, &path.join(".gitignore"), ignore_matchers)?;
             walk_directory(fs, &path, &relative, ignore_matchers, files)?;
@@ -161,6 +327,7 @@ fn walk_directory(
                 files.push(WalkFile {
                     path,
                     relative_path: relative_path_string(&relative),
+                    is_dir: false,
                 });
             }
         }
@@ -472,6 +639,56 @@ where
     }
 }
 
+/// Run a native CLI with a tool-specific prepare/coerce/validate step.
+///
+/// Pi's edit tool prepares several legacy argument shapes before schema
+/// validation. Keeping this hook at the JSON boundary lets that tool return
+/// Pi's validation envelope without weakening the typed [`run_cli`] path used
+/// by the other tools.
+#[cfg(feature = "std-fs")]
+pub fn run_cli_with_parser<Args, Output>(
+    parse_args: fn(serde_json::Value) -> Result<Args, String>,
+    run: fn(Args, &dyn ToolFs) -> Result<Output, ToolError>,
+) -> std::process::ExitCode
+where
+    Output: serde::Serialize,
+{
+    #[derive(serde::Deserialize)]
+    struct CliInput {
+        root: std::path::PathBuf,
+        args: serde_json::Value,
+    }
+
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        return write_cli_error(format!("failed to read stdin: {error}"));
+    }
+    let input = match serde_json::from_str::<CliInput>(&input) {
+        Ok(input) => input,
+        Err(error) => return write_cli_error(format!("invalid input JSON: {error}")),
+    };
+    let args = match parse_args(input.args) {
+        Ok(args) => args,
+        Err(error) => return write_cli_error(error),
+    };
+    let fs = match StdFs::new(&input.root) {
+        Ok(fs) => fs,
+        Err(error) => return write_cli_error(error.to_string()),
+    };
+
+    match run(args, &fs) {
+        Ok(output) => match serde_json::to_value(output) {
+            Ok(output) => {
+                let mut result = serde_json::Map::new();
+                result.insert("ok".to_owned(), output);
+                write_cli_json(serde_json::Value::Object(result), true)
+            }
+            Err(error) => write_cli_error(format!("failed to serialize result: {error}")),
+        },
+        Err(error) => write_cli_error(error.to_string()),
+    }
+}
+
 #[cfg(feature = "std-fs")]
 fn write_cli_error(error: String) -> std::process::ExitCode {
     write_cli_json(serde_json::json!({"error": error}), false)
@@ -597,7 +814,7 @@ mod tests {
                 .iter()
                 .map(|file| file.relative_path.as_str())
                 .collect::<Vec<_>>(),
-            vec![".gitignore", "dir", "nested/foo"]
+            vec![".gitignore", "dir", "nested/", "nested/foo"]
         );
     }
 
@@ -641,5 +858,102 @@ mod tests {
             error,
             crate::ToolError::Fs(crate::ToolFsError::Denied(_))
         ));
+    }
+
+    #[test]
+    fn pi_helpers_pin_truncation_utf16_and_path_normalization() {
+        // Pi source: core/tools/truncate.ts:47-160,264-275 and utils/paths.ts:7,75-99.
+        let truncated = crate::truncate_head("one\ntwo\nthree", 2, 50 * 1024);
+        assert_eq!(truncated.content, "one\ntwo");
+        assert_eq!(truncated.truncated_by, Some(crate::TruncatedBy::Lines));
+        assert_eq!(crate::format_size(50 * 1024), "50.0KB");
+        assert_eq!(crate::utf16_len("é🙂"), 3);
+        assert_eq!(
+            crate::truncate_utf16(&"🙂".repeat(251), 500),
+            ("🙂".repeat(250), true)
+        );
+        assert_eq!(
+            crate::normalize_tool_path(std::path::Path::new("@a\u{00a0}b\u{2000}c\u{3000}d")),
+            std::path::PathBuf::from("a b c d")
+        );
+        assert_eq!(
+            crate::normalize_tool_path(std::path::Path::new("~/literal")),
+            std::path::PathBuf::from("~/literal")
+        );
+        assert_eq!(
+            crate::normalize_tool_path(std::path::Path::new("file:///literal")),
+            std::path::PathBuf::from("file:///literal")
+        );
+    }
+
+    #[test]
+    fn truncate_head_pins_exact_line_and_byte_boundaries() {
+        // Pi source: core/tools/truncate.ts:78-160.
+        let exactly_two_thousand = std::iter::repeat_n("x", crate::DEFAULT_MAX_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let over_two_thousand = format!("{exactly_two_thousand}\nx");
+        let exact_line_boundary = crate::truncate_head(
+            &exactly_two_thousand,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let over_line_boundary = crate::truncate_head(
+            &over_two_thousand,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+
+        assert!(!exact_line_boundary.truncated);
+        assert!(over_line_boundary.truncated);
+        assert_eq!(
+            over_line_boundary.truncated_by,
+            Some(crate::TruncatedBy::Lines)
+        );
+        assert_eq!(over_line_boundary.output_lines, crate::DEFAULT_MAX_LINES);
+
+        let exactly_fifty_kib = "🙂".repeat(crate::DEFAULT_MAX_BYTES / 4);
+        let exact_byte_boundary = crate::truncate_head(
+            &exactly_fifty_kib,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let complete_first_line = crate::truncate_head(
+            &format!("{exactly_fifty_kib}\nx"),
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let oversized_first_line = crate::truncate_head(
+            &format!("{exactly_fifty_kib}x\ny"),
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+
+        assert!(!exact_byte_boundary.truncated);
+        assert_eq!(exact_byte_boundary.output_bytes, crate::DEFAULT_MAX_BYTES);
+        assert!(complete_first_line.truncated);
+        assert_eq!(complete_first_line.content, exactly_fifty_kib);
+        assert_eq!(complete_first_line.output_lines, 1);
+        assert!(!complete_first_line.first_line_exceeds_limit);
+        assert!(oversized_first_line.truncated);
+        assert!(oversized_first_line.content.is_empty());
+        assert!(oversized_first_line.first_line_exceeds_limit);
+    }
+
+    #[test]
+    fn truncate_utf16_pins_surrogate_pair_boundaries() {
+        // JavaScript slice(0, 500) keeps a split high surrogate. Rust strings
+        // represent that unpaired surrogate as U+FFFD in model-facing UTF-8.
+        let exact_pair_boundary = format!("{}🙂tail", "x".repeat(498));
+        let split_pair_boundary = format!("{}🙂tail", "x".repeat(499));
+
+        assert_eq!(
+            crate::truncate_utf16(&exact_pair_boundary, 500),
+            (format!("{}🙂", "x".repeat(498)), true)
+        );
+        assert_eq!(
+            crate::truncate_utf16(&split_pair_boundary, 500),
+            (format!("{}\u{fffd}", "x".repeat(499)), true)
+        );
     }
 }

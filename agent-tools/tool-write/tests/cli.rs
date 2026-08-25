@@ -23,7 +23,13 @@ fn cli_writes_to_its_confined_root() {
     assert!(output.status.success(), "{:?}", output);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-        serde_json::json!({"ok": {"bytes_written": 13, "replaced": false}})
+        serde_json::json!({
+            "ok": {
+                "text": "Successfully wrote 13 bytes to nested/file.txt",
+                "bytes_written": 13,
+                "replaced": false
+            }
+        })
     );
     assert_eq!(
         std::fs::read(root.path().join("nested/file.txt")).unwrap(),
