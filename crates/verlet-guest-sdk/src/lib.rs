@@ -133,6 +133,9 @@ pub const STATUS_CANCELLED: i32 = 6;
 pub const STATUS_EOF: i32 = 7;
 /// File open mode for read-only VFS handles.
 pub const FS_MODE_READ: u32 = 0;
+/// File open mode for write VFS handles: bytes accumulate host-side and the
+/// file is created or wholly replaced only when the handle is closed.
+pub const FS_MODE_WRITE: u32 = 1;
 #[cfg(target_arch = "wasm32")]
 const STATUS_LEGACY_SOURCE_EOF: i32 = -1;
 
@@ -536,6 +539,35 @@ pub struct Invocation(pub u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileHandle(pub u32);
 
+/// Kind of filesystem entry reported by [`stat_path`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileKind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Dir,
+    /// Anything that is neither a regular file nor a directory.
+    Other,
+}
+
+/// Metadata for a VFS path, decoded from the host's 16-byte stat record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileStat {
+    /// What kind of entry the path names.
+    pub kind: FileKind,
+    /// Size in bytes for files; 0 for directories.
+    pub size: u64,
+}
+
+/// One directory entry from [`list_dir`].
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DirEntry {
+    /// Entry name (name only, never a full path).
+    pub name: String,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+}
+
 /// Source handles returned by an HTTP host request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HttpResponseSources {
@@ -623,9 +655,48 @@ pub fn read_file(handle: FileHandle, buffer: &mut [u8]) -> Result<usize, StatusC
     call_fs_read(handle, buffer)
 }
 
-/// Close a VFS file handle.
+/// Close a VFS file handle. For write handles this is the commit point: the
+/// host replaces the whole file with the accumulated buffer, and the returned
+/// status is the outcome of that write.
 pub fn close_file(handle: FileHandle) -> Result<(), StatusCode> {
     call_fs_close(handle).into_result()
+}
+
+/// Open a write VFS file handle. Bytes passed to [`write_file`] accumulate
+/// host-side; the file is created or wholly replaced only when
+/// [`close_file`] commits the buffer. Parent directories are not created on
+/// commit; create them first with [`mkdir`]. Requires the `fs.write`
+/// capability grant in addition to an attached VFS.
+pub fn open_file_write(path: &str) -> Result<FileHandle, StatusCode> {
+    call_fs_open(path, FS_MODE_WRITE)
+}
+
+/// Append bytes to the pending buffer of a write VFS file handle.
+/// All-or-nothing: on `Ok(())` the whole slice was appended.
+pub fn write_file(handle: FileHandle, bytes: &[u8]) -> Result<(), StatusCode> {
+    call_fs_write(handle, bytes).into_result()
+}
+
+/// Stat an absolute VFS path. `Err(StatusCode::NotFound)` doubles as the
+/// existence check; there is no separate exists import.
+pub fn stat_path(path: &str) -> Result<FileStat, StatusCode> {
+    call_fs_stat(path)
+}
+
+/// List an absolute VFS directory, name-sorted (byte order). Drains the
+/// host's listing source and decodes the JSON array of entries.
+pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, StatusCode> {
+    let _source = call_fs_list(path)?;
+    // Drain `_source` with `call_source_read` until EOF, then decode the
+    // bytes as a JSON array of `DirEntry`; decode failures map to
+    // `StatusCode::TransportError`.
+    todo!("fs write leg: drain and decode the fs_list source")
+}
+
+/// Create a directory at an absolute VFS path. Requires the `fs.write`
+/// capability grant in addition to an attached VFS.
+pub fn mkdir(path: &str, recursive: bool) -> Result<(), StatusCode> {
+    call_fs_mkdir(path, recursive).into_result()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -790,6 +861,74 @@ fn call_fs_close(_handle: FileHandle) -> StatusCode {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn call_fs_write(handle: FileHandle, bytes: &[u8]) -> StatusCode {
+    StatusCode::from_raw(unsafe {
+        imports::fs_write(handle.0, bytes.as_ptr() as u32, bytes.len() as u32)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn call_fs_write(_handle: FileHandle, _bytes: &[u8]) -> StatusCode {
+    StatusCode::TransportError
+}
+
+#[cfg(target_arch = "wasm32")]
+fn call_fs_stat(path: &str) -> Result<FileStat, StatusCode> {
+    let mut record = [0u8; 16];
+    let status = unsafe {
+        imports::fs_stat(
+            path.as_ptr() as u32,
+            path.len() as u32,
+            record.as_mut_ptr() as u32,
+        )
+    };
+    StatusCode::from_raw(status).into_result()?;
+    let kind = match u32::from_le_bytes(record[0..4].try_into().unwrap()) {
+        0 => FileKind::File,
+        1 => FileKind::Dir,
+        _ => FileKind::Other,
+    };
+    let size = u64::from_le_bytes(record[8..16].try_into().unwrap());
+    Ok(FileStat { kind, size })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn call_fs_stat(_path: &str) -> Result<FileStat, StatusCode> {
+    Err(StatusCode::TransportError)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn call_fs_list(path: &str) -> Result<Source, StatusCode> {
+    let mut source = 0u32;
+    let status = unsafe {
+        imports::fs_list(
+            path.as_ptr() as u32,
+            path.len() as u32,
+            &mut source as *mut u32 as u32,
+        )
+    };
+    StatusCode::from_raw(status).into_result()?;
+    Ok(Source(source))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn call_fs_list(_path: &str) -> Result<Source, StatusCode> {
+    Err(StatusCode::TransportError)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn call_fs_mkdir(path: &str, recursive: bool) -> StatusCode {
+    StatusCode::from_raw(unsafe {
+        imports::fs_mkdir(path.as_ptr() as u32, path.len() as u32, recursive as u32)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn call_fs_mkdir(_path: &str, _recursive: bool) -> StatusCode {
+    StatusCode::TransportError
+}
+
+#[cfg(target_arch = "wasm32")]
 mod imports {
     #[link(wasm_import_module = "cooldis_0.1")]
     unsafe extern "C" {
@@ -809,6 +948,10 @@ mod imports {
         pub fn fs_open(path_ptr: u32, path_len: u32, mode: u32, out_handle_ptr: u32) -> i32;
         pub fn fs_read(handle: u32, ptr: u32, len_ptr: u32) -> i32;
         pub fn fs_close(handle: u32) -> i32;
+        pub fn fs_write(handle: u32, ptr: u32, len: u32) -> i32;
+        pub fn fs_stat(path_ptr: u32, path_len: u32, out_ptr: u32) -> i32;
+        pub fn fs_list(path_ptr: u32, path_len: u32, out_source_ptr: u32) -> i32;
+        pub fn fs_mkdir(path_ptr: u32, path_len: u32, recursive: u32) -> i32;
     }
 }
 
