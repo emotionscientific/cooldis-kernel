@@ -2664,7 +2664,7 @@ schema_version = 0
 [identity]
 name = "{name}"
 version = "0.1.0"
-description = "Read files from a mounted VFS."
+description = "Read and write files on a mounted VFS."
 
 [runtime]
 kind = "wasm32-unknown-unknown"
@@ -2692,6 +2692,18 @@ required_capabilities = []
 
 [operations.command]
 name = "tail"
+stdin = "text"
+stdout = "bytes"
+
+[[operations]]
+name = "put"
+description = "Write a full file."
+input_schema = "schemas/path.input.json"
+output_schema = "schemas/bytes.output.json"
+required_capabilities = ["fs.write"]
+
+[operations.command]
+name = "put"
 stdin = "text"
 stdout = "bytes"
 "#,

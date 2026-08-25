@@ -28,7 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     release: true,
                 },
                 interface: None,
-                capability_grants: std::collections::BTreeSet::new(),
+                capability_grants: std::collections::BTreeSet::from([
+                    verlet_wasm::runner::FS_WRITE_CAPABILITY.to_string(),
+                ]),
                 metadata: std::collections::BTreeMap::new(),
             },
         )

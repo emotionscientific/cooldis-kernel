@@ -114,6 +114,7 @@ dependencies = [
 name = "verlet-wasm-vfs-tools"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "verlet-guest-sdk",
 ]
 

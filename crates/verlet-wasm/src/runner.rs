@@ -26,6 +26,14 @@ const FIRST_DYNAMIC_SOURCE: u32 = 10;
 const FIRST_DYNAMIC_FILE: u32 = 1_000;
 #[doc(hidden)]
 pub const FS_MODE_READ: u32 = 0;
+#[doc(hidden)]
+pub const FS_MODE_WRITE: u32 = 1;
+/// Capability grant required for guest-initiated VFS mutation (`fs_open` in
+/// `FS_MODE_WRITE` and `fs_mkdir`). Read-side fs imports (`fs_open` in
+/// `FS_MODE_READ`, `fs_read`, `fs_stat`, `fs_list`) are gated only by whether
+/// a VFS is attached to the turn.
+#[doc(hidden)]
+pub const FS_WRITE_CAPABILITY: &str = "fs.write";
 const BLOCKED_HTTP_ADDRESS_ERROR: &str =
     "refusing to connect to private or special-purpose address";
 
@@ -488,6 +496,10 @@ fn allowed_import(
                     | ("cooldis_0.1", "fs_open")
                     | ("cooldis_0.1", "fs_read")
                     | ("cooldis_0.1", "fs_close")
+                    | ("cooldis_0.1", "fs_write")
+                    | ("cooldis_0.1", "fs_stat")
+                    | ("cooldis_0.1", "fs_list")
+                    | ("cooldis_0.1", "fs_mkdir")
                     | ("cooldis_0.1", "log")
             ),
             crate::WasmHostImportPolicy::PureCompute => matches!(
@@ -565,9 +577,17 @@ struct WasmSourceState {
     offset: usize,
 }
 
-struct WasmFileState {
-    bytes: Vec<u8>,
-    offset: usize,
+enum WasmFileState {
+    /// Read handle: the whole file is buffered host-side at `fs_open` time
+    /// and drained by `fs_read`.
+    Read { bytes: Vec<u8>, offset: usize },
+    /// Write handle: `fs_write` appends into the host-side buffer; nothing
+    /// touches the VFS until `fs_close` commits the buffer as one whole-file
+    /// replace of `path`. A handle dropped without `fs_close` is discarded.
+    Write {
+        path: std::path::PathBuf,
+        buffer: Vec<u8>,
+    },
 }
 
 impl WasmTurnState {
@@ -626,26 +646,43 @@ impl WasmTurnState {
         Some((bytes, exhausted))
     }
 
-    fn insert_file(&mut self, bytes: Vec<u8>) -> u32 {
+    fn insert_read_file(&mut self, bytes: Vec<u8>) -> u32 {
+        self.insert_file(WasmFileState::Read { bytes, offset: 0 })
+    }
+
+    /// Open a pending write buffer for `path`. The buffer lives host-side
+    /// and is committed to the VFS only by `fs_close`.
+    fn insert_write_file(&mut self, path: std::path::PathBuf) -> u32 {
+        self.insert_file(WasmFileState::Write {
+            path,
+            buffer: Vec::new(),
+        })
+    }
+
+    fn insert_file(&mut self, state: WasmFileState) -> u32 {
         let handle = self.next_file;
         self.next_file = self.next_file.saturating_add(1);
-        self.files
-            .insert(handle, WasmFileState { bytes, offset: 0 });
+        self.files.insert(handle, state);
         handle
     }
 
-    fn read_file_chunk(&mut self, handle: u32, capacity: usize) -> Option<(Vec<u8>, bool)> {
-        let file = self.files.get_mut(&handle)?;
-        let remaining = file.bytes.len().saturating_sub(file.offset);
+    fn read_file_chunk(&mut self, handle: u32, capacity: usize) -> Result<(Vec<u8>, bool), i32> {
+        let Some(state) = self.files.get_mut(&handle) else {
+            return Err(STATUS_NOT_FOUND);
+        };
+        let WasmFileState::Read { bytes, offset } = state else {
+            return Err(STATUS_INVALID_ARGUMENT);
+        };
+        let remaining = bytes.len().saturating_sub(*offset);
         let copied = remaining.min(capacity);
-        let bytes = file.bytes[file.offset..file.offset + copied].to_vec();
-        file.offset += copied;
-        let exhausted = file.offset >= file.bytes.len();
-        Some((bytes, exhausted))
+        let chunk = bytes[*offset..*offset + copied].to_vec();
+        *offset += copied;
+        let exhausted = *offset >= bytes.len();
+        Ok((chunk, exhausted))
     }
 
-    fn close_file(&mut self, handle: u32) -> bool {
-        self.files.remove(&handle).is_some()
+    fn take_file(&mut self, handle: u32) -> Option<WasmFileState> {
+        self.files.remove(&handle)
     }
 }
 
@@ -908,7 +945,7 @@ fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime:
                 let Some(mode) = nonnegative_u32(mode) else {
                     return STATUS_INVALID_ARGUMENT;
                 };
-                if mode != FS_MODE_READ {
+                if mode != FS_MODE_READ && mode != FS_MODE_WRITE {
                     return STATUS_INVALID_ARGUMENT;
                 }
                 let Some(out_handle_ptr) = nonnegative_usize(out_handle_ptr) else {
@@ -927,11 +964,14 @@ fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime:
                 let Some(vfs) = caller.data().vfs.clone() else {
                     return STATUS_CAPABILITY_DENIED;
                 };
+                if mode == FS_MODE_WRITE {
+                    return fs_open_write_impl(&mut caller, path, out_handle_ptr);
+                }
                 let bytes = match vfs.read_file(&path).await {
                     Ok(bytes) => bytes,
                     Err(err) => return vfs_error_status(err),
                 };
-                let handle = caller.data_mut().insert_file(bytes);
+                let handle = caller.data_mut().insert_read_file(bytes);
                 if !write_guest_u32_at(&mut caller, out_handle_ptr, handle) {
                     return STATUS_INVALID_ARGUMENT;
                 }
@@ -961,9 +1001,9 @@ fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime:
                 return STATUS_INVALID_ARGUMENT;
             };
             let capacity = capacity as usize;
-            let Some((bytes, exhausted)) = caller.data_mut().read_file_chunk(handle, capacity)
-            else {
-                return STATUS_NOT_FOUND;
+            let (bytes, exhausted) = match caller.data_mut().read_file_chunk(handle, capacity) {
+                Ok(chunk) => chunk,
+                Err(status) => return status,
             };
             let copied = bytes.len();
             let Some(memory) = exported_memory(&mut caller) else {
@@ -988,18 +1028,59 @@ fn add_verlet_imports(linker: &mut wasmtime::Linker<WasmTurnState>) -> wasmtime:
         },
     )?;
 
-    linker.func_wrap(
+    linker.func_wrap_async(
         "cooldis_0.1",
         "fs_close",
-        |mut caller: wasmtime::Caller<'_, WasmTurnState>, handle: i32| -> i32 {
-            let Some(handle) = nonnegative_u32(handle) else {
-                return STATUS_INVALID_ARGUMENT;
-            };
-            if caller.data_mut().close_file(handle) {
-                STATUS_OK
-            } else {
-                STATUS_NOT_FOUND
-            }
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, (handle,): (i32,)| {
+            Box::new(async move {
+                let Some(handle) = nonnegative_u32(handle) else {
+                    return STATUS_INVALID_ARGUMENT;
+                };
+                match caller.data_mut().take_file(handle) {
+                    None => STATUS_NOT_FOUND,
+                    Some(WasmFileState::Read { .. }) => STATUS_OK,
+                    Some(WasmFileState::Write { path, buffer }) => {
+                        fs_close_commit_impl(&mut caller, path, buffer).await
+                    }
+                }
+            })
+        },
+    )?;
+
+    linker.func_wrap(
+        "cooldis_0.1",
+        "fs_write",
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>, handle: i32, ptr: i32, len: i32| -> i32 {
+            fs_write_impl(&mut caller, handle, ptr, len)
+        },
+    )?;
+
+    linker.func_wrap_async(
+        "cooldis_0.1",
+        "fs_stat",
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         (path_ptr, path_len, out_ptr): (i32, i32, i32)| {
+            Box::new(async move { fs_stat_impl(&mut caller, path_ptr, path_len, out_ptr).await })
+        },
+    )?;
+
+    linker.func_wrap_async(
+        "cooldis_0.1",
+        "fs_list",
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         (path_ptr, path_len, out_source_ptr): (i32, i32, i32)| {
+            Box::new(
+                async move { fs_list_impl(&mut caller, path_ptr, path_len, out_source_ptr).await },
+            )
+        },
+    )?;
+
+    linker.func_wrap_async(
+        "cooldis_0.1",
+        "fs_mkdir",
+        |mut caller: wasmtime::Caller<'_, WasmTurnState>,
+         (path_ptr, path_len, recursive): (i32, i32, i32)| {
+            Box::new(async move { fs_mkdir_impl(&mut caller, path_ptr, path_len, recursive).await })
         },
     )?;
 
@@ -1632,6 +1713,261 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         pattern_index += 1;
     }
     pattern_index == pattern.len()
+}
+
+/// `fs_open` in `FS_MODE_WRITE`: open a pending write buffer for `path`.
+///
+/// Contract (fs write leg, guest ABI `cooldis_0.1`): the caller has already
+/// validated the mode, decoded an absolute UTF-8 `path`, and confirmed a VFS
+/// is attached to the turn. Mutation additionally requires the
+/// [`FS_WRITE_CAPABILITY`] grant in `capability_grants`; return
+/// `STATUS_CAPABILITY_DENIED` without it. On success, insert a write handle
+/// via `insert_write_file` and write it to guest memory at `out_handle_ptr`
+/// (`STATUS_INVALID_ARGUMENT` if that write fails). The VFS is not touched
+/// here: `fs_write` appends into the host-side buffer and `fs_close` commits
+/// it. Parent directories are NOT created on commit; guests create them
+/// explicitly with `fs_mkdir`.
+fn fs_open_write_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path: std::path::PathBuf,
+    out_handle_ptr: usize,
+) -> i32 {
+    if !caller
+        .data()
+        .capability_grants
+        .contains(FS_WRITE_CAPABILITY)
+    {
+        return STATUS_CAPABILITY_DENIED;
+    }
+    let handle = caller.data_mut().insert_write_file(path);
+    if !write_guest_u32_at(caller, out_handle_ptr, handle) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    STATUS_OK
+}
+
+/// `fs_close` on a write handle: commit the pending buffer to the VFS.
+///
+/// Contract: one whole-file replace of `path` via `VerletVfs::write_file`
+/// (create if missing, truncate-replace if present; parents must already
+/// exist). Failures map through `vfs_error_status`. The handle was already
+/// removed from the file table by the caller: it is consumed whether or not
+/// the commit succeeds, and there is no retry.
+async fn fs_close_commit_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path: std::path::PathBuf,
+    buffer: Vec<u8>,
+) -> i32 {
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    match vfs.write_file(&path, &buffer).await {
+        Ok(()) => STATUS_OK,
+        Err(err) => vfs_error_status(err),
+    }
+}
+
+/// `fs_write`: append `len` bytes from guest memory at `ptr` to the pending
+/// buffer of a write handle.
+///
+/// Contract: all-or-nothing: on `STATUS_OK` the whole slice was appended.
+/// Unknown handle -> `STATUS_NOT_FOUND`; a read handle or bad guest pointers
+/// -> `STATUS_INVALID_ARGUMENT`. No size cap beyond host memory: the read leg
+/// buffers whole files host-side with the same asymmetry.
+fn fs_write_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    handle: i32,
+    ptr: i32,
+    len: i32,
+) -> i32 {
+    let Some(handle) = nonnegative_u32(handle) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(state) = caller.data().files.get(&handle) else {
+        return STATUS_NOT_FOUND;
+    };
+    if !matches!(state, WasmFileState::Write { .. }) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(bytes) = read_guest_memory(caller, ptr, len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(WasmFileState::Write { buffer, .. }) = caller.data_mut().files.get_mut(&handle) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    buffer.extend_from_slice(&bytes);
+    STATUS_OK
+}
+
+/// `fs_stat`: stat an absolute UTF-8 VFS path into a 16-byte record.
+///
+/// Contract: decode `path_ptr`/`path_len` like `fs_open` (absolute UTF-8,
+/// else `STATUS_INVALID_ARGUMENT`); no VFS attached ->
+/// `STATUS_CAPABILITY_DENIED`; missing path -> `STATUS_NOT_FOUND`, which
+/// doubles as the existence check (there is no separate exists import).
+/// Read-side: no `fs.write` grant required. On success write exactly 16
+/// little-endian bytes at `out_ptr`:
+///   bytes 0..4   kind (u32): 0 = file, 1 = directory, 2 = other
+///   bytes 4..8   reserved (u32): always zero
+///   bytes 8..16  size (u64): size in bytes for files, 0 for directories
+async fn fs_stat_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    out_ptr: i32,
+) -> i32 {
+    let Some(out_ptr) = nonnegative_usize(out_ptr) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    let metadata = match vfs.stat(&path).await {
+        Ok(metadata) => metadata,
+        Err(err) => return vfs_error_status(err),
+    };
+    let kind = match metadata.file_type {
+        bashkit::FileType::File => 0u32,
+        bashkit::FileType::Directory => 1u32,
+        bashkit::FileType::Symlink | bashkit::FileType::Fifo => 2u32,
+    };
+    let size = if metadata.file_type == bashkit::FileType::Directory {
+        0
+    } else {
+        metadata.size
+    };
+    let mut record = [0u8; 16];
+    record[0..4].copy_from_slice(&kind.to_le_bytes());
+    record[8..16].copy_from_slice(&size.to_le_bytes());
+    let Some(memory) = exported_memory(caller) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let data = memory.data_mut(caller);
+    let Some(end) = out_ptr.checked_add(record.len()) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    if end > data.len() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    data[out_ptr..end].copy_from_slice(&record);
+    STATUS_OK
+}
+
+/// `fs_list`: list an absolute UTF-8 VFS directory as a readable source.
+///
+/// Contract: path decoding, VFS-attachment, and not-found behavior match
+/// `fs_stat`; read-side, no `fs.write` grant required. On success,
+/// materialize the listing host-side as one UTF-8 JSON array
+/// `[{"name": <entry name>, "is_dir": <bool>}, ...]`, sorted by `name` in
+/// byte order (deterministic, like the agent-tools walker), insert it as a
+/// dynamic source, and write the source handle to guest memory at
+/// `out_source_ptr`. The guest drains it with `source_read`. Names are entry
+/// names only, never full paths.
+async fn fs_list_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    out_source_ptr: i32,
+) -> i32 {
+    #[derive(serde::Serialize)]
+    struct ListingEntry {
+        name: String,
+        is_dir: bool,
+    }
+
+    let Some(out_source_ptr) = nonnegative_usize(out_source_ptr) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    let mut entries = match vfs.read_dir(&path).await {
+        Ok(entries) => entries,
+        Err(err) => return vfs_error_status(err),
+    };
+    entries.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    let listing: Vec<_> = entries
+        .into_iter()
+        .map(|entry| ListingEntry {
+            name: entry.name,
+            is_dir: entry.metadata.file_type == bashkit::FileType::Directory,
+        })
+        .collect();
+    let bytes = match serde_json::to_vec(&listing) {
+        Ok(bytes) => bytes,
+        Err(_) => return STATUS_TRANSPORT_ERROR,
+    };
+    let source = caller.data_mut().insert_source(bytes);
+    if !write_guest_u32_at(caller, out_source_ptr, source) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    STATUS_OK
+}
+
+/// `fs_mkdir`: create a directory at an absolute UTF-8 VFS path.
+///
+/// Contract: path decoding and VFS-attachment behavior match `fs_stat`.
+/// Mutation: requires the [`FS_WRITE_CAPABILITY`] grant ->
+/// `STATUS_CAPABILITY_DENIED` without it. `recursive` must be 0 or 1 (any
+/// other value -> `STATUS_INVALID_ARGUMENT`) and maps to the backend's
+/// recursive flag: recursive creation of an existing directory succeeds;
+/// non-recursive creation with a missing parent or an existing target maps
+/// the backend error through `vfs_error_status`.
+async fn fs_mkdir_impl(
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    recursive: i32,
+) -> i32 {
+    let recursive = match recursive {
+        0 => false,
+        1 => true,
+        _ => return STATUS_INVALID_ARGUMENT,
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    if !caller
+        .data()
+        .capability_grants
+        .contains(FS_WRITE_CAPABILITY)
+    {
+        return STATUS_CAPABILITY_DENIED;
+    }
+    match vfs.mkdir(&path, recursive).await {
+        Ok(()) => STATUS_OK,
+        Err(err) => vfs_error_status(err),
+    }
 }
 
 fn vfs_error_status(err: bashkit::Error) -> i32 {

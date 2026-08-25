@@ -403,14 +403,136 @@ fn wasm_vfs_probe_guest() -> String {
                 "events": "none",
                 "mode": "sync",
                 "required_capabilities": []
+            },
+            {
+                "id": 4,
+                "name": "unclosed_write",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 5,
+                "name": "mkdir_recursive",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 6,
+                "name": "mkdir_non_recursive",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 7,
+                "name": "write_to_read",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 8,
+                "name": "read_from_write",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 9,
+                "name": "unknown_write",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 10,
+                "name": "stat_record",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 11,
+                "name": "mkdir_missing_parent",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 12,
+                "name": "bad_write_pointer",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 13,
+                "name": "failed_close_consumes_handle",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
+            },
+            {
+                "id": 14,
+                "name": "mkdir_invalid_recursive",
+                "input": "bytes",
+                "output": "bytes",
+                "events": "none",
+                "mode": "sync",
+                "required_capabilities": []
             }
         ]
     })
     .to_string();
     let path = b"/workspace/input.txt";
+    let pending_path = b"/workspace/pending.txt";
+    let recursive_path = b"/workspace/recursive/child";
+    let nonrecursive_path = b"/workspace/nonrecursive";
+    let missing_parent_dir = b"/workspace/missing";
+    let missing_parent_path = b"/workspace/missing/child.txt";
     render_vfs_fixture(WASM_VFS_PROBE_FIXTURE_TEMPLATE, &manifest)
         .replace("{{path}}", &wat_bytes(path))
         .replace("{{path_len}}", &path.len().to_string())
+        .replace("{{pending_path}}", &wat_bytes(pending_path))
+        .replace("{{pending_path_len}}", &pending_path.len().to_string())
+        .replace("{{recursive_path}}", &wat_bytes(recursive_path))
+        .replace("{{recursive_path_len}}", &recursive_path.len().to_string())
+        .replace("{{nonrecursive_path}}", &wat_bytes(nonrecursive_path))
+        .replace(
+            "{{nonrecursive_path_len}}",
+            &nonrecursive_path.len().to_string(),
+        )
+        .replace("{{missing_parent_path}}", &wat_bytes(missing_parent_path))
+        .replace(
+            "{{missing_parent_path_len}}",
+            &missing_parent_path.len().to_string(),
+        )
+        .replace(
+            "{{missing_parent_dir_len}}",
+            &missing_parent_dir.len().to_string(),
+        )
 }
 
 fn render_vfs_fixture(template: &str, manifest: &str) -> String {
@@ -424,6 +546,18 @@ fn render_vfs_fixture(template: &str, manifest: &str) -> String {
         .replace(
             "{{read_mode}}",
             &verlet_wasm::runner::FS_MODE_READ.to_string(),
+        )
+        .replace(
+            "{{write_mode}}",
+            &verlet_wasm::runner::FS_MODE_WRITE.to_string(),
+        )
+        .replace(
+            "{{invalid_mode}}",
+            &(verlet_wasm::runner::FS_MODE_WRITE + 1).to_string(),
+        )
+        .replace(
+            "{{invalid_argument}}",
+            &verlet_wasm::runner::STATUS_INVALID_ARGUMENT.to_string(),
         )
         .replace("{{eof}}", &verlet_wasm::runner::STATUS_EOF.to_string())
 }
@@ -448,6 +582,18 @@ async fn wasm_cat_vfs() -> std::sync::Arc<verlet_vfs::VerletVfs> {
         bashkit::InMemoryFs::new(),
     )));
     vfs.mount("/workspace", workspace).unwrap();
+    vfs
+}
+
+async fn writable_vfs() -> std::sync::Arc<verlet_vfs::VerletVfs> {
+    let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
+    vfs.mount(
+        "/workspace",
+        std::sync::Arc::new(bashkit::InMemoryFs::new()),
+    )
+    .unwrap();
     vfs
 }
 
@@ -1065,7 +1211,7 @@ async fn wasm_vfs_read_imports_fail_closed_for_invalid_mode_and_handle() {
 }
 
 #[tokio::test]
-async fn wasm_vfs_close_drops_invocation_local_handles() {
+async fn wasm_vfs_close_accepts_read_handle_and_rejects_double_close() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
             wasm_vfs_probe_guest(),
@@ -1080,6 +1226,367 @@ async fn wasm_vfs_close_drops_invocation_local_handles() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("returned status 2"));
+}
+
+#[tokio::test]
+async fn wasm_vfs_write_guest_creates_replaces_stats_and_lists() {
+    let vfs = writable_vfs().await;
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
+        .with_vfs(vfs.clone())
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+
+    factory
+        .invoke_operation_bytes(
+            "put",
+            serde_json::to_vec(&serde_json::json!({
+                "path": "/workspace/nested/file.txt",
+                "content": "first payload",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/nested/file.txt"))
+            .await
+            .unwrap(),
+        b"first payload"
+    );
+
+    factory
+        .invoke_operation_bytes(
+            "put",
+            serde_json::to_vec(&serde_json::json!({
+                "path": "/workspace/nested/file.txt",
+                "content": "replacement",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/nested/file.txt"))
+            .await
+            .unwrap(),
+        b"replacement"
+    );
+
+    for (path, content) in [
+        ("/workspace/z.txt", "z"),
+        ("/workspace/a.txt", "alpha"),
+        ("/workspace/é.txt", "accent"),
+    ] {
+        factory
+            .invoke_operation_bytes(
+                "put",
+                serde_json::to_vec(&serde_json::json!({
+                    "path": path,
+                    "content": content,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let stat = factory
+        .invoke_operation_bytes("stat", b"/workspace/nested/file.txt".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stat.output).unwrap(),
+        serde_json::json!({"kind": "file", "size": 11})
+    );
+    let stat = factory
+        .invoke_operation_bytes("stat", b"/workspace/nested".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stat.output).unwrap(),
+        serde_json::json!({"kind": "dir", "size": 0})
+    );
+    let missing = factory
+        .invoke_operation_bytes("stat", b"/workspace/missing.txt".to_vec())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("returned status 2"), "{missing}");
+    let missing = factory
+        .invoke_operation_bytes("ls", b"/workspace/missing".to_vec())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("returned status 2"), "{missing}");
+
+    let list = factory
+        .invoke_operation_bytes("ls", b"/workspace".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&list.output).unwrap(),
+        serde_json::json!([
+            {"name": "a.txt", "is_dir": false},
+            {"name": "dev", "is_dir": true},
+            {"name": "home", "is_dir": true},
+            {"name": "nested", "is_dir": true},
+            {"name": "tmp", "is_dir": true},
+            {"name": "z.txt", "is_dir": false},
+            {"name": "é.txt", "is_dir": false},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn wasm_vfs_write_guest_requires_declared_capability_before_execution() {
+    let vfs = writable_vfs().await;
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
+        .with_vfs(vfs.clone()),
+    )
+    .unwrap();
+
+    let err = factory
+        .invoke_operation_bytes(
+            "put",
+            br#"{"path":"/workspace/denied/file.txt","content":"denied"}"#.to_vec(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("requires ungranted capabilities"), "{err}");
+    assert!(err.contains(verlet_wasm::runner::FS_WRITE_CAPABILITY));
+    assert!(
+        !vfs.exists(std::path::Path::new("/workspace/denied"))
+            .await
+            .unwrap()
+    );
+    factory
+        .invoke_operation_bytes("stat", b"/workspace".to_vec())
+        .await
+        .unwrap();
+    factory
+        .invoke_operation_bytes("ls", b"/workspace".to_vec())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn wasm_vfs_mutation_imports_require_exact_write_capability() {
+    let vfs = wasm_cat_vfs().await;
+    for grant in [None, Some("fs.write:/workspace")] {
+        let mut config = verlet_wasm::WasmRuntimeConfig::new(
+            verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(wasm_vfs_probe_guest())),
+        )
+        .with_vfs(vfs.clone());
+        if let Some(grant) = grant {
+            config = config.with_capability_grant(grant);
+        }
+        let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(config).unwrap();
+        for operation in ["unclosed_write", "mkdir_recursive"] {
+            let err = factory
+                .invoke_operation_bytes(operation, Vec::new())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("returned status 3"), "{operation}: {err}");
+        }
+    }
+
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
+        .with_vfs(vfs.clone())
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+    factory
+        .invoke_operation_bytes("unclosed_write", Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        !vfs.exists(std::path::Path::new("/workspace/pending.txt"))
+            .await
+            .unwrap()
+    );
+    factory
+        .invoke_operation_bytes("mkdir_recursive", Vec::new())
+        .await
+        .unwrap();
+    factory
+        .invoke_operation_bytes("mkdir_recursive", Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        vfs.stat(std::path::Path::new("/workspace/recursive/child"))
+            .await
+            .unwrap()
+            .file_type
+            .is_dir()
+    );
+}
+
+#[tokio::test]
+async fn wasm_vfs_write_handles_fail_closed_and_failed_close_consumes_handle() {
+    let vfs = wasm_cat_vfs().await;
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
+        .with_vfs(vfs.clone())
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+
+    for operation in ["write_to_read", "read_from_write"] {
+        let err = factory
+            .invoke_operation_bytes(operation, Vec::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("returned status 1"), "{operation}: {err}");
+    }
+    let err = factory
+        .invoke_operation_bytes("unknown_write", Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("returned status 2"), "{err}");
+    factory
+        .invoke_operation_bytes("bad_write_pointer", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/pending.txt"))
+            .await
+            .unwrap(),
+        b"pending"
+    );
+
+    let err = factory
+        .invoke_operation_bytes("failed_close_consumes_handle", Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("returned status 2"), "{err}");
+    assert!(
+        vfs.exists(std::path::Path::new("/workspace/missing"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !vfs.exists(std::path::Path::new("/workspace/missing/child.txt"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn wasm_vfs_mkdir_honors_recursive_and_non_recursive_semantics() {
+    let vfs = wasm_cat_vfs().await;
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
+        .with_vfs(vfs)
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+
+    let missing_parent = factory
+        .invoke_operation_bytes("mkdir_missing_parent", Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing_parent.contains("returned status 2"),
+        "{missing_parent}"
+    );
+    let invalid_recursive = factory
+        .invoke_operation_bytes("mkdir_invalid_recursive", Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        invalid_recursive.contains("returned status 1"),
+        "{invalid_recursive}"
+    );
+
+    factory
+        .invoke_operation_bytes("mkdir_non_recursive", Vec::new())
+        .await
+        .unwrap();
+    let existing = factory
+        .invoke_operation_bytes("mkdir_non_recursive", Vec::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(existing.contains("returned status 4"), "{existing}");
+}
+
+#[tokio::test]
+async fn wasm_vfs_stat_writes_exact_little_endian_record() {
+    let content = b"alpha\nbeta\ngamma from verlet vfs\n";
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            wasm_vfs_probe_guest(),
+        )))
+        .with_vfs(wasm_cat_vfs().await),
+    )
+    .unwrap();
+
+    let output = factory
+        .invoke_operation_bytes("stat_record", Vec::new())
+        .await
+        .unwrap();
+    let mut expected = [0u8; 16];
+    expected[8..16].copy_from_slice(&(content.len() as u64).to_le_bytes());
+    assert_eq!(output.output, expected);
+}
+
+#[tokio::test]
+async fn pure_compute_policy_rejects_every_fs_import() {
+    let guest = r#"
+        (module
+          (import "cooldis_0.1" "fs_open" (func $fs_open (param i32 i32 i32 i32) (result i32)))
+          (import "cooldis_0.1" "fs_read" (func $fs_read (param i32 i32 i32) (result i32)))
+          (import "cooldis_0.1" "fs_close" (func $fs_close (param i32) (result i32)))
+          (import "cooldis_0.1" "fs_write" (func $fs_write (param i32 i32 i32) (result i32)))
+          (import "cooldis_0.1" "fs_stat" (func $fs_stat (param i32 i32 i32) (result i32)))
+          (import "cooldis_0.1" "fs_list" (func $fs_list (param i32 i32 i32) (result i32)))
+          (import "cooldis_0.1" "fs_mkdir" (func $fs_mkdir (param i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "__verlet_describe_module__") (param i32) (result i32)
+            i32.const 0)
+          (func (export "__verlet_call_operation__") (param i32 i32 i32 i32 i32) (result i32)
+            i32.const 0))
+        "#;
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
+            guest,
+        )))
+        .with_host_import_policy(verlet_wasm::WasmHostImportPolicy::PureCompute),
+    )
+    .unwrap();
+
+    let err = factory
+        .validate_operation_artifact()
+        .await
+        .unwrap_err()
+        .to_string();
+    for import in [
+        "fs_open", "fs_read", "fs_close", "fs_write", "fs_stat", "fs_list", "fs_mkdir",
+    ] {
+        assert!(err.contains(import), "missing {import} in {err}");
+    }
 }
 
 #[tokio::test]
