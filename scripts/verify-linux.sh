@@ -461,6 +461,7 @@ if compgen -G '$CARGO_LANE_ROOT/*.lock' >/dev/null; then
 fi
 if ((verify_status == 137)); then
   print_process_snapshot_diagnostics >&2 || true
+  printf 'known 137 causes (EMO-595): Docker Desktop Resource Saver stopping the VM (machine-local GUI setting under Settings > Resources; re-disable on any new machine) and, before EMO-603, procps kill negative-pid mangling in trace-ab.\\n' >&2
 fi
 if ((verify_status == 0)); then
   rm -f \"\$snapshot_log\" || true
