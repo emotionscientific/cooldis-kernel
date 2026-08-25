@@ -71,7 +71,7 @@
       i32.const 0
       i32.ne
       if
-        local.get $status
+        i32.const {{invalid_argument}}
         return
       end
       i32.const 64
@@ -84,7 +84,7 @@
       i32.const 0
       i32.ne
       if
-        local.get $status
+        i32.const {{invalid_argument}}
         return
       end
       local.get $handle
@@ -149,7 +149,7 @@
       i32.const 0
       i32.ne
       if
-        local.get $status
+        i32.const {{not_found}}
         return
       end
       i32.const 64
@@ -173,7 +173,7 @@
       i32.const 0
       i32.ne
       if
-        local.get $status
+        i32.const {{not_found}}
         return
       end
       i32.const 0

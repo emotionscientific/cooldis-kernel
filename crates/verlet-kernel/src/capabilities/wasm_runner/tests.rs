@@ -1211,7 +1211,7 @@ async fn wasm_vfs_read_imports_fail_closed_for_invalid_mode_and_handle() {
 }
 
 #[tokio::test]
-async fn wasm_vfs_close_drops_invocation_local_handles() {
+async fn wasm_vfs_close_accepts_read_handle_and_rejects_double_close() {
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(wat_guest(
             wasm_vfs_probe_guest(),
