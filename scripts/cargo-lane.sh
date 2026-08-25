@@ -6,10 +6,9 @@
 #
 # Set VERLET_CARGO_LANE_INCREMENTAL=1 for an incremental, sccache-free edit
 # loop backed by a separate target directory, lock, and owner record.
+# Set VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS to bound each holder wait (default 1800).
 
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 REAL_CARGO=
 ACTIVE_CARGO_SHIM_DIR=
@@ -25,11 +24,14 @@ TARGET_DIR=
 LOCK_DIR=
 OWNER_FILE=
 LOCK_TOKEN=
+LOCK_IDENTITY=
 LOCK_HELD=0
 LOCK_READY=0
 OWNER_TEMP=
 RECLAIM_OWNER_FILE=
+# Known limitation: a live initializer stalled past this grace may be reclaimed.
 INITIALIZATION_GRACE_SECONDS=5
+LOCK_WAIT_TIMEOUT_SECONDS=1800
 
 usage() {
   printf 'usage: scripts/cargo-lane.sh <cargo-arguments...>\n'
@@ -257,8 +259,72 @@ read_lock_field() {
   printf '%s' "$value"
 }
 
+read_claim_identity() {
+  local file=$1
+  local value=
+
+  if [[ -r "$file" ]]; then
+    {
+      IFS= read -r value || true
+      IFS= read -r value || true
+    } <"$file"
+  fi
+  printf '%s' "$value"
+}
+
+complete_lock_identity() {
+  local identity_pattern='^boot-id:[^;]+;pid-namespace:pid:\[[0-9]+\]$'
+
+  [[ "$1" =~ $identity_pattern ]]
+}
+
+resolve_lock_identity() {
+  local proc_root=${VERLET_CARGO_LANE_PROC_ROOT:-/proc}
+  local boot_id=
+  local identity=
+  local pid_namespace=
+
+  if [[ -r "$proc_root/sys/kernel/random/boot_id" ]]; then
+    IFS= read -r boot_id <"$proc_root/sys/kernel/random/boot_id" || true
+  fi
+  if [[ -L "$proc_root/self/ns/pid" ]]; then
+    pid_namespace=$(readlink "$proc_root/self/ns/pid" 2>/dev/null || true)
+  fi
+
+  if [[ -n "$boot_id" && -n "$pid_namespace" ]]; then
+    identity="boot-id:$boot_id;pid-namespace:$pid_namespace"
+    if complete_lock_identity "$identity"; then
+      LOCK_IDENTITY=$identity
+    fi
+  fi
+}
+
+resolve_lock_wait_timeout() {
+  local configured=${VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS:-1800}
+
+  if [[ ! "$configured" =~ ^[1-9][0-9]*$ ]]; then
+    die 'VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS must be a positive integer'
+  fi
+  LOCK_WAIT_TIMEOUT_SECONDS=$configured
+}
+
 valid_holder_pid() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+holder_is_live() {
+  local holder_pid=$1
+  local holder_identity=$2
+
+  if ! valid_holder_pid "$holder_pid"; then
+    return 1
+  fi
+  if complete_lock_identity "$LOCK_IDENTITY" \
+    && complete_lock_identity "$holder_identity" \
+    && [[ "$holder_identity" != "$LOCK_IDENTITY" ]]; then
+    return 1
+  fi
+  kill -0 "$holder_pid" 2>/dev/null
 }
 
 path_older_than_initialization_grace() {
@@ -286,7 +352,7 @@ release_lane_lock() {
 
   recorded_token=$(read_lock_field "$LOCK_DIR/token")
   if [[ -n "$LOCK_TOKEN" && "$recorded_token" == "$LOCK_TOKEN" ]]; then
-    rm -f "$LOCK_DIR/pid" "$LOCK_DIR/token"
+    rm -f "$LOCK_DIR/pid" "$LOCK_DIR/token" "$LOCK_DIR/identity"
     rmdir "$LOCK_DIR" 2>/dev/null || true
   elif ((LOCK_READY == 0)) && [[ -d "$LOCK_DIR" && -z "$recorded_token" ]]; then
     rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -315,8 +381,10 @@ handle_signal() {
 try_reclaim_stale_lock() {
   local observed_pid=$1
   local observed_token=$2
+  local observed_identity=$3
   local current_pid
   local current_token
+  local current_identity
 
   if ! acquire_reclaim_claim; then
     return 1
@@ -324,17 +392,19 @@ try_reclaim_stale_lock() {
 
   current_pid=$(read_lock_field "$LOCK_DIR/pid")
   current_token=$(read_lock_field "$LOCK_DIR/token")
+  current_identity=$(read_lock_field "$LOCK_DIR/identity")
   if [[ "$current_pid" != "$observed_pid" \
-    || "$current_token" != "$observed_token" ]]; then
+    || "$current_token" != "$observed_token" \
+    || "$current_identity" != "$observed_identity" ]]; then
     release_reclaim_claim
     return 1
   fi
-  if valid_holder_pid "$current_pid" && kill -0 "$current_pid" 2>/dev/null; then
+  if holder_is_live "$current_pid" "$current_identity"; then
     release_reclaim_claim
     return 1
   fi
 
-  rm -f "$LOCK_DIR/pid" "$LOCK_DIR/token"
+  rm -f "$LOCK_DIR/pid" "$LOCK_DIR/token" "$LOCK_DIR/identity"
   release_reclaim_claim
   rmdir "$LOCK_DIR" 2>/dev/null || return 1
   return 0
@@ -342,6 +412,7 @@ try_reclaim_stale_lock() {
 
 recover_abandoned_reclaim_claim() {
   local owner_file
+  local owner_identity
   local owner_pid
 
   if [[ ! -d "$LOCK_DIR/reclaim" ]]; then
@@ -356,8 +427,8 @@ recover_abandoned_reclaim_claim() {
       continue
     fi
     owner_pid=$(read_lock_field "$owner_file")
-    if ! valid_holder_pid "$owner_pid" \
-      || ! kill -0 "$owner_pid" 2>/dev/null; then
+    owner_identity=$(read_claim_identity "$owner_file")
+    if ! holder_is_live "$owner_pid" "$owner_identity"; then
       rm -f "$owner_file"
     fi
   done
@@ -365,6 +436,7 @@ recover_abandoned_reclaim_claim() {
 }
 
 acquire_reclaim_claim() {
+  local claimant_identity
   local claimant_pid
   local owner_file
 
@@ -374,13 +446,14 @@ acquire_reclaim_claim() {
   fi
 
   owner_file="$LOCK_DIR/reclaim/owner.$RANDOM.$RANDOM"
-  if ! sh -c 'printf "%s\n" "$PPID" >"$1"' sh "$owner_file" 2>/dev/null; then
+  if ! sh -c 'printf "%s\n%s\n" "$PPID" "$2" >"$1"' \
+    sh "$owner_file" "$LOCK_IDENTITY" 2>/dev/null; then
     rmdir "$LOCK_DIR/reclaim" 2>/dev/null || true
     return 1
   fi
   claimant_pid=$(read_lock_field "$owner_file")
-  if ! valid_holder_pid "$claimant_pid" \
-    || ! kill -0 "$claimant_pid" 2>/dev/null; then
+  claimant_identity=$(read_claim_identity "$owner_file")
+  if ! holder_is_live "$claimant_pid" "$claimant_identity"; then
     rm -f "$owner_file"
     rmdir "$LOCK_DIR/reclaim" 2>/dev/null || true
     return 1
@@ -398,11 +471,16 @@ release_reclaim_claim() {
 }
 
 acquire_lane_lock() {
+  local holder_identity
   local holder_pid
   local holder_token
   local missing_checks=0
   local missing_token=
   local printed_wait=0
+  local wait_checks=0
+  local wait_holder_pid=
+  local wait_holder_set=0
+  local wait_holder_token=
 
   LOCK_TOKEN="$$.$RANDOM.$RANDOM"
   while true; do
@@ -416,6 +494,10 @@ acquire_lane_lock() {
 
       if ! printf '%s\n' "$LOCK_TOKEN" >"$LOCK_DIR/token"; then
         die "could not write $LANE_INSTANCE Cargo lane lock token"
+      fi
+      if [[ -n "$LOCK_IDENTITY" ]] \
+        && ! printf '%s\n' "$LOCK_IDENTITY" >"$LOCK_DIR/identity"; then
+        die "could not write $LANE_INSTANCE Cargo lane lock identity"
       fi
       if ! printf '%s\n' "$$" >"$LOCK_DIR/pid"; then
         die "could not write $LANE_INSTANCE Cargo lane holder PID"
@@ -437,6 +519,15 @@ acquire_lane_lock() {
 
     holder_pid=$(read_lock_field "$LOCK_DIR/pid")
     holder_token=$(read_lock_field "$LOCK_DIR/token")
+    holder_identity=$(read_lock_field "$LOCK_DIR/identity")
+    if ((wait_holder_set == 0)) \
+      || [[ "$holder_pid" != "$wait_holder_pid" \
+        || "$holder_token" != "$wait_holder_token" ]]; then
+      wait_holder_pid=$holder_pid
+      wait_holder_token=$holder_token
+      wait_checks=0
+      wait_holder_set=1
+    fi
     if ((printed_wait == 0)); then
       if valid_holder_pid "$holder_pid"; then
         printf 'cargo-lane: waiting for %s Cargo lane (holder pid %s)\n' \
@@ -451,14 +542,16 @@ acquire_lane_lock() {
     if valid_holder_pid "$holder_pid"; then
       missing_checks=0
       missing_token=
-      if ! kill -0 "$holder_pid" 2>/dev/null; then
-        try_reclaim_stale_lock "$holder_pid" "$holder_token" || true
+      if ! holder_is_live "$holder_pid" "$holder_identity"; then
+        try_reclaim_stale_lock \
+          "$holder_pid" "$holder_token" "$holder_identity" || true
       fi
     elif [[ -z "$holder_token" ]]; then
       missing_checks=0
       missing_token=
       if path_older_than_initialization_grace "$LOCK_DIR"; then
-        try_reclaim_stale_lock "$holder_pid" "$holder_token" || true
+        try_reclaim_stale_lock \
+          "$holder_pid" "$holder_token" "$holder_identity" || true
       fi
     else
       if [[ "$holder_token" != "$missing_token" ]]; then
@@ -467,16 +560,47 @@ acquire_lane_lock() {
       fi
       missing_checks=$((missing_checks + 1))
       if ((missing_checks * 1 >= INITIALIZATION_GRACE_SECONDS * 10)); then
-        try_reclaim_stale_lock "$holder_pid" "$holder_token" || true
+        try_reclaim_stale_lock \
+          "$holder_pid" "$holder_token" "$holder_identity" || true
         missing_checks=0
       fi
     fi
 
     sleep 0.1
+    wait_checks=$((wait_checks + 1))
+    if ((wait_checks >= LOCK_WAIT_TIMEOUT_SECONDS * 10)); then
+      if [[ ! -d "$LOCK_DIR" ]]; then
+        continue
+      fi
+      holder_pid=$(read_lock_field "$LOCK_DIR/pid")
+      holder_token=$(read_lock_field "$LOCK_DIR/token")
+      holder_identity=$(read_lock_field "$LOCK_DIR/identity")
+      if [[ "$holder_pid" != "$wait_holder_pid" \
+        || "$holder_token" != "$wait_holder_token" ]]; then
+        wait_holder_pid=$holder_pid
+        wait_holder_token=$holder_token
+        wait_checks=0
+        continue
+      fi
+      if valid_holder_pid "$holder_pid"; then
+        printf 'cargo-lane: timed out after %ss on current holder of %s Cargo lane lock %s (recorded holder pid %s' \
+          "$LOCK_WAIT_TIMEOUT_SECONDS" "$LANE_INSTANCE" "$LOCK_DIR" \
+          "$holder_pid" >&2
+      else
+        printf 'cargo-lane: timed out after %ss on current holder of %s Cargo lane lock %s (recorded holder initializing' \
+          "$LOCK_WAIT_TIMEOUT_SECONDS" "$LANE_INSTANCE" "$LOCK_DIR" >&2
+      fi
+      if [[ -n "$holder_identity" ]]; then
+        printf ', identity %s' "$holder_identity" >&2
+      fi
+      printf ')\n' >&2
+      exit 1
+    fi
   done
 }
 
 start_lock_monitor() {
+  local lock_identity=$LOCK_IDENTITY
   local holder_pid=$$
   local lock_token=$LOCK_TOKEN
 
@@ -486,7 +610,7 @@ start_lock_monitor() {
     while kill -0 "$holder_pid" 2>/dev/null; do
       sleep 0.5
     done
-    try_reclaim_stale_lock "$holder_pid" "$lock_token" || true
+    try_reclaim_stale_lock "$holder_pid" "$lock_token" "$lock_identity" || true
   ) </dev/null >/dev/null 2>&1 &
 }
 
@@ -569,6 +693,7 @@ run_cargo() {
     remove_path_entry "$ACTIVE_CARGO_SHIM_DIR"
   fi
   unset VERLET_CARGO_LANE_SCRIPT VERLET_CARGO_SHIM_DIR VERLET_REAL_CARGO
+  unset VERLET_CARGO_LANE_PROC_ROOT VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS
 
   start_lock_monitor
   exec "$REAL_CARGO" "$@"
@@ -584,6 +709,8 @@ main() {
   resolve_git_context
   select_lane
   reject_target_override "$@"
+  resolve_lock_identity
+  resolve_lock_wait_timeout
   acquire_lane_lock
   rotate_lane_owner
   run_cargo "$@"

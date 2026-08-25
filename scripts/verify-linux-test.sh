@@ -8,6 +8,8 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-linux-test.XXXXXX")" || exit 1
 TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
 FAKE_BIN="$TMP_DIR/bin"
 DOCKER_RECORD="$TMP_DIR/docker-record"
+FAKE_DOCKER_STATE="$TMP_DIR/docker-state"
+HOST_LOCK_ROOT="$TMP_DIR/host-locks"
 FAILURES=0
 RUN_STATUS=0
 MAIN_REPO="$TMP_DIR/repo"
@@ -17,6 +19,12 @@ COMMA_WORKTREE="$TMP_DIR/comma-common-worktree"
 SPACE_REPO="$TMP_DIR/repo with space=ok"
 
 cleanup() {
+  local pid
+
+  for pid in $(jobs -pr); do
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+  done
+  wait >/dev/null 2>&1 || true
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -61,6 +69,80 @@ assert_file_excludes() {
   fi
 }
 
+assert_path_exists() {
+  if [[ ! -e "$1" ]]; then
+    fail "$2"
+  fi
+}
+
+assert_no_path() {
+  if [[ -e "$1" || -L "$1" ]]; then
+    fail "$2"
+  fi
+}
+
+wait_for_path() {
+  local path=$1
+  local name=$2
+  local attempts=0
+
+  while [[ ! -e "$path" && $attempts -lt 200 ]]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [[ ! -e "$path" ]]; then
+    fail "$name"
+    return 1
+  fi
+}
+
+wait_for_text() {
+  local file=$1
+  local needle=$2
+  local name=$3
+  local attempts=0
+
+  while { [[ ! -f "$file" ]] || ! grep -Fq -- "$needle" "$file"; } \
+    && ((attempts < 200)); do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [[ ! -f "$file" ]] || ! grep -Fq -- "$needle" "$file"; then
+    fail "$name"
+    return 1
+  fi
+}
+
+wait_for_pid() {
+  local pid=$1
+  local expected=$2
+  local name=$3
+  local status
+  local timeout_marker="$TMP_DIR/wait-timeout-$pid"
+  local watchdog_pid
+
+  (
+    sleep 15
+    : >"$timeout_marker"
+    kill -TERM "$pid" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null || true
+  ) &
+  watchdog_pid=$!
+
+  wait "$pid" 2>/dev/null
+  status=$?
+  kill -TERM "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  if [[ -e "$timeout_marker" ]]; then
+    fail "$name timed out"
+    return
+  fi
+  if ((status != expected)); then
+    fail "$name (expected status $expected, got $status)"
+  fi
+}
+
 run_wrapper() {
   local cwd=$1
   local name=$2
@@ -72,9 +154,34 @@ run_wrapper() {
       FAKE_DOCKER_RECORD="$DOCKER_RECORD" \
       FAKE_DOCKER_MEMORY="${FAKE_DOCKER_MEMORY:-17179869184}" \
       FAKE_DOCKER_RUN_EXIT="${FAKE_DOCKER_RUN_EXIT:-0}" \
+      FAKE_DOCKER_MODE="${FAKE_DOCKER_MODE:-record}" \
+      FAKE_DOCKER_LABEL="${FAKE_DOCKER_LABEL:-record}" \
+      FAKE_DOCKER_STATE="$FAKE_DOCKER_STATE" \
+      VERLET_VERIFY_LINUX_LOCK_ROOT="$HOST_LOCK_ROOT" \
       "$cwd/scripts/verify-linux.sh" "$@"
   ) >"$TMP_DIR/$name.out" 2>"$TMP_DIR/$name.err"
   RUN_STATUS=$?
+}
+
+STARTED_PID=
+start_wrapper() {
+  local cwd=$1
+  local name=$2
+  shift 2
+
+  (
+    cd "$cwd" || exit 1
+    PATH="$FAKE_BIN:/usr/bin:/bin" \
+      FAKE_DOCKER_RECORD="$DOCKER_RECORD" \
+      FAKE_DOCKER_MEMORY="${FAKE_DOCKER_MEMORY:-17179869184}" \
+      FAKE_DOCKER_RUN_EXIT="${FAKE_DOCKER_RUN_EXIT:-0}" \
+      FAKE_DOCKER_MODE="${FAKE_DOCKER_MODE:-record}" \
+      FAKE_DOCKER_LABEL="${FAKE_DOCKER_LABEL:-record}" \
+      FAKE_DOCKER_STATE="$FAKE_DOCKER_STATE" \
+      VERLET_VERIFY_LINUX_LOCK_ROOT="$HOST_LOCK_ROOT" \
+      exec "$cwd/scripts/verify-linux.sh" "$@"
+  ) >"$TMP_DIR/$name.out" 2>"$TMP_DIR/$name.err" &
+  STARTED_PID=$!
 }
 
 if [[ ! -x "$VERIFY_LINUX_SCRIPT" ]]; then
@@ -82,7 +189,8 @@ if [[ ! -x "$VERIFY_LINUX_SCRIPT" ]]; then
   exit 1
 fi
 
-mkdir -p "$FAKE_BIN" "$MAIN_REPO/scripts"
+mkdir -p "$FAKE_BIN" "$FAKE_DOCKER_STATE" "$HOST_LOCK_ROOT" \
+  "$MAIN_REPO/scripts"
 cp "$VERIFY_LINUX_SCRIPT" "$MAIN_REPO/scripts/verify-linux.sh"
 chmod +x "$MAIN_REPO/scripts/verify-linux.sh"
 
@@ -229,6 +337,12 @@ case "${1:-}" in
       || die 'clean verification does not remove the snapshot log'
     [[ "$1" == *'exit "$verify_status"'* ]] \
       || die 'container command does not preserve the verifier status'
+    if [[ "${FAKE_DOCKER_MODE:-record}" == hold ]]; then
+      : >"$FAKE_DOCKER_STATE/started-${FAKE_DOCKER_LABEL:-record}"
+      while [[ ! -e "$FAKE_DOCKER_STATE/release-${FAKE_DOCKER_LABEL:-record}" ]]; do
+        sleep 0.02
+      done
+    fi
     exit "${FAKE_DOCKER_RUN_EXIT:-0}"
     ;;
 esac
@@ -328,6 +442,66 @@ assert_file_excludes "$TMP_DIR/main-dry.out" \
   "$MAIN_REPO/.git/cargo-lanes" \
   'dry run does not target the host Cargo lane root'
 
+HOST_LOCK_DIR="$HOST_LOCK_ROOT/verlet-verify-linux.lock"
+assert_no_path "$HOST_LOCK_DIR" 'dry run did not acquire the host volume lock'
+
+run_wrapper "$MAIN_REPO" host-lock-normal
+assert_eq 0 "$RUN_STATUS" 'normal verification acquired and released the host lock'
+assert_no_path "$HOST_LOCK_DIR" 'normal verification removed the host lock'
+
+mkdir -p "$HOST_LOCK_DIR"
+printf '99999999\n' >"$HOST_LOCK_DIR/pid"
+printf 'dead-host-token\n' >"$HOST_LOCK_DIR/token"
+run_wrapper "$MAIN_REPO" host-lock-stale
+assert_eq 0 "$RUN_STATUS" 'dead host lock holder was reclaimed'
+assert_no_path "$HOST_LOCK_DIR" 'stale host lock was removed after verification'
+
+FAKE_DOCKER_MODE=hold
+FAKE_DOCKER_LABEL=host-lock-holder
+start_wrapper "$MAIN_REPO" host-lock-holder
+host_lock_holder_pid=$STARTED_PID
+wait_for_path "$FAKE_DOCKER_STATE/started-host-lock-holder" \
+  'first verification entered Docker while holding the host lock'
+wait_for_path "$HOST_LOCK_DIR/pid" 'first verification recorded its host lock PID'
+assert_file_contains "$HOST_LOCK_DIR/pid" "$host_lock_holder_pid" \
+  'host lock records the owning verification PID'
+
+FAKE_DOCKER_LABEL=host-lock-waiter
+set -m
+start_wrapper "$MAIN_REPO" host-lock-waiter
+host_lock_waiter_pid=$STARTED_PID
+set +m
+wait_for_text "$TMP_DIR/host-lock-waiter.err" \
+  "waiting for Docker volume verlet-verify-linux host lock (holder pid $host_lock_holder_pid)" \
+  'second verification named the live host lock holder while blocked'
+assert_no_path "$FAKE_DOCKER_STATE/started-host-lock-waiter" \
+  'second verification did not start a concurrent container'
+kill -INT -- "-$host_lock_waiter_pid"
+wait_for_pid "$host_lock_waiter_pid" 130 \
+  'Ctrl-C stopped the host-lock waiter with status 130'
+assert_file_contains "$HOST_LOCK_DIR/pid" "$host_lock_holder_pid" \
+  'interrupted waiter preserved the live holder lock'
+assert_no_path "$FAKE_DOCKER_STATE/started-host-lock-waiter" \
+  'interrupted waiter never entered Docker'
+: >"$FAKE_DOCKER_STATE/release-host-lock-holder"
+wait_for_pid "$host_lock_holder_pid" 0 'first host-lock holder exited normally'
+assert_no_path "$HOST_LOCK_DIR" 'normal holder exit released the host lock'
+
+FAKE_DOCKER_LABEL=host-lock-signal
+set -m
+start_wrapper "$MAIN_REPO" host-lock-signal
+host_lock_signal_pid=$STARTED_PID
+set +m
+wait_for_path "$FAKE_DOCKER_STATE/started-host-lock-signal" \
+  'signal test entered Docker while holding the host lock'
+wait_for_path "$HOST_LOCK_DIR/pid" 'signal test recorded its host lock PID'
+kill -TERM -- "-$host_lock_signal_pid"
+wait_for_pid "$host_lock_signal_pid" 143 \
+  'signaled verification preserved termination status'
+assert_no_path "$HOST_LOCK_DIR" 'signal exit released the host lock'
+FAKE_DOCKER_MODE=record
+FAKE_DOCKER_LABEL=record
+
 run_wrapper "$LINKED_WORKTREE" worktree-dry --dry-run
 assert_eq 0 "$RUN_STATUS" 'linked-worktree dry run succeeded'
 assert_file_contains "$TMP_DIR/worktree-dry.out" \
@@ -373,6 +547,7 @@ assert_file_contains "$TMP_DIR/docker-missing.err" \
 
 FAKE_DOCKER_RUN_EXIT=37 run_wrapper "$MAIN_REPO" exit-code
 assert_eq 37 "$RUN_STATUS" 'docker run exit status passed through unchanged'
+assert_no_path "$HOST_LOCK_DIR" 'nonzero Docker exit released the host lock'
 
 mkdir -p "$COMMA_REPO/scripts"
 cp "$VERIFY_LINUX_SCRIPT" "$COMMA_REPO/scripts/verify-linux.sh"

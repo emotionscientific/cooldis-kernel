@@ -148,12 +148,13 @@ wait_for_pid() {
   local pid=$1
   local expected=$2
   local name=$3
+  local timeout_seconds=${4:-10}
   local status
   local timeout_marker="$TMP_DIR/wait-timeout-$pid"
   local watchdog_pid
 
   (
-    sleep 10
+    sleep "$timeout_seconds"
     : >"$timeout_marker"
     kill -TERM "$pid" 2>/dev/null || exit 0
     sleep 1
@@ -208,6 +209,10 @@ reset_call_environment() {
   CALLER_CACHE_SIZE=
   CALLER_CI_SET=0
   CALLER_CI=
+  CALLER_PROC_ROOT_SET=0
+  CALLER_PROC_ROOT=
+  CALLER_WAIT_TIMEOUT_SET=0
+  CALLER_WAIT_TIMEOUT=
 }
 
 prepare_call_environment() {
@@ -219,6 +224,7 @@ prepare_call_environment() {
   unset SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE VERLET_REAL_CARGO VERLET_CARGO_LANE_SCRIPT
   unset VERLET_CARGO_SHIM_DIR VERLET_VERIFY_MANAGED_CARGO
   unset VERLET_CARGO_LANE_INCREMENTAL CARGO_ALIAS_ESCAPE
+  unset VERLET_CARGO_LANE_PROC_ROOT VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS
   unset CI
 
   export PATH="$TEST_PATH"
@@ -275,6 +281,12 @@ prepare_call_environment() {
   fi
   if ((CALLER_CI_SET)); then
     export CI="$CALLER_CI"
+  fi
+  if ((CALLER_PROC_ROOT_SET)); then
+    export VERLET_CARGO_LANE_PROC_ROOT="$CALLER_PROC_ROOT"
+  fi
+  if ((CALLER_WAIT_TIMEOUT_SET)); then
+    export VERLET_CARGO_LANE_WAIT_TIMEOUT_SECONDS="$CALLER_WAIT_TIMEOUT"
   fi
 }
 
@@ -441,6 +453,7 @@ cp "$SCRIPT_DIR/cargo-lane.sh" "$REPO/scripts/cargo-lane.sh"
 cp "$SCRIPT_DIR/check-pre-commit.sh" "$REPO/scripts/check-pre-commit.sh"
 cp "$SCRIPT_DIR/check-pre-push.sh" "$REPO/scripts/check-pre-push.sh"
 cp "$SCRIPT_DIR/guard-rails.sh" "$REPO/scripts/guard-rails.sh"
+cp "$SCRIPT_DIR/guard-rails-test.sh" "$REPO/scripts/guard-rails-test.sh"
 cp "$SCRIPT_DIR/test-timeout-lint.pl" "$REPO/scripts/test-timeout-lint.pl"
 cp "$SCRIPT_DIR/test-timeout-lint.sh" "$REPO/scripts/test-timeout-lint.sh"
 cp "$SCRIPT_DIR/threat-model-lint.sh" "$REPO/scripts/threat-model-lint.sh"
@@ -802,6 +815,181 @@ run_lane "$FEATURE_A" "$STALE_ROOT" "$TMP_DIR/stale.record" "$TMP_DIR/stale.out"
 assert_eq 0 "$?" 'stale holder was reclaimed'
 wait_for_no_path "$STALE_ROOT/feature.lock" 'stale recovery released the lane lock'
 
+# A live PID from another boot/container identity does not keep a stale lock.
+IDENTITY_PROC_ROOT="$TMP_DIR/identity-proc"
+mkdir -p "$IDENTITY_PROC_ROOT/self/ns" \
+  "$IDENTITY_PROC_ROOT/sys/kernel/random"
+printf 'current-boot-id\n' >"$IDENTITY_PROC_ROOT/sys/kernel/random/boot_id"
+ln -s 'pid:[4026532000]' "$IDENTITY_PROC_ROOT/self/ns/pid"
+CURRENT_LOCK_IDENTITY='boot-id:current-boot-id;pid-namespace:pid:[4026532000]'
+IDENTITY_STALE_ROOT="$TMP_DIR/lanes-identity-stale"
+mkdir -p "$IDENTITY_STALE_ROOT/feature.lock"
+printf '%s\n' "$$" >"$IDENTITY_STALE_ROOT/feature.lock/pid"
+printf 'identity-stale-token\n' >"$IDENTITY_STALE_ROOT/feature.lock/token"
+printf '%s\n' \
+  'boot-id:previous-boot-id;pid-namespace:pid:[4026532000]' \
+  >"$IDENTITY_STALE_ROOT/feature.lock/identity"
+CALLER_PROC_ROOT_SET=1
+CALLER_PROC_ROOT="$IDENTITY_PROC_ROOT"
+start_lane "$FEATURE_A" "$IDENTITY_STALE_ROOT" "$TMP_DIR/identity-stale.record" "$TMP_DIR/identity-stale.out" "$TMP_DIR/identity-stale.err" check
+identity_stale_pid=$STARTED_PID
+wait_for_pid "$identity_stale_pid" 0 'live PID with mismatched boot identity was reclaimed' 2
+wait_for_no_path "$IDENTITY_STALE_ROOT/feature.lock" 'identity-stale recovery released the lane lock'
+
+NAMESPACE_STALE_ROOT="$TMP_DIR/lanes-namespace-stale"
+mkdir -p "$NAMESPACE_STALE_ROOT/feature.lock"
+printf '%s\n' "$$" >"$NAMESPACE_STALE_ROOT/feature.lock/pid"
+printf 'namespace-stale-token\n' >"$NAMESPACE_STALE_ROOT/feature.lock/token"
+printf '%s\n' \
+  'boot-id:current-boot-id;pid-namespace:pid:[4026531999]' \
+  >"$NAMESPACE_STALE_ROOT/feature.lock/identity"
+start_lane "$FEATURE_A" "$NAMESPACE_STALE_ROOT" "$TMP_DIR/namespace-stale.record" "$TMP_DIR/namespace-stale.out" "$TMP_DIR/namespace-stale.err" check
+namespace_stale_pid=$STARTED_PID
+wait_for_pid "$namespace_stale_pid" 0 'live PID with mismatched namespace identity was reclaimed' 2
+wait_for_no_path "$NAMESPACE_STALE_ROOT/feature.lock" 'namespace-stale recovery released the lane lock'
+
+# Partial identities cannot prove that a live PID belongs to another namespace.
+# Treat them like old identity-free locks instead of reclaiming a live holder.
+PARTIAL_IDENTITY_ROOT="$TMP_DIR/lanes-partial-identity"
+mkdir -p "$PARTIAL_IDENTITY_ROOT/feature.lock"
+printf '%s\n' "$$" >"$PARTIAL_IDENTITY_ROOT/feature.lock/pid"
+printf 'partial-identity-token\n' >"$PARTIAL_IDENTITY_ROOT/feature.lock/token"
+printf 'boot-id:current-boot-id\n' >"$PARTIAL_IDENTITY_ROOT/feature.lock/identity"
+CALLER_WAIT_TIMEOUT_SET=1
+CALLER_WAIT_TIMEOUT=1
+start_lane "$FEATURE_A" "$PARTIAL_IDENTITY_ROOT" "$TMP_DIR/partial-identity.record" "$TMP_DIR/partial-identity.out" "$TMP_DIR/partial-identity.err" check
+partial_identity_pid=$STARTED_PID
+wait_for_pid "$partial_identity_pid" 1 'partial holder identity fell back to live-PID waiting' 3
+assert_no_path "$TMP_DIR/partial-identity.record" 'partial holder identity did not permit overlapping Cargo'
+
+# A partial current identity also falls back to PID-only behavior. This covers a
+# host where only part of the Linux proc identity surface is readable.
+PARTIAL_PROC_ROOT="$TMP_DIR/partial-proc"
+mkdir -p "$PARTIAL_PROC_ROOT/sys/kernel/random"
+printf 'current-boot-id\n' >"$PARTIAL_PROC_ROOT/sys/kernel/random/boot_id"
+PARTIAL_WAITER_ROOT="$TMP_DIR/lanes-partial-waiter"
+mkdir -p "$PARTIAL_WAITER_ROOT/feature.lock"
+printf '%s\n' "$$" >"$PARTIAL_WAITER_ROOT/feature.lock/pid"
+printf 'partial-waiter-token\n' >"$PARTIAL_WAITER_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$PARTIAL_WAITER_ROOT/feature.lock/identity"
+CALLER_PROC_ROOT="$PARTIAL_PROC_ROOT"
+start_lane "$FEATURE_A" "$PARTIAL_WAITER_ROOT" "$TMP_DIR/partial-waiter.record" "$TMP_DIR/partial-waiter.out" "$TMP_DIR/partial-waiter.err" check
+partial_waiter_pid=$STARTED_PID
+wait_for_pid "$partial_waiter_pid" 1 'partial current identity fell back to live-PID waiting' 3
+assert_no_path "$TMP_DIR/partial-waiter.record" 'partial current identity did not permit overlapping Cargo'
+
+# Identity-bearing waiters remain compatible with live old-format lock files.
+OLD_LOCK_ROOT="$TMP_DIR/lanes-old-lock-format"
+mkdir -p "$OLD_LOCK_ROOT/feature.lock"
+printf '%s\n' "$$" >"$OLD_LOCK_ROOT/feature.lock/pid"
+printf 'old-lock-token\n' >"$OLD_LOCK_ROOT/feature.lock/token"
+CALLER_PROC_ROOT="$IDENTITY_PROC_ROOT"
+start_lane "$FEATURE_A" "$OLD_LOCK_ROOT" "$TMP_DIR/old-lock.record" "$TMP_DIR/old-lock.out" "$TMP_DIR/old-lock.err" check
+old_lock_pid=$STARTED_PID
+wait_for_pid "$old_lock_pid" 1 'identity-free live holder kept its old-format lock' 3
+assert_no_path "$TMP_DIR/old-lock.record" 'identity-bearing waiter preserved a live old-format holder'
+
+# Hosts without the complete proc identity use PID-only checks even when the
+# recorded holder came from the new identity-bearing format.
+NO_IDENTITY_PROC_ROOT="$TMP_DIR/no-identity-proc"
+mkdir -p "$NO_IDENTITY_PROC_ROOT"
+NEW_LOCK_ROOT="$TMP_DIR/lanes-new-lock-format"
+mkdir -p "$NEW_LOCK_ROOT/feature.lock"
+printf '%s\n' "$$" >"$NEW_LOCK_ROOT/feature.lock/pid"
+printf 'new-lock-token\n' >"$NEW_LOCK_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$NEW_LOCK_ROOT/feature.lock/identity"
+CALLER_PROC_ROOT="$NO_IDENTITY_PROC_ROOT"
+start_lane "$FEATURE_A" "$NEW_LOCK_ROOT" "$TMP_DIR/new-lock.record" "$TMP_DIR/new-lock.out" "$TMP_DIR/new-lock.err" check
+new_lock_pid=$STARTED_PID
+wait_for_pid "$new_lock_pid" 1 'identity-free waiter used the recorded live PID' 3
+assert_no_path "$TMP_DIR/new-lock.record" 'identity-free waiter preserved a live new-format holder'
+
+# Reclaim-claim owner records accept the old PID-only format conservatively.
+# A live old-format claimant must not be discarded by an identity-bearing peer.
+OLD_CLAIM_ROOT="$TMP_DIR/lanes-old-reclaim-claim"
+mkdir -p "$OLD_CLAIM_ROOT/feature.lock/reclaim"
+printf '99999999\n' >"$OLD_CLAIM_ROOT/feature.lock/pid"
+printf 'old-claim-lock-token\n' >"$OLD_CLAIM_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$OLD_CLAIM_ROOT/feature.lock/identity"
+printf '%s\n' "$$" >"$OLD_CLAIM_ROOT/feature.lock/reclaim/owner.old.format"
+touch -t 200001010000 "$OLD_CLAIM_ROOT/feature.lock/reclaim"
+CALLER_PROC_ROOT="$IDENTITY_PROC_ROOT"
+CALLER_WAIT_TIMEOUT_SET=1
+CALLER_WAIT_TIMEOUT=1
+start_lane "$FEATURE_A" "$OLD_CLAIM_ROOT" "$TMP_DIR/old-claim.record" "$TMP_DIR/old-claim.out" "$TMP_DIR/old-claim.err" check
+old_claim_pid=$STARTED_PID
+wait_for_pid "$old_claim_pid" 1 'live PID-only reclaim claimant was preserved until timeout' 3
+assert_no_path "$TMP_DIR/old-claim.record" 'old-format live reclaim claimant prevented overlapping Cargo'
+
+# The second owner-record line participates in abandoned-claim recovery. A
+# recycled live PID from a foreign identity cannot pin the reclaim mutex.
+STALE_CLAIM_ROOT="$TMP_DIR/lanes-stale-reclaim-claim"
+mkdir -p "$STALE_CLAIM_ROOT/feature.lock/reclaim"
+printf '99999999\n' >"$STALE_CLAIM_ROOT/feature.lock/pid"
+printf 'stale-claim-lock-token\n' >"$STALE_CLAIM_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$STALE_CLAIM_ROOT/feature.lock/identity"
+printf '%s\n%s\n' "$$" \
+  'boot-id:previous-boot-id;pid-namespace:pid:[4026532000]' \
+  >"$STALE_CLAIM_ROOT/feature.lock/reclaim/owner.new.format"
+touch -t 200001010000 "$STALE_CLAIM_ROOT/feature.lock/reclaim"
+start_lane "$FEATURE_A" "$STALE_CLAIM_ROOT" "$TMP_DIR/stale-claim.record" "$TMP_DIR/stale-claim.out" "$TMP_DIR/stale-claim.err" check
+stale_claim_pid=$STARTED_PID
+wait_for_pid "$stale_claim_pid" 0 'foreign two-line reclaim claimant was recovered' 2
+wait_for_no_path "$STALE_CLAIM_ROOT/feature.lock" 'two-line reclaim recovery released the lane lock'
+
+# A current live holder eventually fails a waiter with actionable lock details.
+TIMEOUT_ROOT="$TMP_DIR/lanes-timeout"
+mkdir -p "$TIMEOUT_ROOT/feature.lock"
+printf '%s\n' "$$" >"$TIMEOUT_ROOT/feature.lock/pid"
+printf 'timeout-token\n' >"$TIMEOUT_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$TIMEOUT_ROOT/feature.lock/identity"
+CALLER_PROC_ROOT="$IDENTITY_PROC_ROOT"
+CALLER_WAIT_TIMEOUT_SET=1
+CALLER_WAIT_TIMEOUT=1
+start_lane "$FEATURE_A" "$TIMEOUT_ROOT" "$TMP_DIR/timeout.record" "$TMP_DIR/timeout.out" "$TMP_DIR/timeout.err" check
+timeout_pid=$STARTED_PID
+wait_for_pid "$timeout_pid" 1 'live holder wait stopped at the configured timeout' 3
+assert_no_path "$TMP_DIR/timeout.record" 'timed-out waiter did not invoke Cargo'
+assert_file_contains "$TMP_DIR/timeout.err" 'timed out after 1s on current holder' 'timeout named the current-holder budget'
+assert_file_contains "$TMP_DIR/timeout.err" "$TIMEOUT_ROOT/feature.lock" 'timeout named the lock path'
+assert_file_contains "$TMP_DIR/timeout.err" "recorded holder pid $$" 'timeout named the recorded holder'
+assert_file_contains "$TMP_DIR/timeout.err" "identity $CURRENT_LOCK_IDENTITY" 'timeout named the recorded holder identity'
+
+# A new pid+token holder gets a fresh timeout budget instead of inheriting the
+# time already spent waiting on its predecessor.
+RESET_TIMEOUT_ROOT="$TMP_DIR/lanes-timeout-reset"
+mkdir -p "$RESET_TIMEOUT_ROOT/feature.lock"
+sleep 5 &
+first_timeout_holder_pid=$!
+printf '%s\n' "$first_timeout_holder_pid" >"$RESET_TIMEOUT_ROOT/feature.lock/pid"
+printf 'timeout-reset-first-token\n' >"$RESET_TIMEOUT_ROOT/feature.lock/token"
+printf '%s\n' "$CURRENT_LOCK_IDENTITY" >"$RESET_TIMEOUT_ROOT/feature.lock/identity"
+start_lane "$FEATURE_A" "$RESET_TIMEOUT_ROOT" "$TMP_DIR/timeout-reset.record" "$TMP_DIR/timeout-reset.out" "$TMP_DIR/timeout-reset.err" check
+timeout_reset_pid=$STARTED_PID
+wait_for_text "$TMP_DIR/timeout-reset.err" 'waiting for feature Cargo lane' 'holder-change waiter started its first timeout budget'
+sleep 0.6
+sleep 5 &
+second_timeout_holder_pid=$!
+printf 'timeout-reset-second-token\n' >"$RESET_TIMEOUT_ROOT/feature.lock/token"
+printf '%s\n' "$second_timeout_holder_pid" >"$RESET_TIMEOUT_ROOT/feature.lock/pid"
+kill -TERM "$first_timeout_holder_pid"
+wait "$first_timeout_holder_pid" 2>/dev/null
+sleep 0.6
+if ! kill -0 "$timeout_reset_pid" 2>/dev/null; then
+  fail 'holder change did not grant the successor a fresh timeout budget'
+fi
+wait_for_pid "$timeout_reset_pid" 1 'successor holder received one fresh bounded timeout' 3
+assert_file_contains "$TMP_DIR/timeout-reset.err" \
+  "recorded holder pid $second_timeout_holder_pid" \
+  'successor timeout named the replacement holder'
+kill -TERM "$second_timeout_holder_pid"
+wait "$second_timeout_holder_pid" 2>/dev/null
+rm -f "$RESET_TIMEOUT_ROOT/feature.lock/pid" \
+  "$RESET_TIMEOUT_ROOT/feature.lock/token" \
+  "$RESET_TIMEOUT_ROOT/feature.lock/identity"
+rmdir "$RESET_TIMEOUT_ROOT/feature.lock"
+reset_call_environment
+
 EMPTY_ROOT="$TMP_DIR/lanes-empty-stale"
 mkdir -p "$EMPTY_ROOT/feature.lock"
 touch -t 200001010000 "$EMPTY_ROOT/feature.lock"
@@ -904,8 +1092,8 @@ assert_no_path "$FAKE_STATE/started-parallel-pre-push-b" 'concurrent pre-push Ca
 : >"$FAKE_STATE/release-parallel-pre-push-a"
 wait_for_path "$FAKE_STATE/started-parallel-pre-push-b" 'second concurrent pre-push entered Cargo after release'
 : >"$FAKE_STATE/release-parallel-pre-push-b"
-wait_for_pid "$parallel_pre_push_a_pid" 0 'first concurrent pre-push succeeded'
-wait_for_pid "$parallel_pre_push_b_pid" 0 'second concurrent pre-push succeeded'
+wait_for_pid "$parallel_pre_push_a_pid" 0 'first concurrent pre-push succeeded' 30
+wait_for_pid "$parallel_pre_push_b_pid" 0 'second concurrent pre-push succeeded' 30
 assert_file_line_count "$FAKE_STATE/calls-parallel-pre-push-a" 6 "$HOOK_PARALLEL_ROOT/targets/feature" 'first concurrent pre-push kept every Cargo call in the feature lane'
 assert_file_line_count "$FAKE_STATE/calls-parallel-pre-push-b" 6 "$HOOK_PARALLEL_ROOT/targets/feature" 'second concurrent pre-push kept every Cargo call in the feature lane'
 assert_no_path "$FAKE_STATE/overlap-feature" 'concurrent pre-push hooks never overlapped lane writers'
