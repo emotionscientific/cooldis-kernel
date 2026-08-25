@@ -46,10 +46,10 @@ pub extern "C" fn __verlet_call_operation__(
 /// `verlet_tool_read::run` over [`verlet_tool_abi_fs::AbiFs`] rooted at
 /// `root`, and write the CLI envelope to the output sink.
 fn run_read(
-    _source: verlet_guest_sdk::Source,
-    _output: verlet_guest_sdk::Sink,
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
 ) -> Result<(), verlet_guest_sdk::StatusCode> {
-    todo!("EMO-605: read module handler")
+    verlet_tool_abi_fs::run_operation(source, output, verlet_tool_read::run)
 }
 
 fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {

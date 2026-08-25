@@ -28,6 +28,11 @@
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
 RELEASE.md	Repository remote site or external workflow identity is out of scope for EMO-520.
+agent-tools/wasm/abi-fs/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
+agent-tools/wasm/edit/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
+agent-tools/wasm/read/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
+agent-tools/wasm/search/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
+agent-tools/wasm/write/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
 apps/console/src/App.svelte	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 apps/console/src/lib/app.svelte.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.
 apps/console/src/lib/schema.ts	Stable persisted storage ABI or wire identifier remains unchanged for compatibility.

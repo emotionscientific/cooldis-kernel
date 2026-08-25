@@ -327,6 +327,8 @@ dependencies = [
 name = "verlet-tool-abi-fs"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "verlet-guest-sdk",
  "verlet-tool-core",
 ]

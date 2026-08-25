@@ -56,20 +56,20 @@ pub extern "C" fn __verlet_call_operation__(
 /// `verlet_tool_glob::run` over [`verlet_tool_abi_fs::AbiFs`] rooted at
 /// `root`, and write the CLI envelope to the output sink.
 fn run_find(
-    _source: verlet_guest_sdk::Source,
-    _output: verlet_guest_sdk::Sink,
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
 ) -> Result<(), verlet_guest_sdk::StatusCode> {
-    todo!("EMO-605: find handler")
+    verlet_tool_abi_fs::run_operation(source, output, verlet_tool_glob::run)
 }
 
 /// Drain the source, parse `{"root", "args"}`, run
 /// `verlet_tool_grep::run` over [`verlet_tool_abi_fs::AbiFs`] rooted at
 /// `root`, and write the CLI envelope to the output sink.
 fn run_grep(
-    _source: verlet_guest_sdk::Source,
-    _output: verlet_guest_sdk::Sink,
+    source: verlet_guest_sdk::Source,
+    output: verlet_guest_sdk::Sink,
 ) -> Result<(), verlet_guest_sdk::StatusCode> {
-    todo!("EMO-605: grep handler")
+    verlet_tool_abi_fs::run_operation(source, output, verlet_tool_grep::run)
 }
 
 fn status(result: Result<(), verlet_guest_sdk::StatusCode>) -> i32 {

@@ -373,6 +373,41 @@ fn wasm_vfs_tools_guest() -> Vec<u8> {
     .clone()
 }
 
+fn wasm_agent_tool_guest(module: &str) -> Vec<u8> {
+    let module_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("agent-tools")
+        .join("wasm")
+        .join(module);
+    let build = crate::operations::operation_builder::build_rust_wasm_module(
+        crate::operations::operation_builder::RustWasmBuildOptions::new(module_dir),
+    )
+    .unwrap_or_else(|error| panic!("failed to build {module} agent tool Wasm module: {error}"));
+    std::fs::read(build.artifact_path)
+        .unwrap_or_else(|error| panic!("failed to read {module} agent tool Wasm module: {error}"))
+}
+
+fn wasm_read_tool_guest() -> Vec<u8> {
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    WASM.get_or_init(|| wasm_agent_tool_guest("read")).clone()
+}
+
+fn wasm_write_tool_guest() -> Vec<u8> {
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    WASM.get_or_init(|| wasm_agent_tool_guest("write")).clone()
+}
+
+fn wasm_edit_tool_guest() -> Vec<u8> {
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    WASM.get_or_init(|| wasm_agent_tool_guest("edit")).clone()
+}
+
+fn wasm_search_tool_guest() -> Vec<u8> {
+    static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    WASM.get_or_init(|| wasm_agent_tool_guest("search")).clone()
+}
+
 fn wasm_vfs_probe_guest() -> String {
     let manifest = serde_json::json!({
         "abi": verlet_wasm::runner::OPERATION_ABI,
@@ -595,6 +630,45 @@ async fn writable_vfs() -> std::sync::Arc<verlet_vfs::VerletVfs> {
     )
     .unwrap();
     vfs
+}
+
+async fn pi_tool_fixture() -> (std::sync::Arc<verlet_vfs::VerletVfs>, tempfile::TempDir) {
+    let vfs = writable_vfs().await;
+    let native = tempfile::tempdir().unwrap();
+    for (relative, content) in [
+        ("input.txt", "alpha\nneedle beta\ngamma\n"),
+        ("src/app.rs", "fn needle() {}\n"),
+        ("src/nested/info.txt", "quiet\n"),
+    ] {
+        let vfs_path = std::path::Path::new("/workspace/project").join(relative);
+        if let Some(parent) = vfs_path.parent() {
+            vfs.mkdir(parent, true).await.unwrap();
+        }
+        vfs.write_file(&vfs_path, content.as_bytes()).await.unwrap();
+
+        let native_path = native.path().join("project").join(relative);
+        if let Some(parent) = native_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(native_path, content).unwrap();
+    }
+    (vfs, native)
+}
+
+fn pi_tool_input(args: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "root": "/workspace",
+        "args": args,
+    }))
+    .unwrap()
+}
+
+fn tool_success_envelope(output: impl serde::Serialize) -> serde_json::Value {
+    serde_json::json!({"ok": output})
+}
+
+fn tool_output(output: &verlet_process::process::WasmOperationOutput) -> serde_json::Value {
+    serde_json::from_slice(&output.output).unwrap()
 }
 
 async fn spawn_http_server(
@@ -1376,6 +1450,345 @@ async fn wasm_vfs_write_guest_requires_declared_capability_before_execution() {
         .invoke_operation_bytes("ls", b"/workspace".to_vec())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn wasm_pi_read_matches_native_envelope_and_surfaces_missing_file() {
+    let (vfs, native) = pi_tool_fixture().await;
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let args = verlet_tool_read::ReadArgs {
+        path: std::path::PathBuf::from("project/input.txt"),
+        offset: Some(2),
+        limit: Some(1),
+    };
+    let native_output = verlet_tool_read::run(args, &native_fs).unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_read_tool_guest(),
+        ))
+        .with_vfs(vfs),
+    )
+    .unwrap();
+    let manifest = factory.validate_operation_artifact().await.unwrap();
+    assert!(manifest.operation("read").is_some());
+
+    let output = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({
+                "path": "project/input.txt",
+                "offset": 2,
+                "limit": 1,
+            })),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(output.operation.name, "read");
+
+    let native_error = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project/missing.txt"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let missing = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project/missing.txt"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_output(&missing),
+        serde_json::json!({"error": native_error.to_string()})
+    );
+}
+
+#[tokio::test]
+async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
+    let (vfs, native) = pi_tool_fixture().await;
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_search_tool_guest(),
+        ))
+        .with_vfs(vfs),
+    )
+    .unwrap();
+    let manifest = factory.validate_operation_artifact().await.unwrap();
+    assert!(manifest.operation("find").is_some());
+    assert!(manifest.operation("grep").is_some());
+
+    let native_find = verlet_tool_glob::run(
+        verlet_tool_glob::GlobArgs {
+            pattern: "**".to_owned(),
+            path: Some(std::path::PathBuf::from("project")),
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    assert!(native_find.paths.contains(&"src/".to_owned()));
+    assert!(native_find.paths.contains(&"src/nested/".to_owned()));
+    let find = factory
+        .invoke_operation_bytes(
+            "find",
+            pi_tool_input(serde_json::json!({"pattern": "**", "path": "project"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tool_output(&find), tool_success_envelope(native_find));
+
+    let native_find_error = verlet_tool_glob::run(
+        verlet_tool_glob::GlobArgs {
+            pattern: "[".to_owned(),
+            path: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let find_error = factory
+        .invoke_operation_bytes("find", pi_tool_input(serde_json::json!({"pattern": "["})))
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_output(&find_error),
+        serde_json::json!({"error": native_find_error.to_string()})
+    );
+
+    let native_grep = verlet_tool_grep::run(
+        verlet_tool_grep::GrepArgs {
+            pattern: "needle".to_owned(),
+            path: Some(std::path::PathBuf::from("project")),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    assert_eq!(
+        native_grep.text,
+        "input.txt:2: needle beta\nsrc/app.rs:1: fn needle() {}"
+    );
+    let grep = factory
+        .invoke_operation_bytes(
+            "grep",
+            pi_tool_input(serde_json::json!({"pattern": "needle", "path": "project"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tool_output(&grep), tool_success_envelope(native_grep));
+
+    let native_grep_error = verlet_tool_grep::run(
+        verlet_tool_grep::GrepArgs {
+            pattern: "[".to_owned(),
+            path: None,
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let grep_error = factory
+        .invoke_operation_bytes("grep", pi_tool_input(serde_json::json!({"pattern": "["})))
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_output(&grep_error),
+        serde_json::json!({"error": native_grep_error.to_string()})
+    );
+}
+
+#[tokio::test]
+async fn wasm_pi_write_matches_native_mutation_and_maps_io_into_envelope() {
+    let vfs = writable_vfs().await;
+    let native = tempfile::tempdir().unwrap();
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let native_output = verlet_tool_write::run(
+        verlet_tool_write::WriteArgs {
+            path: std::path::PathBuf::from("nested/unicode.txt"),
+            content: "é🙂".to_owned(),
+        },
+        &native_fs,
+    )
+    .unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_write_tool_guest(),
+        ))
+        .with_vfs(vfs.clone())
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+    let manifest = factory.validate_operation_artifact().await.unwrap();
+    assert!(manifest.operation("write").is_some());
+
+    let output = factory
+        .invoke_operation_bytes(
+            "write",
+            pi_tool_input(serde_json::json!({
+                "path": "nested/unicode.txt",
+                "content": "é🙂",
+            })),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(
+        tool_output(&output)["ok"]["text"],
+        "Successfully wrote 3 bytes to nested/unicode.txt"
+    );
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/nested/unicode.txt"))
+            .await
+            .unwrap(),
+        "é🙂".as_bytes()
+    );
+
+    let io_error = factory
+        .invoke_operation_bytes(
+            "write",
+            pi_tool_input(serde_json::json!({"path": "", "content": "no"})),
+        )
+        .await
+        .unwrap();
+    let error = tool_output(&io_error)["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("failed with status"), "{error}");
+
+    #[derive(Debug, serde::Deserialize)]
+    struct NativeWriteInput {
+        #[serde(rename = "root")]
+        _root: std::path::PathBuf,
+        #[serde(rename = "args")]
+        _args: verlet_tool_write::WriteArgs,
+    }
+    let malformed = pi_tool_input(serde_json::json!({"path": "missing-content.txt"}));
+    let native_error = serde_json::from_slice::<NativeWriteInput>(&malformed).unwrap_err();
+    let malformed_output = factory
+        .invoke_operation_bytes("write", malformed)
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_output(&malformed_output),
+        serde_json::json!({"error": format!("invalid input JSON: {native_error}")})
+    );
+}
+
+#[tokio::test]
+async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
+    let (vfs, native) = pi_tool_fixture().await;
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let raw_args = serde_json::json!({
+        "path": "project/input.txt",
+        "edits": [{"oldText": "needle beta", "newText": "needle delta"}],
+    });
+    let native_args = verlet_tool_edit::parse_cli_args(raw_args.clone()).unwrap();
+    let native_output = verlet_tool_edit::run(native_args, &native_fs).unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_edit_tool_guest(),
+        ))
+        .with_vfs(vfs.clone())
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+    let manifest = factory.validate_operation_artifact().await.unwrap();
+    assert!(manifest.operation("edit").is_some());
+
+    let output = factory
+        .invoke_operation_bytes("edit", pi_tool_input(raw_args))
+        .await
+        .unwrap();
+
+    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/project/input.txt"))
+            .await
+            .unwrap(),
+        b"alpha\nneedle delta\ngamma\n"
+    );
+
+    let invalid_args = serde_json::json!({"path": "project/input.txt"});
+    let native_error = verlet_tool_edit::parse_cli_args(invalid_args.clone()).unwrap_err();
+    let validation = factory
+        .invoke_operation_bytes("edit", pi_tool_input(invalid_args))
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_output(&validation),
+        serde_json::json!({"error": native_error})
+    );
+}
+
+#[tokio::test]
+async fn wasm_pi_write_and_edit_require_fs_write_before_execution() {
+    let (vfs, _native) = pi_tool_fixture().await;
+    let write_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_write_tool_guest(),
+        ))
+        .with_vfs(vfs.clone()),
+    )
+    .unwrap();
+    let edit_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_edit_tool_guest(),
+        ))
+        .with_vfs(vfs.clone()),
+    )
+    .unwrap();
+
+    let write_error = write_factory
+        .invoke_operation_bytes(
+            "write",
+            pi_tool_input(serde_json::json!({
+                "path": "denied.txt",
+                "content": "denied",
+            })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(write_error.contains("requires ungranted capabilities"));
+    assert!(write_error.contains(verlet_wasm::runner::FS_WRITE_CAPABILITY));
+    assert!(
+        !vfs.exists(std::path::Path::new("/workspace/denied.txt"))
+            .await
+            .unwrap()
+    );
+
+    let edit_error = edit_factory
+        .invoke_operation_bytes(
+            "edit",
+            pi_tool_input(serde_json::json!({
+                "path": "project/input.txt",
+                "edits": [{"oldText": "needle beta", "newText": "denied"}],
+            })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(edit_error.contains("requires ungranted capabilities"));
+    assert!(edit_error.contains(verlet_wasm::runner::FS_WRITE_CAPABILITY));
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/project/input.txt"))
+            .await
+            .unwrap(),
+        b"alpha\nneedle beta\ngamma\n"
+    );
 }
 
 #[tokio::test]

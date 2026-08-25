@@ -5,5 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 verlet-tool-core = { path = "../../tool-core" }
 verlet-guest-sdk = { path = "../../../crates/verlet-guest-sdk" }
