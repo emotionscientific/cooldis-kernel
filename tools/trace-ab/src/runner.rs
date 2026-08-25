@@ -834,15 +834,16 @@ fn configure_process_group(command: &mut std::process::Command) {
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut std::process::Command) {}
 
+/// Signals the child's process group directly because procps `kill` mangles negative-pid arguments.
 fn terminate(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{}", child.id()))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        if let Ok(pgid) = libc::pid_t::try_from(child.id())
+            && pgid > 1
+        {
+            // SAFETY: pgid is the positive process-group id assigned to this child.
+            let _ = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
     }
     let _ = child.kill();
     child.wait()
@@ -850,6 +851,9 @@ fn terminate(child: &mut std::process::Child) -> std::io::Result<std::process::E
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::io::BufRead as _;
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
@@ -931,6 +935,38 @@ mod tests {
                 .unwrap_err()
                 .contains("timed out")
         );
+    }
+
+    #[test]
+    fn terminate_kills_grandchild_in_process_group() {
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 5 & printf 'ready\\n'; wait")
+            .stdout(std::process::Stdio::piped());
+        crate::runner::configure_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
+
+        crate::runner::terminate(&mut child).unwrap();
+
+        let mut poll_fd = libc::pollfd {
+            fd: stdout.get_ref().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll_fd points to one valid pollfd for the duration of this call.
+        let poll_result = unsafe { libc::poll(&mut poll_fd, 1, 2_000) };
+        let mut remainder = Vec::new();
+        stdout.read_to_end(&mut remainder).unwrap();
+        assert!(
+            poll_result > 0 && poll_fd.revents & libc::POLLHUP != 0,
+            "grandchild kept the captured stdout pipe open"
+        );
+        assert!(remainder.is_empty());
     }
 
     #[test]
