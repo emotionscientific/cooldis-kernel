@@ -639,6 +639,56 @@ where
     }
 }
 
+/// Run a native CLI with a tool-specific prepare/coerce/validate step.
+///
+/// Pi's edit tool prepares several legacy argument shapes before schema
+/// validation. Keeping this hook at the JSON boundary lets that tool return
+/// Pi's validation envelope without weakening the typed [`run_cli`] path used
+/// by the other tools.
+#[cfg(feature = "std-fs")]
+pub fn run_cli_with_parser<Args, Output>(
+    parse_args: fn(serde_json::Value) -> Result<Args, String>,
+    run: fn(Args, &dyn ToolFs) -> Result<Output, ToolError>,
+) -> std::process::ExitCode
+where
+    Output: serde::Serialize,
+{
+    #[derive(serde::Deserialize)]
+    struct CliInput {
+        root: std::path::PathBuf,
+        args: serde_json::Value,
+    }
+
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        return write_cli_error(format!("failed to read stdin: {error}"));
+    }
+    let input = match serde_json::from_str::<CliInput>(&input) {
+        Ok(input) => input,
+        Err(error) => return write_cli_error(format!("invalid input JSON: {error}")),
+    };
+    let args = match parse_args(input.args) {
+        Ok(args) => args,
+        Err(error) => return write_cli_error(error),
+    };
+    let fs = match StdFs::new(&input.root) {
+        Ok(fs) => fs,
+        Err(error) => return write_cli_error(error.to_string()),
+    };
+
+    match run(args, &fs) {
+        Ok(output) => match serde_json::to_value(output) {
+            Ok(output) => {
+                let mut result = serde_json::Map::new();
+                result.insert("ok".to_owned(), output);
+                write_cli_json(serde_json::Value::Object(result), true)
+            }
+            Err(error) => write_cli_error(format!("failed to serialize result: {error}")),
+        },
+        Err(error) => write_cli_error(error.to_string()),
+    }
+}
+
 #[cfg(feature = "std-fs")]
 fn write_cli_error(error: String) -> std::process::ExitCode {
     write_cli_json(serde_json::json!({"error": error}), false)
@@ -833,6 +883,77 @@ mod tests {
         assert_eq!(
             crate::normalize_tool_path(std::path::Path::new("file:///literal")),
             std::path::PathBuf::from("file:///literal")
+        );
+    }
+
+    #[test]
+    fn truncate_head_pins_exact_line_and_byte_boundaries() {
+        // Pi source: core/tools/truncate.ts:78-160.
+        let exactly_two_thousand = std::iter::repeat_n("x", crate::DEFAULT_MAX_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let over_two_thousand = format!("{exactly_two_thousand}\nx");
+        let exact_line_boundary = crate::truncate_head(
+            &exactly_two_thousand,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let over_line_boundary = crate::truncate_head(
+            &over_two_thousand,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+
+        assert!(!exact_line_boundary.truncated);
+        assert!(over_line_boundary.truncated);
+        assert_eq!(
+            over_line_boundary.truncated_by,
+            Some(crate::TruncatedBy::Lines)
+        );
+        assert_eq!(over_line_boundary.output_lines, crate::DEFAULT_MAX_LINES);
+
+        let exactly_fifty_kib = "🙂".repeat(crate::DEFAULT_MAX_BYTES / 4);
+        let exact_byte_boundary = crate::truncate_head(
+            &exactly_fifty_kib,
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let complete_first_line = crate::truncate_head(
+            &format!("{exactly_fifty_kib}\nx"),
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+        let oversized_first_line = crate::truncate_head(
+            &format!("{exactly_fifty_kib}x\ny"),
+            crate::DEFAULT_MAX_LINES,
+            crate::DEFAULT_MAX_BYTES,
+        );
+
+        assert!(!exact_byte_boundary.truncated);
+        assert_eq!(exact_byte_boundary.output_bytes, crate::DEFAULT_MAX_BYTES);
+        assert!(complete_first_line.truncated);
+        assert_eq!(complete_first_line.content, exactly_fifty_kib);
+        assert_eq!(complete_first_line.output_lines, 1);
+        assert!(!complete_first_line.first_line_exceeds_limit);
+        assert!(oversized_first_line.truncated);
+        assert!(oversized_first_line.content.is_empty());
+        assert!(oversized_first_line.first_line_exceeds_limit);
+    }
+
+    #[test]
+    fn truncate_utf16_pins_surrogate_pair_boundaries() {
+        // JavaScript slice(0, 500) keeps a split high surrogate. Rust strings
+        // represent that unpaired surrogate as U+FFFD in model-facing UTF-8.
+        let exact_pair_boundary = format!("{}🙂tail", "x".repeat(498));
+        let split_pair_boundary = format!("{}🙂tail", "x".repeat(499));
+
+        assert_eq!(
+            crate::truncate_utf16(&exact_pair_boundary, 500),
+            (format!("{}🙂", "x".repeat(498)), true)
+        );
+        assert_eq!(
+            crate::truncate_utf16(&split_pair_boundary, 500),
+            (format!("{}\u{fffd}", "x".repeat(499)), true)
         );
     }
 }

@@ -68,52 +68,102 @@ impl<'de> serde::Deserialize<'de> for EditArgs {
         D: serde::Deserializer<'de>,
     {
         let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
-        let mut object = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| serde::de::Error::custom("edit arguments must be an object"))?;
-        let path = object
-            .remove("path")
-            .ok_or_else(|| serde::de::Error::missing_field("path"))?;
-        let path = serde_json::from_value(path).map_err(serde::de::Error::custom)?;
+        parse_edit_args(value).map_err(serde::de::Error::custom)
+    }
+}
 
-        let legacy_edit = match (object.remove("oldText"), object.remove("newText")) {
-            (
-                Some(serde_json::Value::String(old_text)),
-                Some(serde_json::Value::String(new_text)),
-            ) => Some(Edit { old_text, new_text }),
-            _ => None,
-        };
-        let mut edits_value = object.remove("edits");
-        if let Some(serde_json::Value::String(encoded)) = edits_value.as_ref() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(encoded) {
-                if parsed.is_array() || is_single_edit_value(&parsed) {
-                    edits_value = Some(parsed);
-                }
+/// Pi-compatible prepare/coerce/validate parser for native and embedded JSON
+/// boundaries. Errors use Pi's validation envelope and validator messages.
+pub fn parse_cli_args(value: serde_json::Value) -> Result<EditArgs, String> {
+    parse_edit_args(value)
+}
+
+fn parse_edit_args(value: serde_json::Value) -> Result<EditArgs, String> {
+    let prepared = prepare_edit_arguments(value);
+    let mut converted = prepared.clone();
+    coerce_edit_arguments(&mut converted);
+    let validation_errors = validate_edit_arguments(&converted);
+    if !validation_errors.is_empty() {
+        let errors = validation_errors
+            .into_iter()
+            .map(|(path, message)| format!("  - {path}: {message}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let received = serde_json::to_string_pretty(&prepared)
+            .unwrap_or_else(|_| "<unserializable arguments>".to_owned());
+        return Err(format!(
+            "Validation failed for tool \"edit\":\n{errors}\n\nReceived arguments:\n{received}"
+        ));
+    }
+
+    let mut object = converted
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "validated edit arguments were not an object".to_owned())?;
+    let path = object
+        .remove("path")
+        .and_then(|value| value.as_str().map(std::path::PathBuf::from))
+        .ok_or_else(|| "validated edit path was not a string".to_owned())?;
+    let edits = object
+        .remove("edits")
+        .and_then(|value| value.as_array().cloned())
+        .ok_or_else(|| "validated edits were not an array".to_owned())?
+        .into_iter()
+        .map(|value| {
+            let edit = value
+                .as_object()
+                .ok_or_else(|| "validated edit was not an object".to_owned())?;
+            let old_text = edit
+                .get("oldText")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "validated oldText was not a string".to_owned())?;
+            let new_text = edit
+                .get("newText")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "validated newText was not a string".to_owned())?;
+            Ok(Edit {
+                old_text: old_text.to_owned(),
+                new_text: new_text.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(EditArgs { path, edits })
+}
+
+fn prepare_edit_arguments(mut value: serde_json::Value) -> serde_json::Value {
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+
+    if let Some(serde_json::Value::String(encoded)) = object.get("edits") {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(encoded) {
+            if parsed.is_array() || is_single_edit_value(&parsed) {
+                object.insert("edits".to_owned(), parsed);
             }
         }
-        if edits_value.as_ref().is_some_and(is_single_edit_value) {
-            edits_value = Some(serde_json::Value::Array(vec![edits_value.unwrap()]));
+    } else if object.get("edits").is_some_and(is_single_edit_value) {
+        if let Some(edit) = object.remove("edits") {
+            object.insert("edits".to_owned(), serde_json::Value::Array(vec![edit]));
         }
-
-        let mut edits = match edits_value {
-            Some(value) => serde_json::from_value::<Vec<Edit>>(value)
-                .or_else(|error| {
-                    if legacy_edit.is_some() {
-                        Ok(Vec::new())
-                    } else {
-                        Err(error)
-                    }
-                })
-                .map_err(serde::de::Error::custom)?,
-            None => Vec::new(),
-        };
-        if let Some(edit) = legacy_edit {
-            edits.push(edit);
-        }
-
-        Ok(Self { path, edits })
     }
+
+    let legacy = match (object.get("oldText"), object.get("newText")) {
+        (Some(serde_json::Value::String(old_text)), Some(serde_json::Value::String(new_text))) => {
+            Some(serde_json::json!({"oldText": old_text, "newText": new_text}))
+        }
+        _ => None,
+    };
+    if let Some(legacy) = legacy {
+        let mut edits = object
+            .remove("edits")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        edits.push(legacy);
+        object.remove("oldText");
+        object.remove("newText");
+        object.insert("edits".to_owned(), serde_json::Value::Array(edits));
+    }
+    value
 }
 
 fn is_single_edit_value(value: &serde_json::Value) -> bool {
@@ -124,6 +174,111 @@ fn is_single_edit_value(value: &serde_json::Value) -> bool {
                 .get("newText")
                 .is_some_and(serde_json::Value::is_string)
     })
+}
+
+fn coerce_edit_arguments(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(path) = object.get_mut("path") {
+        coerce_string(path);
+    }
+    let Some(edits) = object.get_mut("edits") else {
+        return;
+    };
+    if !edits.is_array() {
+        let value = std::mem::take(edits);
+        *edits = serde_json::Value::Array(vec![value]);
+    }
+    let Some(edits) = edits.as_array_mut() else {
+        return;
+    };
+    for edit in edits {
+        let Some(edit) = edit.as_object_mut() else {
+            continue;
+        };
+        if let Some(old_text) = edit.get_mut("oldText") {
+            coerce_string(old_text);
+        }
+        if let Some(new_text) = edit.get_mut("newText") {
+            coerce_string(new_text);
+        }
+    }
+}
+
+fn coerce_string(value: &mut serde_json::Value) {
+    let converted = match value {
+        serde_json::Value::Null => Some("null".to_owned()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(|value| value.to_string())
+            .or_else(|| value.as_u64().map(|value| value.to_string()))
+            .or_else(|| value.as_f64().map(|value| value.to_string())),
+        serde_json::Value::String(_)
+        | serde_json::Value::Array(_)
+        | serde_json::Value::Object(_) => None,
+    };
+    if let Some(converted) = converted {
+        *value = serde_json::Value::String(converted);
+    }
+}
+
+fn validate_edit_arguments(value: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = value.as_object() else {
+        return vec![("root".to_owned(), "must be object".to_owned())];
+    };
+    let missing = ["path", "edits"]
+        .into_iter()
+        .filter(|property| !object.contains_key(*property))
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    if let Some(first) = missing.first() {
+        errors.push((
+            (*first).to_owned(),
+            format!("must have required properties {}", missing.join(", ")),
+        ));
+    }
+    if object.get("path").is_some_and(|path| !path.is_string()) {
+        errors.push(("path".to_owned(), "must be string".to_owned()));
+    }
+    if let Some(serde_json::Value::Array(edits)) = object.get("edits") {
+        for (index, edit) in edits.iter().enumerate() {
+            let Some(edit) = edit.as_object() else {
+                errors.push((format!("edits.{index}"), "must be object".to_owned()));
+                continue;
+            };
+            let missing = ["oldText", "newText"]
+                .into_iter()
+                .filter(|property| !edit.contains_key(*property))
+                .collect::<Vec<_>>();
+            if let Some(first) = missing.first() {
+                errors.push((
+                    format!("edits.{index}.{first}"),
+                    format!("must have required properties {}", missing.join(", ")),
+                ));
+            }
+            if edit
+                .get("oldText")
+                .is_some_and(|old_text| !old_text.is_string())
+            {
+                errors.push((
+                    format!("edits.{index}.oldText"),
+                    "must be string".to_owned(),
+                ));
+            }
+            if edit
+                .get("newText")
+                .is_some_and(|new_text| !new_text.is_string())
+            {
+                errors.push((
+                    format!("edits.{index}.newText"),
+                    "must be string".to_owned(),
+                ));
+            }
+        }
+    }
+    errors
 }
 
 pub fn contract() -> verlet_tool_core::ToolContract {
@@ -1286,7 +1441,7 @@ mod tests {
     fn camel_case_schema_and_all_preparer_forms_match_pi() {
         // Pi behavior sheet item 15; source: core/tools/edit.ts:34-54,116-147.
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("file.txt"), "one two three four").unwrap();
+        std::fs::write(root.path().join("file.txt"), "one two three four five").unwrap();
         let contract = crate::contract();
         assert!(
             contract.input_schema["properties"]["edits"]["items"]["properties"]
@@ -1333,6 +1488,11 @@ mod tests {
             "edits": "[{\"oldText\":\"two\",\"newText\":\"TWO\"}]"
         }))
         .unwrap();
+        let encoded_single: crate::EditArgs = serde_json::from_value(serde_json::json!({
+            "path": "file.txt",
+            "edits": "{\"oldText\":\"five\",\"newText\":\"FIVE\"}"
+        }))
+        .unwrap();
         let legacy: crate::EditArgs = serde_json::from_value(serde_json::json!({
             "path": "file.txt",
             "edits": [{"oldText": "three", "newText": "THREE"}],
@@ -1343,10 +1503,68 @@ mod tests {
 
         crate::run(single, &fs(root.path())).unwrap();
         crate::run(encoded, &fs(root.path())).unwrap();
+        crate::run(encoded_single, &fs(root.path())).unwrap();
         crate::run(legacy, &fs(root.path())).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
-            "ONE TWO THREE FOUR"
+            "ONE TWO THREE FOUR FIVE"
+        );
+    }
+
+    #[test]
+    fn preparer_coerces_values_before_validation_like_pi() {
+        // Pi source: agent validation.ts:317-349 and edit.ts:116-147.
+        let parsed = crate::parse_cli_args(serde_json::json!({
+            "path": 7,
+            "edits": [{"oldText": true, "newText": 2}]
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.path, std::path::PathBuf::from("7"));
+        assert_eq!(parsed.edits.len(), 1);
+        assert_eq!(parsed.edits[0].old_text, "true");
+        assert_eq!(parsed.edits[0].new_text, "2");
+    }
+
+    #[test]
+    fn malformed_preparer_variants_return_pi_validation_envelopes() {
+        // Pi source: agent validation.ts:341-349 and edit.ts:116-147.
+        let malformed_string = crate::parse_cli_args(serde_json::json!({
+            "path": "file.txt",
+            "edits": "nope"
+        }))
+        .unwrap_err();
+        let partial_object = crate::parse_cli_args(serde_json::json!({
+            "path": "file.txt",
+            "edits": {"oldText": "old"}
+        }))
+        .unwrap_err();
+        let partial_legacy = crate::parse_cli_args(serde_json::json!({
+            "path": "file.txt",
+            "oldText": "old"
+        }))
+        .unwrap_err();
+        let malformed_encoded_array = crate::parse_cli_args(serde_json::json!({
+            "path": "file.txt",
+            "edits": "[{\"oldText\":\"old\"}]"
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            malformed_string,
+            "Validation failed for tool \"edit\":\n  - edits.0: must be object\n\nReceived arguments:\n{\n  \"edits\": \"nope\",\n  \"path\": \"file.txt\"\n}"
+        );
+        assert_eq!(
+            partial_object,
+            "Validation failed for tool \"edit\":\n  - edits.0.newText: must have required properties newText\n\nReceived arguments:\n{\n  \"edits\": {\n    \"oldText\": \"old\"\n  },\n  \"path\": \"file.txt\"\n}"
+        );
+        assert_eq!(
+            partial_legacy,
+            "Validation failed for tool \"edit\":\n  - edits: must have required properties edits\n\nReceived arguments:\n{\n  \"oldText\": \"old\",\n  \"path\": \"file.txt\"\n}"
+        );
+        assert_eq!(
+            malformed_encoded_array,
+            "Validation failed for tool \"edit\":\n  - edits.0.newText: must have required properties newText\n\nReceived arguments:\n{\n  \"edits\": [\n    {\n      \"oldText\": \"old\"\n    }\n  ],\n  \"path\": \"file.txt\"\n}"
         );
     }
 }

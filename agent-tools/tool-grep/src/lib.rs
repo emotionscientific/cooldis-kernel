@@ -416,6 +416,34 @@ mod tests {
     }
 
     #[test]
+    fn clips_emoji_on_exact_and_split_utf16_boundaries() {
+        // Pi source: core/tools/truncate.ts:264-275. A split surrogate is
+        // represented lossily because Rust model-facing text must remain UTF-8.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("a.txt"),
+            format!("{}🙂needle", "x".repeat(498)),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("b.txt"),
+            format!("{}🙂needle", "x".repeat(499)),
+        )
+        .unwrap();
+
+        let output = crate::run(args("needle"), &fs(root.path())).unwrap();
+
+        assert_eq!(
+            output.text,
+            format!(
+                "a.txt:1: {}🙂... [truncated]\nb.txt:1: {}\u{fffd}... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
+                "x".repeat(498),
+                "x".repeat(499),
+            )
+        );
+    }
+
+    #[test]
     fn literal_mode_matches_regex_metacharacters_exactly() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("literal.txt"), "value a+b [x] done\n").unwrap();

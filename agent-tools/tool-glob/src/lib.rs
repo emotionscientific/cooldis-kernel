@@ -321,11 +321,38 @@ mod tests {
         let no_match = crate::run(args("*.nope", None), &fs(root.path())).unwrap();
         let directories = crate::run(args("bar", None), &fs(root.path())).unwrap();
         let path_pattern = crate::run(args("src/**/*.spec.ts", None), &fs(root.path())).unwrap();
+        let leading_double_star =
+            crate::run(args("**/src/**/*.spec.ts", None), &fs(root.path())).unwrap();
+        let root_pattern = crate::run(args("/", None), &fs(root.path())).unwrap();
 
         assert_eq!(no_match.text, "No files found matching pattern");
         assert_eq!(directories.paths, vec!["src/foo/bar/".to_owned()]);
         assert_eq!(directories.text, "src/foo/bar/");
         assert_eq!(path_pattern.paths, vec!["src/foo/bar/example.spec.ts"]);
+        assert_eq!(leading_double_star.paths, path_pattern.paths);
+        assert_eq!(root_pattern.text, "No files found matching pattern");
+    }
+
+    #[test]
+    fn absolute_search_root_stays_relative_and_preserves_directory_separators() {
+        // Pi regression 6104: root search paths must not drop the first segment.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("home/user/project")).unwrap();
+        std::fs::write(root.path().join("home/user/project/file.txt"), "").unwrap();
+        let mut search = args("**", None);
+        search.path = Some(root.path().to_path_buf());
+
+        let output = crate::run(search, &fs(root.path())).unwrap();
+
+        assert_eq!(
+            output.paths,
+            vec![
+                "home/".to_owned(),
+                "home/user/".to_owned(),
+                "home/user/project/".to_owned(),
+                "home/user/project/file.txt".to_owned(),
+            ]
+        );
     }
 
     #[test]

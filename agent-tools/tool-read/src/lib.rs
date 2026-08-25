@@ -353,6 +353,31 @@ mod tests {
     }
 
     #[test]
+    fn caller_limit_precedes_automatic_line_truncation_at_the_exact_boundary() {
+        // Pi source: core/tools/read.ts:284-317 and truncate.ts:78-160.
+        let root = tempfile::tempdir().unwrap();
+        let content = std::iter::repeat_n("x", 2002)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.path().join("large.txt"), content).unwrap();
+        let filesystem = fs(root.path());
+
+        let exact = crate::run(args("large.txt", Some(2), Some(2000)), &filesystem).unwrap();
+        let over = crate::run(args("large.txt", Some(2), Some(2001)), &filesystem).unwrap();
+
+        assert!(exact.truncation.is_none());
+        assert!(exact
+            .text
+            .ends_with("\n\n[1 more lines in file. Use offset=2002 to continue.]"));
+        assert_eq!(exact.start_line, 2);
+        assert_eq!(exact.end_line, 2001);
+        assert!(over.truncation.is_some());
+        assert!(over
+            .text
+            .ends_with("\n\n[Showing lines 2-2001 of 2002. Use offset=2002 to continue.]"));
+    }
+
+    #[test]
     fn contract_and_benign_path_normalization_match_pi() {
         // Pi behavior sheet items 1 and 4; source: read.ts:209-222 and path-utils.ts:40-49.
         let contract = crate::contract();
