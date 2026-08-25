@@ -686,11 +686,17 @@ pub fn stat_path(path: &str) -> Result<FileStat, StatusCode> {
 /// List an absolute VFS directory, name-sorted (byte order). Drains the
 /// host's listing source and decodes the JSON array of entries.
 pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, StatusCode> {
-    let _source = call_fs_list(path)?;
-    // Drain `_source` with `call_source_read` until EOF, then decode the
-    // bytes as a JSON array of `DirEntry`; decode failures map to
-    // `StatusCode::TransportError`.
-    todo!("fs write leg: drain and decode the fs_list source")
+    let source = call_fs_list(path)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let n = call_source_read(source, &mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| StatusCode::TransportError)
 }
 
 /// Create a directory at an absolute VFS path. Requires the `fs.write`

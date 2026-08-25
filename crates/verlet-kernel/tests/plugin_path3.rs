@@ -25,7 +25,9 @@ async fn path3_local_plugin_build_publish_mount_and_agent_confirm() {
                     release: true,
                 },
                 interface: None,
-                capability_grants: std::collections::BTreeSet::new(),
+                capability_grants: std::collections::BTreeSet::from([
+                    verlet_wasm::runner::FS_WRITE_CAPABILITY.to_string(),
+                ]),
                 metadata: std::collections::BTreeMap::new(),
             },
         )
@@ -201,7 +203,9 @@ async fn publish_workspace_reader(registry_root: &std::path::Path, module_path: 
                     release: true,
                 },
                 interface: None,
-                capability_grants: std::collections::BTreeSet::new(),
+                capability_grants: std::collections::BTreeSet::from([
+                    verlet_wasm::runner::FS_WRITE_CAPABILITY.to_string(),
+                ]),
                 metadata: std::collections::BTreeMap::new(),
             },
         )

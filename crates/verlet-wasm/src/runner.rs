@@ -652,7 +652,6 @@ impl WasmTurnState {
 
     /// Open a pending write buffer for `path`. The buffer lives host-side
     /// and is committed to the VFS only by `fs_close`.
-    #[expect(dead_code, reason = "fs write leg: wired up by the implementation")]
     fn insert_write_file(&mut self, path: std::path::PathBuf) -> u32 {
         self.insert_file(WasmFileState::Write {
             path,
@@ -1729,11 +1728,22 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 /// it. Parent directories are NOT created on commit; guests create them
 /// explicitly with `fs_mkdir`.
 fn fs_open_write_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _path: std::path::PathBuf,
-    _out_handle_ptr: usize,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path: std::path::PathBuf,
+    out_handle_ptr: usize,
 ) -> i32 {
-    todo!("fs write leg: open write handles")
+    if !caller
+        .data()
+        .capability_grants
+        .contains(FS_WRITE_CAPABILITY)
+    {
+        return STATUS_CAPABILITY_DENIED;
+    }
+    let handle = caller.data_mut().insert_write_file(path);
+    if !write_guest_u32_at(caller, out_handle_ptr, handle) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    STATUS_OK
 }
 
 /// `fs_close` on a write handle: commit the pending buffer to the VFS.
@@ -1744,11 +1754,17 @@ fn fs_open_write_impl(
 /// removed from the file table by the caller: it is consumed whether or not
 /// the commit succeeds, and there is no retry.
 async fn fs_close_commit_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _path: std::path::PathBuf,
-    _buffer: Vec<u8>,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path: std::path::PathBuf,
+    buffer: Vec<u8>,
 ) -> i32 {
-    todo!("fs write leg: commit write handles on close")
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    match vfs.write_file(&path, &buffer).await {
+        Ok(()) => STATUS_OK,
+        Err(err) => vfs_error_status(err),
+    }
 }
 
 /// `fs_write`: append `len` bytes from guest memory at `ptr` to the pending
@@ -1759,12 +1775,28 @@ async fn fs_close_commit_impl(
 /// -> `STATUS_INVALID_ARGUMENT`. No size cap beyond host memory: the read leg
 /// buffers whole files host-side with the same asymmetry.
 fn fs_write_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _handle: i32,
-    _ptr: i32,
-    _len: i32,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    handle: i32,
+    ptr: i32,
+    len: i32,
 ) -> i32 {
-    todo!("fs write leg: append to write handles")
+    let Some(handle) = nonnegative_u32(handle) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(state) = caller.data().files.get(&handle) else {
+        return STATUS_NOT_FOUND;
+    };
+    if !matches!(state, WasmFileState::Write { .. }) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(bytes) = read_guest_memory(caller, ptr, len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(WasmFileState::Write { buffer, .. }) = caller.data_mut().files.get_mut(&handle) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    buffer.extend_from_slice(&bytes);
+    STATUS_OK
 }
 
 /// `fs_stat`: stat an absolute UTF-8 VFS path into a 16-byte record.
@@ -1779,12 +1811,56 @@ fn fs_write_impl(
 ///   bytes 4..8   reserved (u32): always zero
 ///   bytes 8..16  size (u64): size in bytes for files, 0 for directories
 async fn fs_stat_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _path_ptr: i32,
-    _path_len: i32,
-    _out_ptr: i32,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    out_ptr: i32,
 ) -> i32 {
-    todo!("fs write leg: stat VFS paths")
+    let Some(out_ptr) = nonnegative_usize(out_ptr) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    let metadata = match vfs.stat(&path).await {
+        Ok(metadata) => metadata,
+        Err(err) => return vfs_error_status(err),
+    };
+    let kind = match metadata.file_type {
+        bashkit::FileType::File => 0u32,
+        bashkit::FileType::Directory => 1u32,
+        bashkit::FileType::Symlink | bashkit::FileType::Fifo => 2u32,
+    };
+    let size = if metadata.file_type == bashkit::FileType::Directory {
+        0
+    } else {
+        metadata.size
+    };
+    let mut record = [0u8; 16];
+    record[0..4].copy_from_slice(&kind.to_le_bytes());
+    record[8..16].copy_from_slice(&size.to_le_bytes());
+    let Some(memory) = exported_memory(caller) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let data = memory.data_mut(caller);
+    let Some(end) = out_ptr.checked_add(record.len()) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    if end > data.len() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    data[out_ptr..end].copy_from_slice(&record);
+    STATUS_OK
 }
 
 /// `fs_list`: list an absolute UTF-8 VFS directory as a readable source.
@@ -1798,12 +1874,54 @@ async fn fs_stat_impl(
 /// `out_source_ptr`. The guest drains it with `source_read`. Names are entry
 /// names only, never full paths.
 async fn fs_list_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _path_ptr: i32,
-    _path_len: i32,
-    _out_source_ptr: i32,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    out_source_ptr: i32,
 ) -> i32 {
-    todo!("fs write leg: list VFS directories")
+    #[derive(serde::Serialize)]
+    struct ListingEntry {
+        name: String,
+        is_dir: bool,
+    }
+
+    let Some(out_source_ptr) = nonnegative_usize(out_source_ptr) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    let mut entries = match vfs.read_dir(&path).await {
+        Ok(entries) => entries,
+        Err(err) => return vfs_error_status(err),
+    };
+    entries.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    let listing: Vec<_> = entries
+        .into_iter()
+        .map(|entry| ListingEntry {
+            name: entry.name,
+            is_dir: entry.metadata.file_type == bashkit::FileType::Directory,
+        })
+        .collect();
+    let bytes = match serde_json::to_vec(&listing) {
+        Ok(bytes) => bytes,
+        Err(_) => return STATUS_TRANSPORT_ERROR,
+    };
+    let source = caller.data_mut().insert_source(bytes);
+    if !write_guest_u32_at(caller, out_source_ptr, source) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    STATUS_OK
 }
 
 /// `fs_mkdir`: create a directory at an absolute UTF-8 VFS path.
@@ -1816,12 +1934,40 @@ async fn fs_list_impl(
 /// non-recursive creation with a missing parent or an existing target maps
 /// the backend error through `vfs_error_status`.
 async fn fs_mkdir_impl(
-    _caller: &mut wasmtime::Caller<'_, WasmTurnState>,
-    _path_ptr: i32,
-    _path_len: i32,
-    _recursive: i32,
+    caller: &mut wasmtime::Caller<'_, WasmTurnState>,
+    path_ptr: i32,
+    path_len: i32,
+    recursive: i32,
 ) -> i32 {
-    todo!("fs write leg: create VFS directories")
+    let recursive = match recursive {
+        0 => false,
+        1 => true,
+        _ => return STATUS_INVALID_ARGUMENT,
+    };
+    let Some(path_bytes) = read_guest_memory(caller, path_ptr, path_len) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Ok(path) = String::from_utf8(path_bytes) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(vfs) = caller.data().vfs.clone() else {
+        return STATUS_CAPABILITY_DENIED;
+    };
+    if !caller
+        .data()
+        .capability_grants
+        .contains(FS_WRITE_CAPABILITY)
+    {
+        return STATUS_CAPABILITY_DENIED;
+    }
+    match vfs.mkdir(&path, recursive).await {
+        Ok(()) => STATUS_OK,
+        Err(err) => vfs_error_status(err),
+    }
 }
 
 fn vfs_error_status(err: bashkit::Error) -> i32 {
