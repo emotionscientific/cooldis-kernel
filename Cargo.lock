@@ -6209,6 +6209,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "verlet-tool-abi-fs"
+version = "0.1.0"
+dependencies = [
+ "verlet-guest-sdk",
+ "verlet-tool-core",
+]
+
+[[package]]
 name = "verlet-tool-core"
 version = "0.1.0"
 dependencies = [

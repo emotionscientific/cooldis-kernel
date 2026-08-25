@@ -1,0 +1,9 @@
+[package]
+name = "verlet-tool-abi-fs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+verlet-tool-core = { path = "../../tool-core" }
+verlet-guest-sdk = { path = "../../../crates/verlet-guest-sdk" }
