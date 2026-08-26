@@ -1,5 +1,6 @@
 pub mod blob_store;
 pub mod import_package;
+pub mod kit_package;
 pub mod openapi_plan;
 pub mod operation_registry;
 pub mod operation_store;

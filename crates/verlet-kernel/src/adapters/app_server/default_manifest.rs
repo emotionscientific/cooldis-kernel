@@ -276,6 +276,7 @@ fn default_manifest_tools(
             }
         }
     }
+    tools.extend(installed_kit_tools(bindings.registry_root.as_deref())?);
     if bindings.global_operation_names.is_empty() && !bindings.load_all_active_when_unbound {
         return Ok(tools);
     }
@@ -332,6 +333,29 @@ fn default_manifest_tools(
         }
     }
     Ok(tools)
+}
+
+/// Direct-tool rows for every installed kit.
+///
+/// The kits root is derived from the operations registry root via
+/// `verlet_operations::kit_package::kits_root_for_operations_registry_root`;
+/// no registry root or a missing kits directory means no kit tools. For
+/// each `InstalledKitRecord` (kits sorted by name) and each of its tool
+/// rows, emit `AgentManifestTool::Direct` with id `kit.<kit>.<tool_name>`,
+/// the record's pinned `operation_ref` verbatim, `effect_class` parsed from
+/// its kebab-case string, and attachment derived from
+/// `required_capabilities` through
+/// `attachment_config_from_capability_grants`. An unreadable record or a
+/// `tool_name` duplicated across installed kits is a hard error naming the
+/// kit(s): the default manifest must not silently drop or shadow a
+/// declared tool.
+fn installed_kit_tools(
+    operations_registry_root: Option<&std::path::Path>,
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
+{
+    // EMO-608 implements this; empty until then so the seam is live.
+    let _ = operations_registry_root;
+    Ok(Vec::new())
 }
 
 fn default_manifest_publish_plan(
