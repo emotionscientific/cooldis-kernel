@@ -10,6 +10,7 @@ mod debug_rpc;
 mod host;
 mod identity;
 mod import;
+mod kit;
 mod rpc;
 mod secret;
 mod serve;
@@ -54,6 +55,7 @@ pub async fn run() -> crate::kernel::runtime_host::VerletResult<()> {
         "blob" => crate::cli::blob::run_blob(args).await,
         "coupling" => crate::cli::coupling::run_coupling(args).await,
         "import" => crate::cli::import::run_import(args).await,
+        "kit" => crate::cli::kit::run_kit(args).await,
         "tool" => {
             let client = client_command_preamble("tool", &args).await?;
             crate::cli::tool::run_tool(args, client).await
@@ -151,6 +153,7 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
         [command, subcommand] if command == "import" && subcommand == "publish" => {
             crate::cli::import::print_import_publish_help()
         }
+        [command] if command == "kit" => crate::cli::kit::print_kit_help(),
         [command] if command == "skill" => crate::cli::skill::print_skill_help(),
         [command, subcommand] if command == "skill" && subcommand == "publish" => {
             crate::cli::skill::print_skill_publish_help()
@@ -704,6 +707,9 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "verlet tool run --bin-path <module.wasm> <operation> --input <text> [--mount /guest=/host]",
     "verlet tool run <published-name> <operation> --input <text> [--registry-root .verlet/operations] [--state-home .verlet/state]",
     "verlet tool manual <published-name> [operation] [--json] [--registry-root .verlet/operations]",
+    "verlet kit install <kit-dir> [--registry-root .verlet/operations] [--kits-root .verlet/kits]",
+    "verlet kit list [--kits-root .verlet/kits] [--json]",
+    "verlet kit remove <name> [--kits-root .verlet/kits]",
     "verlet skill publish <dir> [--registry-root .verlet/skills] [--name <package>]",
     "verlet skill import <dir> [--registry-root .verlet/skills] [--blob-registry-root .verlet/blobs] [--name <package>] [--dry-run]",
     "verlet tool source add <name> --kind <mcp-http|mcp-sse> --url <url> [--bearer-secret <secret-name>] [--include-tool <tool>] [--state-home .verlet/state]",
