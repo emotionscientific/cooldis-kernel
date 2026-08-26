@@ -2221,6 +2221,14 @@ fn setup_window_build_is_safe_at_zero_and_tiny_terminal_sizes() {
         }
         let _ = form_app.handle(&key(tuika::KeyCode::Enter));
         let _ = render_at(&mut form_app, true, width, height);
+
+        let mut kits_app = crate::app::App::new(meta());
+        kits_app.apply(crate::ChatEvent::KitStatus {
+            intent: crate::KitStatusIntent::Open,
+            installed: vec![installed_pi_row()],
+            recommended: vec![recommended_pi(Some("dist/pi-kit")), recommended_pi(None)],
+        });
+        let _ = render_at(&mut kits_app, true, width, height);
     }
 }
 
@@ -2248,4 +2256,213 @@ fn fuzzy_filter_matches_subsequences_and_ranks_substrings_first() {
     assert_eq!(hits[0].provider_id, "openai");
     let hits = crate::app::setup::filtered_catalog(&rows, "zzz");
     assert!(hits.is_empty());
+}
+
+fn installed_pi_row() -> crate::InstalledKitRow {
+    crate::InstalledKitRow {
+        name: "pi".to_string(),
+        version: Some("0.1.0".to_string()),
+        tools: ["read", "write", "edit", "find", "grep"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+fn recommended_pi(source: Option<&str>) -> crate::RecommendedKitRow {
+    crate::RecommendedKitRow {
+        name: "pi".to_string(),
+        blurb: "read, write, edit, find, grep file tools".to_string(),
+        source: source.map(str::to_string),
+    }
+}
+
+/// Home (2 configured providers + 3 action rows) -> "Install tools".
+fn open_kits_from_home(app: &mut crate::app::App) {
+    open_home(app);
+    for _ in 0..4 {
+        let _ = app.handle(&key(tuika::KeyCode::Down));
+    }
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![crate::Action::FetchKitStatus {
+            intent: crate::KitStatusIntent::Open
+        }]
+    );
+    app.apply(crate::ChatEvent::KitStatus {
+        intent: crate::KitStatusIntent::Open,
+        installed: Vec::new(),
+        recommended: vec![recommended_pi(Some("dist/pi-kit"))],
+    });
+}
+
+#[test]
+fn home_install_tools_row_opens_the_kit_step() {
+    let mut app = app();
+    open_kits_from_home(&mut app);
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Tool kits"), "window title:\n{grid}");
+    assert!(
+        grid.contains("No kits installed yet."),
+        "empty state:\n{grid}"
+    );
+    assert!(grid.contains("Install the pi kit"), "install row:\n{grid}");
+    assert!(grid.contains("Back"), "back row:\n{grid}");
+}
+
+#[test]
+fn kit_install_runs_busy_reports_and_refreshes() {
+    let mut app = app();
+    open_kits_from_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(
+        app.drain_actions(),
+        vec![crate::Action::InstallKit {
+            name: "pi".to_string(),
+            source: "dist/pi-kit".to_string(),
+        }]
+    );
+    let grid = render(&mut app, true);
+    assert!(grid.contains("installing…"), "busy line:\n{grid}");
+    // Everything except Esc is swallowed while the install runs.
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    assert_eq!(app.drain_actions(), Vec::new());
+
+    app.apply(crate::ChatEvent::KitInstallResult {
+        name: "pi".to_string(),
+        error: None,
+        receipt: vec!["published pi-read sha256:aaaa".to_string()],
+    });
+    assert_eq!(
+        app.drain_actions(),
+        vec![crate::Action::FetchKitStatus {
+            intent: crate::KitStatusIntent::Open
+        }]
+    );
+    app.apply(crate::ChatEvent::KitStatus {
+        intent: crate::KitStatusIntent::Open,
+        installed: vec![installed_pi_row()],
+        recommended: vec![recommended_pi(Some("dist/pi-kit"))],
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("pi 0.1.0"),
+        "installed row after refresh:\n{grid}"
+    );
+    assert!(
+        !grid.contains("Install the pi kit"),
+        "installed kit still offered:\n{grid}"
+    );
+    assert!(
+        grid.contains("tools load at the next daemon startup"),
+        "status line:\n{grid}"
+    );
+    // The receipt landed in the transcript behind the modal.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("installed kit pi"), "notice title:\n{grid}");
+    assert!(
+        grid.contains("published pi-read sha256:aaaa"),
+        "receipt line:\n{grid}"
+    );
+}
+
+#[test]
+fn kit_install_failure_renders_inline_and_does_not_refresh() {
+    let mut app = app();
+    open_kits_from_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Enter));
+    let _ = app.drain_actions();
+    app.apply(crate::ChatEvent::KitInstallResult {
+        name: "pi".to_string(),
+        error: Some("fixture gate failed".to_string()),
+        receipt: Vec::new(),
+    });
+    assert_eq!(app.drain_actions(), Vec::new());
+    let grid = render(&mut app, true);
+    assert!(grid.contains("fixture gate failed"), "error line:\n{grid}");
+    assert!(
+        grid.contains("Install the pi kit"),
+        "retry row after failure:\n{grid}"
+    );
+}
+
+#[test]
+fn kit_step_esc_returns_to_home_and_missing_source_shows_guidance() {
+    let mut app = app();
+    open_kits_from_home(&mut app);
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Providers"), "back to home:\n{grid}");
+
+    // Reopen with no local kit directory: no install row, manual guidance.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    app.apply(crate::ChatEvent::KitStatus {
+        intent: crate::KitStatusIntent::Open,
+        installed: Vec::new(),
+        recommended: vec![recommended_pi(None)],
+    });
+    let grid = render(&mut app, true);
+    assert!(
+        grid.contains("verlet kit install"),
+        "manual guidance:\n{grid}"
+    );
+    assert!(
+        !grid.contains("Install the pi kit"),
+        "sourceless install row:\n{grid}"
+    );
+}
+
+#[test]
+fn first_run_model_selection_offers_the_kit_once() {
+    let mut app = app();
+    app.apply(crate::ChatEvent::NoConfiguredProviders);
+    let _ = app.drain_actions();
+    // Dismiss the first-run catalog window so the offer opens over nothing.
+    app.apply(crate::ChatEvent::ProviderCatalog {
+        providers: catalog_rows(),
+    });
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+
+    app.apply(crate::ChatEvent::ModelSelected {
+        provider_id: "anthropic".to_string(),
+        model: "claude-best".to_string(),
+    });
+    assert_eq!(
+        app.drain_actions(),
+        vec![crate::Action::FetchKitStatus {
+            intent: crate::KitStatusIntent::OfferIfMissing
+        }]
+    );
+    app.apply(crate::ChatEvent::KitStatus {
+        intent: crate::KitStatusIntent::OfferIfMissing,
+        installed: Vec::new(),
+        recommended: vec![recommended_pi(Some("dist/pi-kit"))],
+    });
+    let grid = render(&mut app, true);
+    assert!(grid.contains("Tool kits"), "offer opened:\n{grid}");
+    // Opened by the offer (no Home rows behind it): Esc closes the window.
+    let _ = app.handle(&key(tuika::KeyCode::Esc));
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Tool kits"), "offer closed:\n{grid}");
+
+    // The offer is one-shot per first-run session.
+    app.apply(crate::ChatEvent::ModelSelected {
+        provider_id: "anthropic".to_string(),
+        model: "claude-best".to_string(),
+    });
+    assert_eq!(app.drain_actions(), Vec::new());
+}
+
+#[test]
+fn kit_offer_stays_closed_when_the_kit_is_already_installed() {
+    let mut app = app();
+    app.apply(crate::ChatEvent::KitStatus {
+        intent: crate::KitStatusIntent::OfferIfMissing,
+        installed: vec![installed_pi_row()],
+        recommended: vec![recommended_pi(Some("dist/pi-kit"))],
+    });
+    let grid = render(&mut app, true);
+    assert!(!grid.contains("Tool kits"), "offer opened anyway:\n{grid}");
 }

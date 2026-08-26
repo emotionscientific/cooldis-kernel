@@ -78,6 +78,13 @@ pub enum Action {
     /// Delete the provider's stored credential; the host answers with
     /// [`ChatEvent::CredentialCleared`] (or an error notice).
     ClearCredential { provider_id: String },
+    /// Read the installed-kit records and probe the recommended kit
+    /// sources; the host answers with [`ChatEvent::KitStatus`].
+    FetchKitStatus { intent: KitStatusIntent },
+    /// Install a kit from a local directory through the `verlet kit
+    /// install` pipeline; the host answers with
+    /// [`ChatEvent::KitInstallResult`].
+    InstallKit { name: String, source: String },
 }
 
 /// How an OAuth-capable provider signs in.
@@ -116,6 +123,39 @@ pub struct CatalogProviderRow {
     pub model_count: usize,
     /// The model auto-selected after a successful first credential.
     pub default_model: Option<String>,
+}
+
+/// Why kit status was fetched, so [`ChatEvent::KitStatus`] knows whether to
+/// open the setup window's kit step unconditionally or only when the
+/// recommended kit is missing (the first-run offer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KitStatusIntent {
+    /// Open (or refresh) the kit step.
+    Open,
+    /// First-run offer: open only if a recommended kit is not installed.
+    OfferIfMissing,
+}
+
+/// One installed kit, as read from the host's installed-kit records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledKitRow {
+    pub name: String,
+    pub version: Option<String>,
+    /// Model-facing tool names, in record order.
+    pub tools: Vec<String>,
+}
+
+/// One kit the host recommends installing. The recommendation list is
+/// hardcoded host-side; the UI only renders it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecommendedKitRow {
+    pub name: String,
+    /// One-line description shown next to the install row.
+    pub blurb: String,
+    /// A kit directory the host found for this kit (first existing
+    /// candidate). None means the source is not on this machine and the
+    /// step shows manual install guidance instead of an Install row.
+    pub source: Option<String>,
 }
 
 /// A custom provider definition submitted from the setup window's form. The
@@ -226,6 +266,20 @@ pub enum ChatEvent {
     },
     /// The provider's stored credential was deleted.
     CredentialCleared { provider_id: String },
+    /// Installed kits plus the host's recommendations: opens (or refreshes)
+    /// the setup window's kit step per the intent.
+    KitStatus {
+        intent: KitStatusIntent,
+        installed: Vec<InstalledKitRow>,
+        recommended: Vec<RecommendedKitRow>,
+    },
+    /// A kit install finished. `receipt` carries the same lines `verlet kit
+    /// install` prints; shown as a transcript notice.
+    KitInstallResult {
+        name: String,
+        error: Option<String>,
+        receipt: Vec<String>,
+    },
     /// The thread's runtime status changed ("idle", "running", ...).
     ThreadStatus(String),
     /// An informational notice for the transcript.

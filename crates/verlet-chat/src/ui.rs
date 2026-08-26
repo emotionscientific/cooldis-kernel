@@ -274,6 +274,31 @@ fn modal(
                         ],
                     )
                 }
+                crate::app::setup::SetupStep::Kits {
+                    installed,
+                    recommended,
+                    state,
+                    busy,
+                    error,
+                    notice,
+                    ..
+                } => {
+                    let (content, rows_h) = setup_kits(
+                        installed,
+                        recommended,
+                        state,
+                        *busy,
+                        error.as_deref(),
+                        notice.as_deref(),
+                        theme,
+                    );
+                    (
+                        "Tool kits".to_string(),
+                        content,
+                        rows_h,
+                        vec![("↑↓", "move"), ("⏎", "select"), ("esc", "back")],
+                    )
+                }
             }
         } else if let Some(picker) = app.picker.as_ref() {
             let (content, rows_h) = model_picker(picker, theme, content_w);
@@ -436,6 +461,112 @@ fn setup_provider_menu(
         height += 1;
     } else if let Some(message) = error {
         column = column.fixed(1, modal_error(message, theme));
+        height += 1;
+    }
+    (tuika::view::element(column), height)
+}
+
+/// The tool-kit step: installed kits, the recommended installs, and the
+/// install/back list.
+fn setup_kits(
+    installed: &[crate::InstalledKitRow],
+    recommended: &[crate::RecommendedKitRow],
+    state: &tuika::components::SelectState,
+    busy: bool,
+    error: Option<&str>,
+    notice: Option<&str>,
+    theme: &tuika::style::Theme,
+) -> (tuika::view::Element, u16) {
+    let mut info: Vec<ratatui::text::Line<'static>> = Vec::new();
+    if installed.is_empty() {
+        info.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+            "No kits installed yet.",
+            theme.muted_style(),
+        )));
+    }
+    for kit in installed {
+        let version = kit
+            .version
+            .as_deref()
+            .map(|version| format!(" {version}"))
+            .unwrap_or_default();
+        info.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
+                format!("{}{version}  ", kit.name),
+                ratatui::style::Style::default().fg(theme.text),
+            ),
+            ratatui::text::Span::styled(kit.tools.join(" "), theme.muted_style()),
+        ]));
+    }
+    for kit in recommended {
+        if kit.source.is_none() && !installed.iter().any(|record| record.name == kit.name) {
+            info.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!(
+                    "{} kit source not found here; run: verlet kit install <kit-dir>",
+                    kit.name
+                ),
+                theme.muted_style(),
+            )));
+        }
+    }
+    let options = crate::app::setup::kit_step_options(installed, recommended);
+    let mut lines: Vec<ratatui::text::Line<'static>> = options
+        .iter()
+        .map(|option| {
+            let crate::app::setup::KitOption::Install { index } = option;
+            let kit = &recommended[*index];
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    format!("Install the {} kit  ", kit.name),
+                    ratatui::style::Style::default().fg(theme.accent_alt),
+                ),
+                ratatui::text::Span::styled(kit.blurb.clone(), theme.muted_style()),
+            ])
+        })
+        .collect();
+    lines.push(ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled(
+            "Back  ",
+            ratatui::style::Style::default().fg(theme.accent_alt),
+        ),
+        ratatui::text::Span::styled("leave tools".to_string(), theme.muted_style()),
+    ]));
+    let info_h = info.len() as u16;
+    let count = lines.len() as u16;
+    let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+    let mut column = tuika::components::Flex::column();
+    if info_h > 0 {
+        column = column.fixed(
+            info_h,
+            tuika::view::element(tuika::components::Text::new(info)),
+        );
+    }
+    column = column.grow(1, tuika::view::element(list));
+    let mut height = info_h + count;
+    if busy {
+        column = column.fixed(
+            1,
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    "installing… builds and proves each tool, this can take a while",
+                    theme.muted_style(),
+                )),
+            ])),
+        );
+        height += 1;
+    } else if let Some(message) = error {
+        column = column.fixed(1, modal_error(message, theme));
+        height += 1;
+    } else if let Some(message) = notice {
+        column = column.fixed(
+            1,
+            tuika::view::element(tuika::components::Text::new(vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    message.to_string(),
+                    ratatui::style::Style::default().fg(theme.accent),
+                )),
+            ])),
+        );
         height += 1;
     }
     (tuika::view::element(column), height)

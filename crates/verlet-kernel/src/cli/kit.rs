@@ -96,10 +96,62 @@ async fn kit_install(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_kit_install_args(args)?;
-    let source = verlet_operations::kit_package::KitSource::load(&options.kit_path)?;
+    let outcome = install_kit_from(
+        &options.kit_path,
+        &options.registry_root,
+        &options.kits_root,
+    )
+    .await?;
+    for line in outcome.receipt_lines() {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// What one kit install produced, for receipts. The chat setup window and
+/// the CLI print the same [`Self::receipt_lines`].
+pub(crate) struct KitInstallOutcome {
+    pub installed: verlet_operations::kit_package::InstalledKitRecord,
+    pub published: Vec<verlet_operations::operation_store::PublishedOperationRecord>,
+    pub record_path: std::path::PathBuf,
+}
+
+impl KitInstallOutcome {
+    pub(crate) fn receipt_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("installed kit {}", self.installed.name),
+            format!(
+                "version {}",
+                self.installed.version.as_deref().unwrap_or("<none>")
+            ),
+            format!("source sha256:{}", self.installed.source_hash),
+        ];
+        for record in &self.published {
+            lines.push(format!(
+                "published {} sha256:{}",
+                record.name, record.active_artifact_hash
+            ));
+        }
+        for tool in &self.installed.tools {
+            lines.push(format!("tool {} {}", tool.tool_name, tool.operation_ref));
+        }
+        lines.push(format!("record {}", self.record_path.display()));
+        lines.push("default manifest refreshes at the next daemon startup".to_string());
+        lines
+    }
+}
+
+/// The install pipeline behind both `verlet kit install` and the chat setup
+/// window's kit step (EMO-611). See [`kit_install`] for the ordering
+/// contract.
+pub(crate) async fn install_kit_from(
+    kit_path: &std::path::Path,
+    registry_root: &std::path::Path,
+    kits_root: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<KitInstallOutcome> {
+    let source = verlet_operations::kit_package::KitSource::load(kit_path)?;
     let members = source.member_packages()?;
-    let registry =
-        verlet_operations::operation_store::LocalOperationRegistry::new(&options.registry_root);
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
     let mut published = Vec::with_capacity(members.len());
     for member in members {
         let member_name = member.manifest.identity.name.clone();
@@ -155,29 +207,17 @@ async fn kit_install(
         installed_at_ms: wall_clock_ms(),
         tools,
     };
-    let store = verlet_operations::kit_package::InstalledKitStore::new(&options.kits_root);
+    let store = verlet_operations::kit_package::InstalledKitStore::new(kits_root);
     store
         .save(&installed)
         .map_err(|err| kit_install_record_error(err.into(), &published))?;
 
-    println!("installed kit {}", installed.name);
-    println!(
-        "version {}",
-        installed.version.as_deref().unwrap_or("<none>")
-    );
-    println!("source sha256:{}", installed.source_hash);
-    for record in &published {
-        println!(
-            "published {} sha256:{}",
-            record.name, record.active_artifact_hash
-        );
-    }
-    for tool in &installed.tools {
-        println!("tool {} {}", tool.tool_name, tool.operation_ref);
-    }
-    println!("record {}", store.record_path(&installed.name).display());
-    println!("default manifest refreshes at the next daemon startup");
-    Ok(())
+    let record_path = store.record_path(&installed.name);
+    Ok(KitInstallOutcome {
+        installed,
+        published,
+        record_path,
+    })
 }
 
 /// Human list: one line per kit (name, version, tool count, source); with

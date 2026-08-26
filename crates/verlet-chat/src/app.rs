@@ -123,6 +123,9 @@ pub struct App {
     /// First-run gate: no configured providers yet. The footer nags until a
     /// credential lands or a model is selected.
     pub(crate) needs_provider: bool,
+    /// First-run tool offer: set with `needs_provider`, spent when the
+    /// first real model selection triggers the kit offer (EMO-611).
+    pub(crate) kit_offer_pending: bool,
     /// Submitted keys retained until one host reply so late generic errors
     /// can be redacted after the user leaves the input step.
     pub(crate) pending_key_redactions: Vec<(String, String)>,
@@ -163,6 +166,7 @@ impl App {
             setup: None,
             pending_selection: None,
             needs_provider: false,
+            kit_offer_pending: false,
             pending_key_redactions: Vec::new(),
             meta,
             turn_state: "idle".to_string(),
@@ -769,6 +773,14 @@ impl App {
                 self.pending_selection = None;
                 if provider_id != "local" {
                     self.needs_provider = false;
+                    if self.kit_offer_pending {
+                        // First-run: provider and model are set; offer the
+                        // recommended tools once.
+                        self.kit_offer_pending = false;
+                        self.actions.push(crate::Action::FetchKitStatus {
+                            intent: crate::KitStatusIntent::OfferIfMissing,
+                        });
+                    }
                 }
                 self.meta.model_label = format!("{provider_id}/{model}");
                 let body = if self.turn_active {
@@ -799,6 +811,16 @@ impl App {
             crate::ChatEvent::CredentialCleared { provider_id } => {
                 self.apply_credential_cleared(provider_id);
             }
+            crate::ChatEvent::KitStatus {
+                intent,
+                installed,
+                recommended,
+            } => self.apply_kit_status(intent, installed, recommended),
+            crate::ChatEvent::KitInstallResult {
+                name,
+                error,
+                receipt,
+            } => self.apply_kit_install_result(name, error, receipt),
             crate::ChatEvent::ThreadStatus(status) => {
                 if !self.turn_active {
                     self.turn_state = status;

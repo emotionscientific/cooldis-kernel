@@ -251,6 +251,11 @@ the daemon again and the removed kit's tools are gone from the default
 manifest. Tool rows are sorted by kit name and tool name, and duplicate model
 tool names across kits fail daemon startup instead of shadowing one another.
 
+The chat TUI wraps the same pipeline: the `/setup` window's "Install tools"
+step (and its one-shot first-run offer) runs `verlet kit install` for the
+recommended pi kit from a local kit directory. See
+[Chat](chat.md).
+
 ### Pi File Tools Kit
 
 `agent-tools/pi-kit/` is the first checked-in kit. It packages the four Wasm

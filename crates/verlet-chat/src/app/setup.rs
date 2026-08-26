@@ -252,6 +252,23 @@ pub(crate) enum SetupStep {
         busy: CustomBusy,
         error: Option<String>,
     },
+    /// The tool-kit step: installed kits plus the host's recommendations
+    /// (EMO-611). Opened from the Home "Install tools" row or by the
+    /// first-run offer after the first model lands.
+    Kits {
+        /// Catalog rows for the Esc return to Home; empty when the step was
+        /// opened by the first-run offer (Esc then closes the window).
+        rows: Vec<crate::CatalogProviderRow>,
+        installed: Vec<crate::InstalledKitRow>,
+        recommended: Vec<crate::RecommendedKitRow>,
+        state: tuika::components::SelectState,
+        /// An install is in flight; only Esc works (the install keeps
+        /// running and reports to the transcript).
+        busy: bool,
+        error: Option<String>,
+        /// The post-install status line ("installed pi; ...").
+        notice: Option<String>,
+    },
     /// A model list was requested for the chosen provider; the window closes
     /// into the (scoped) model picker when [`crate::ChatEvent::Models`]
     /// arrives.
@@ -363,10 +380,35 @@ pub(crate) fn overview_rows(rows: &[crate::CatalogProviderRow]) -> Vec<&crate::C
 }
 
 /// Fixed actions appended under the overview rows.
-pub(crate) const HOME_ACTIONS: [(&str, &str); 2] = [
+pub(crate) const HOME_ACTIONS: [(&str, &str); 3] = [
     ("Connect a provider", "browse the catalog"),
     ("Add custom provider", "OpenAI- or Anthropic-compatible URL"),
+    ("Install tools", "kits of agent tools for this instance"),
 ];
+
+/// One selectable row of the kit step, ahead of the fixed Back row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum KitOption {
+    /// Install `recommended[index]` (only rows with a found source and no
+    /// installed record become options).
+    Install { index: usize },
+}
+
+/// The selectable rows of the kit step. The Back row is appended by the
+/// renderer and handler as index `options.len()`.
+pub(crate) fn kit_step_options(
+    installed: &[crate::InstalledKitRow],
+    recommended: &[crate::RecommendedKitRow],
+) -> Vec<KitOption> {
+    recommended
+        .iter()
+        .enumerate()
+        .filter(|(_, kit)| {
+            kit.source.is_some() && !installed.iter().any(|record| record.name == kit.name)
+        })
+        .map(|(index, _)| KitOption::Install { index })
+        .collect()
+}
 
 /// The status suffix for a catalog row, pi-style.
 pub(crate) fn catalog_status(row: &crate::CatalogProviderRow) -> String {
@@ -513,6 +555,7 @@ impl crate::app::App {
     /// First-run gate: no configured providers, open the catalog picker.
     pub(crate) fn apply_no_configured_providers(&mut self) {
         self.needs_provider = true;
+        self.kit_offer_pending = true;
         if self.setup.is_none() && self.picker.is_none() {
             self.setup = Some(SetupStep::AwaitCatalog {
                 intent: CatalogIntent::Catalog,
@@ -660,6 +703,25 @@ impl crate::app::App {
                     error,
                 })
             }
+            Some(SetupStep::Kits {
+                installed,
+                recommended,
+                state,
+                busy,
+                error,
+                notice,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::Kits {
+                    rows,
+                    installed,
+                    recommended,
+                    state,
+                    busy,
+                    error,
+                    notice,
+                })
+            }
             // Stale: the window was dismissed while the fetch was in flight.
             step @ (None | Some(SetupStep::AwaitModels { .. })) => self.setup = step,
         }
@@ -785,6 +847,24 @@ impl crate::app::App {
                 busy,
                 error,
             } => self.handle_custom_form(event, rows, form, editing, busy, error),
+            SetupStep::Kits {
+                rows,
+                installed,
+                recommended,
+                state,
+                busy,
+                error,
+                notice,
+            } => self.handle_kits(
+                event,
+                rows,
+                installed,
+                recommended,
+                state,
+                busy,
+                error,
+                notice,
+            ),
             step @ (SetupStep::AwaitModels { .. } | SetupStep::AwaitCatalog { .. }) => {
                 self.setup = Some(step);
             }
@@ -818,7 +898,7 @@ impl crate::app::App {
                     });
                 } else if index == overview_len {
                     self.open_catalog(rows);
-                } else {
+                } else if index == overview_len + 1 {
                     self.setup = Some(SetupStep::CustomForm {
                         rows,
                         form: Box::new(CustomForm::new()),
@@ -826,6 +906,13 @@ impl crate::app::App {
                         busy: CustomBusy::Idle,
                         error: None,
                     });
+                } else {
+                    // "Install tools": stay on Home until the status
+                    // arrives; ChatEvent::KitStatus opens the kit step.
+                    self.actions.push(crate::Action::FetchKitStatus {
+                        intent: crate::KitStatusIntent::Open,
+                    });
+                    self.setup = Some(SetupStep::Home { rows, state });
                 }
             }
             tuika::event::InputOutcome::Cancelled => {
@@ -1850,6 +1937,241 @@ impl crate::app::App {
         }
         self.notice(crate::cells::Tone::Error, title, body);
     }
+
+    fn open_kits(
+        &mut self,
+        rows: Vec<crate::CatalogProviderRow>,
+        installed: Vec<crate::InstalledKitRow>,
+        recommended: Vec<crate::RecommendedKitRow>,
+    ) {
+        self.popup = None;
+        let mut state = tuika::components::SelectState::new();
+        state.select(Some(0));
+        self.setup = Some(SetupStep::Kits {
+            rows,
+            installed,
+            recommended,
+            state,
+            busy: false,
+            error: None,
+            notice: None,
+        });
+    }
+
+    /// Fold an arrived kit status into the window per the fetch intent.
+    pub(crate) fn apply_kit_status(
+        &mut self,
+        intent: crate::KitStatusIntent,
+        installed: Vec<crate::InstalledKitRow>,
+        recommended: Vec<crate::RecommendedKitRow>,
+    ) {
+        match self.setup.take() {
+            // The step is open (install-result refresh): swap the lists in
+            // place, keeping the busy flag and status lines.
+            Some(SetupStep::Kits {
+                rows,
+                state,
+                busy,
+                error,
+                notice,
+                ..
+            }) => {
+                self.setup = Some(SetupStep::Kits {
+                    rows,
+                    installed,
+                    recommended,
+                    state,
+                    busy,
+                    error,
+                    notice,
+                })
+            }
+            // The Home "Install tools" row, or the first-run offer landing
+            // while the window shows Home: open over the Home rows. The
+            // offer only opens when a recommended kit is actually missing.
+            Some(SetupStep::Home { rows, state }) => {
+                if intent == crate::KitStatusIntent::Open
+                    || any_recommended_missing(&installed, &recommended)
+                {
+                    self.open_kits(rows, installed, recommended);
+                } else {
+                    self.setup = Some(SetupStep::Home { rows, state });
+                }
+            }
+            None => {
+                let open = match intent {
+                    crate::KitStatusIntent::Open => true,
+                    crate::KitStatusIntent::OfferIfMissing => {
+                        any_recommended_missing(&installed, &recommended) && self.picker.is_none()
+                    }
+                };
+                if open {
+                    self.open_kits(Vec::new(), installed, recommended);
+                }
+            }
+            // Stale: the user moved into another step while the fetch was
+            // in flight; never clobber a mid-flow screen.
+            step => self.setup = step,
+        }
+    }
+
+    /// An install finished: always post the receipt (or failure) to the
+    /// transcript; update the kit step if it is still open.
+    pub(crate) fn apply_kit_install_result(
+        &mut self,
+        name: String,
+        error: Option<String>,
+        receipt: Vec<String>,
+    ) {
+        match &error {
+            Some(message) => self.notice(
+                crate::cells::Tone::Error,
+                format!("kit install failed: {name}"),
+                vec![message.clone()],
+            ),
+            None => self.notice(
+                crate::cells::Tone::Info,
+                format!("installed kit {name}"),
+                receipt,
+            ),
+        }
+        if let Some(SetupStep::Kits {
+            rows,
+            installed,
+            recommended,
+            state,
+            notice,
+            ..
+        }) = self.setup.take()
+        {
+            let succeeded = error.is_none();
+            self.setup = Some(SetupStep::Kits {
+                rows,
+                installed,
+                recommended,
+                state,
+                busy: false,
+                error,
+                notice: if succeeded {
+                    Some(format!(
+                        "installed {name}; tools load at the next daemon startup"
+                    ))
+                } else {
+                    notice
+                },
+            });
+            if succeeded {
+                // Refresh so the installed list reflects the new record.
+                self.actions.push(crate::Action::FetchKitStatus {
+                    intent: crate::KitStatusIntent::Open,
+                });
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_kits(
+        &mut self,
+        event: &tuika::event::Event,
+        rows: Vec<crate::CatalogProviderRow>,
+        installed: Vec<crate::InstalledKitRow>,
+        recommended: Vec<crate::RecommendedKitRow>,
+        mut state: tuika::components::SelectState,
+        busy: bool,
+        error: Option<String>,
+        notice: Option<String>,
+    ) {
+        // While the install runs only Esc works; leaving is safe (the
+        // install keeps running and reports to the transcript).
+        if busy {
+            if matches!(event, tuika::event::Event::Key(key) if key.plain() && key.code == tuika::event::KeyCode::Esc)
+            {
+                self.leave_kits(rows);
+            } else {
+                self.setup = Some(SetupStep::Kits {
+                    rows,
+                    installed,
+                    recommended,
+                    state,
+                    busy,
+                    error,
+                    notice,
+                });
+            }
+            return;
+        }
+        let options = kit_step_options(&installed, &recommended);
+        let total = options.len() + 1;
+        match state.handle(event, total) {
+            tuika::event::InputOutcome::Submitted => {
+                match state.selected().and_then(|index| options.get(index)) {
+                    Some(KitOption::Install { index }) => {
+                        let kit = &recommended[*index];
+                        let Some(source) = kit.source.clone() else {
+                            // Unreachable by construction (options require a
+                            // source); keep the step unchanged if it happens.
+                            self.setup = Some(SetupStep::Kits {
+                                rows,
+                                installed,
+                                recommended,
+                                state,
+                                busy,
+                                error,
+                                notice,
+                            });
+                            return;
+                        };
+                        self.actions.push(crate::Action::InstallKit {
+                            name: kit.name.clone(),
+                            source,
+                        });
+                        self.setup = Some(SetupStep::Kits {
+                            rows,
+                            installed,
+                            recommended,
+                            state,
+                            busy: true,
+                            error: None,
+                            notice: None,
+                        });
+                    }
+                    // The trailing Back row (or no selection).
+                    _ => self.leave_kits(rows),
+                }
+            }
+            tuika::event::InputOutcome::Cancelled => self.leave_kits(rows),
+            _ => {
+                self.setup = Some(SetupStep::Kits {
+                    rows,
+                    installed,
+                    recommended,
+                    state,
+                    busy,
+                    error,
+                    notice,
+                });
+            }
+        }
+    }
+
+    /// Esc/Back from the kit step: Home when it was entered from Home,
+    /// closed when the first-run offer opened it directly.
+    fn leave_kits(&mut self, rows: Vec<crate::CatalogProviderRow>) {
+        if rows.is_empty() {
+            self.setup = None;
+        } else {
+            self.open_home(rows);
+        }
+    }
+}
+
+fn any_recommended_missing(
+    installed: &[crate::InstalledKitRow],
+    recommended: &[crate::RecommendedKitRow],
+) -> bool {
+    recommended
+        .iter()
+        .any(|kit| !installed.iter().any(|record| record.name == kit.name))
 }
 
 fn error_summary(title: &str, body: &[String]) -> String {
