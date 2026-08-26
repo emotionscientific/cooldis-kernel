@@ -6808,6 +6808,20 @@ struct PendingToolCall {
     arguments: String,
 }
 
+fn tool_call_id_aliases(id: &str) -> Vec<&str> {
+    let mut aliases = vec![id];
+    // The canonical OpenAI Responses id packs call_id and item_id with the
+    // first separator. Treat the remainder as one opaque item id.
+    if let Some((call_id, item_id)) = id.split_once('|') {
+        for component in [call_id, item_id] {
+            if !component.is_empty() && !aliases.contains(&component) {
+                aliases.push(component);
+            }
+        }
+    }
+    aliases
+}
+
 fn response_from_stream_events(
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     stream_events: Vec<verlet_provider::ProviderStreamEvent>,
@@ -6820,6 +6834,18 @@ fn response_from_stream_events(
     let mut saw_done = false;
     let mut tool_order = Vec::new();
     let mut tool_calls = std::collections::BTreeMap::<String, PendingToolCall>::new();
+    let mut completed_tool_call_ids = std::collections::BTreeSet::new();
+    let mut completed_tool_call_aliases = std::collections::BTreeSet::new();
+    for event in &stream_events {
+        if let verlet_provider::ProviderStreamEvent::Content {
+            content: verlet_history::CanonicalContent::ToolCall { id, .. },
+        } = event
+        {
+            completed_tool_call_ids.insert(id.clone());
+            completed_tool_call_aliases
+                .extend(tool_call_id_aliases(id).into_iter().map(str::to_string));
+        }
+    }
 
     for event in stream_events {
         match event {
@@ -6852,23 +6878,44 @@ fn response_from_stream_events(
                 name,
                 arguments_delta,
             } => {
+                // Completed content is authoritative. Exact-id deltas are the
+                // same call even when named; component aliases are merged only
+                // while nameless so a distinct named call is not erased by an
+                // accidental id collision.
+                if completed_tool_call_ids.contains(&id)
+                    || (name.is_none() && completed_tool_call_aliases.contains(&id))
+                {
+                    continue;
+                }
                 if !tool_calls.contains_key(&id) {
                     tool_order.push(id.clone());
+                }
+                let started_name = if tool_calls
+                    .get(&id)
+                    .and_then(|pending| pending.name.as_ref())
+                    .is_none()
+                {
+                    name.clone()
+                } else {
+                    None
+                };
+                let call_id = id.clone();
+                let pending = tool_calls.entry(id).or_default();
+                if let Some(name) = &name {
+                    pending.name = Some(name.clone());
+                }
+                pending.arguments.push_str(&arguments_delta);
+                if let Some(name) = started_name {
                     crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
                         crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
-                            call_id: id.clone(),
-                            name: name.clone().unwrap_or_default(),
+                            call_id,
+                            name,
                             input: serde_json::json!({}),
                         },
                     );
                 }
-                let pending = tool_calls.entry(id).or_default();
-                if name.is_some() {
-                    pending.name = name;
-                }
-                pending.arguments.push_str(&arguments_delta);
             }
             verlet_provider::ProviderStreamEvent::Content { content: incoming } => {
                 if let verlet_history::CanonicalContent::Text {
@@ -6943,6 +6990,11 @@ fn response_from_stream_events(
         let Some(pending) = tool_calls.remove(&id) else {
             continue;
         };
+        let Some(name) = pending.name else {
+            return Err(stream_assembly_error(format!(
+                "streamed tool call {id} is missing a name"
+            )));
+        };
         let arguments = if pending.arguments.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -6951,9 +7003,7 @@ fn response_from_stream_events(
             })?
         };
         content.push(verlet_history::CanonicalContent::tool_call(
-            id,
-            pending.name.unwrap_or_default(),
-            arguments,
+            id, name, arguments,
         ));
     }
 

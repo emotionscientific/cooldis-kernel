@@ -3090,6 +3090,289 @@ async fn stream_assembly_requires_terminal_done() {
     }));
 }
 
+#[test]
+fn stream_assembly_merges_item_id_deltas_into_combined_completed_tool_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, mut runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let response = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "{\"path\":\"notes.txt\",".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "\"content\":\"hello\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Content {
+                content: verlet_history::CanonicalContent::tool_call(
+                    "call_1|fc_1",
+                    "write",
+                    serde_json::json!({"path": "notes.txt", "content": "hello"}),
+                ),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap();
+
+    assert_eq!(
+        response.content,
+        vec![verlet_history::CanonicalContent::tool_call(
+            "call_1|fc_1",
+            "write",
+            serde_json::json!({"path": "notes.txt", "content": "hello"}),
+        )]
+    );
+    let started = std::iter::from_fn(|| runtime_events.try_recv().ok())
+        .filter_map(|event| {
+            match event {
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                match event.kind {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
+                        call_id,
+                        name,
+                        ..
+                    } => Some((call_id, name)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        started,
+        vec![("call_1|fc_1".to_string(), "write".to_string())]
+    );
+}
+
+#[test]
+fn stream_assembly_rejects_nameless_pending_tool_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, _runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let error = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "{\"path\":\"notes.txt\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.class,
+        verlet_runtime_contracts::RuntimeModelRequestErrorClass::StreamAssembly
+    );
+    assert_eq!(error.message, "streamed tool call fc_1 is missing a name");
+}
+
+#[test]
+fn stream_assembly_ignores_item_id_deltas_after_completed_tool_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, mut runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let completed = verlet_history::CanonicalContent::tool_call(
+        "call_1|fc_1",
+        "write",
+        serde_json::json!({"path": "notes.txt"}),
+    );
+    let response = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::Content {
+                content: completed.clone(),
+            },
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "{\"path\":\"notes.txt\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap();
+
+    assert_eq!(response.content, vec![completed]);
+    assert_eq!(
+        std::iter::from_fn(|| runtime_events.try_recv().ok())
+            .filter(|event| matches!(
+                event,
+                crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime {
+                    event: crate::kernel::runtime_host::runtime_events::RuntimeEvent {
+                        kind: crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted { .. },
+                        ..
+                    },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stream_assembly_emits_one_started_event_for_delta_and_completed_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, mut runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let response = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "call_1".to_string(),
+                name: Some("bash".to_string()),
+                arguments_delta: "{\"command\":\"pwd\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Content {
+                content: verlet_history::CanonicalContent::tool_call(
+                    "call_1",
+                    "bash",
+                    serde_json::json!({"command": "pwd"}),
+                ),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap();
+
+    assert_eq!(response.content.len(), 1);
+    let started = std::iter::from_fn(|| runtime_events.try_recv().ok())
+        .filter_map(|event| {
+            match event {
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                match event.kind {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
+                        call_id,
+                        name,
+                        input,
+                    } => Some((call_id, name, input)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        started,
+        vec![(
+            "call_1".to_string(),
+            "bash".to_string(),
+            serde_json::json!({"command": "pwd"}),
+        )]
+    );
+}
+
+#[test]
+fn stream_assembly_preserves_named_call_that_collides_with_completed_id_component() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, mut runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let response = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "call_1".to_string(),
+                name: Some("read".to_string()),
+                arguments_delta: "{\"path\":\"input.txt\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Content {
+                content: verlet_history::CanonicalContent::tool_call(
+                    "call_1|fc_1",
+                    "write",
+                    serde_json::json!({"path": "output.txt"}),
+                ),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap();
+
+    assert_eq!(response.content.len(), 2);
+    assert!(response.content.iter().any(|content| matches!(
+        content,
+        verlet_history::CanonicalContent::ToolCall { id, name, arguments }
+            if id == "call_1"
+                && name == "read"
+                && arguments == &serde_json::json!({"path": "input.txt"})
+    )));
+    assert!(response.content.iter().any(|content| matches!(
+        content,
+        verlet_history::CanonicalContent::ToolCall { id, name, arguments }
+            if id == "call_1|fc_1"
+                && name == "write"
+                && arguments == &serde_json::json!({"path": "output.txt"})
+    )));
+    let started_ids = std::iter::from_fn(|| runtime_events.try_recv().ok())
+        .filter_map(|event| {
+            match event {
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                match event.kind {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
+                        call_id,
+                        ..
+                    } => Some(call_id),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        started_ids,
+        std::collections::BTreeSet::from(["call_1".to_string(), "call_1|fc_1".to_string(),])
+    );
+}
+
+#[test]
+fn tool_call_id_aliases_split_only_once_and_omit_empty_components() {
+    assert_eq!(super::tool_call_id_aliases("call_1"), vec!["call_1"]);
+    assert_eq!(
+        super::tool_call_id_aliases("call_1|fc_1"),
+        vec!["call_1|fc_1", "call_1", "fc_1"]
+    );
+    assert_eq!(
+        super::tool_call_id_aliases("call_1|namespace|fc_1"),
+        vec!["call_1|namespace|fc_1", "call_1", "namespace|fc_1"]
+    );
+    assert_eq!(super::tool_call_id_aliases("|fc_1"), vec!["|fc_1", "fc_1"]);
+    assert_eq!(
+        super::tool_call_id_aliases("call_1|"),
+        vec!["call_1|", "call_1"]
+    );
+}
+
 #[tokio::test]
 async fn stream_and_complete_preserve_equivalent_final_history() {
     let complete_client =
