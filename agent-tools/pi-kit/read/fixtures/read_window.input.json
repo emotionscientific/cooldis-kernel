@@ -1,0 +1,8 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "path": "window.txt",
+    "offset": 2,
+    "limit": 2
+  }
+}

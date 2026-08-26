@@ -108,6 +108,74 @@ fn published_record_round_trips_and_validates_projection() {
 }
 
 #[test]
+fn pre_overlay_record_with_generated_mcp_name_still_validates() {
+    let manifest = test_manifest();
+    let registered = crate::RegisteredOperation {
+        name: "tailcat".to_string(),
+        manifest: manifest.clone(),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+    };
+    let generated_projections = registered.projections();
+    let generated_mcp_name = generated_projections.operations[0].mcp.tool_name.clone();
+    let record = crate::operation_store::PublishedOperationRecord {
+        schema_version: crate::operation_store::RECORD_SCHEMA_VERSION,
+        name: "tailcat".to_string(),
+        active_artifact_hash: "9".repeat(64),
+        manifest,
+        projections: generated_projections,
+        interface: Some(crate::tool_package::ToolInterfaceContract {
+            schema_version: crate::tool_package::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity: crate::tool_package::ToolPackageIdentity {
+                name: "tailcat".to_string(),
+                version: Some("0.1.0".to_string()),
+                description: Some("Pre-overlay fixture record.".to_string()),
+                owner: None,
+            },
+            runtime: crate::tool_package::ToolRuntimeContract {
+                kind: "wasm32-unknown-unknown".to_string(),
+                state: Some("stateless".to_string()),
+                module_path: None,
+                bin_path: Some(std::path::PathBuf::from("tool.wasm")),
+                release: None,
+                timeout_ms: None,
+                max_input_bytes: None,
+                max_output_bytes: None,
+            },
+            operations: vec![crate::tool_package::ToolOperationInterface {
+                name: "cat".to_string(),
+                description: None,
+                input_schema: serde_json::json!({"type": "string"}),
+                output_schema: serde_json::json!({"type": "string"}),
+                required_capabilities: std::collections::BTreeSet::new(),
+                command: None,
+                mcp: Some(crate::tool_package::ToolMcpContract {
+                    tool_name: generated_mcp_name,
+                    description: None,
+                }),
+                manual: None,
+            }],
+            fixtures: Vec::new(),
+        }),
+        capability_grants: std::collections::BTreeSet::new(),
+        metadata: std::collections::BTreeMap::new(),
+        source: crate::operation_store::PublishedOperationSource::Wasm {
+            bin_path: std::path::PathBuf::from("tool.wasm"),
+        },
+        build: crate::operation_store::PublishedOperationBuild {
+            artifact_path: std::path::PathBuf::from("tool.wasm"),
+            published_at_ms: 1,
+        },
+    };
+
+    let fixture_json = serde_json::to_vec(&record).unwrap();
+    let loaded: crate::operation_store::PublishedOperationRecord =
+        serde_json::from_slice(&fixture_json).unwrap();
+
+    loaded.validate().unwrap();
+}
+
+#[test]
 fn legacy_wasm_source_deserializes_after_import_source_is_added() {
     let source: crate::operation_store::PublishedOperationSource =
         serde_json::from_value(serde_json::json!({

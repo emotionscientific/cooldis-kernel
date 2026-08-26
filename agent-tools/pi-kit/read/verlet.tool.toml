@@ -1,0 +1,41 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "pi-read"
+version = "0.1.0"
+description = "Pi-parity file read over the attached VFS scope."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "../../wasm/read"
+state = "stateless"
+max_input_bytes = 65536
+max_output_bytes = 262144
+
+[[operations]]
+name = "read"
+description = "Read a file with Pi line offset/limit semantics and Pi truncation notices."
+input_schema = "schemas/read.input.json"
+output_schema = "schemas/read.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "pi read"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "read"
+
+[[fixtures]]
+name = "read_window"
+operation = "read"
+input = "fixtures/read_window.input.json"
+expect = "fixtures/read_window.expect.json"
+
+[[fixtures]]
+name = "read_missing_file"
+operation = "read"
+input = "fixtures/read_missing_file.input.json"
+expect = "fixtures/read_missing_file.expect.json"

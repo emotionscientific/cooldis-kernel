@@ -217,7 +217,7 @@ impl ToolInterfaceContract {
                     operation.name
                 ))
             })?;
-            let projection = projections
+            projections
                 .operations
                 .iter()
                 .find(|projection| projection.operation_name == operation.name)
@@ -227,14 +227,6 @@ impl ToolInterfaceContract {
                         operation.name
                     ))
                 })?;
-            if let Some(mcp) = &operation.mcp {
-                if mcp.tool_name != projection.mcp.tool_name {
-                    return Err(crate::VerletOperationsError::RuntimeFactory(format!(
-                        "tool package operation {:?} declares MCP tool {:?}, but generated projection is {:?}",
-                        operation.name, mcp.tool_name, projection.mcp.tool_name
-                    )));
-                }
-            }
             let mut missing_manifest_capabilities = Vec::new();
             for capability in &wasm_operation.required_capabilities {
                 if !operation.required_capabilities.contains(capability) {
@@ -282,7 +274,7 @@ impl ToolInterfaceContract {
                 manual: Some(manual),
             });
         }
-        Ok(Self {
+        let interface = Self {
             schema_version: TOOL_PACKAGE_SCHEMA_VERSION,
             identity: package.manifest.identity.clone(),
             runtime: package.manifest.runtime.clone(),
@@ -298,7 +290,9 @@ impl ToolInterfaceContract {
                     expect: fixture.expect.clone(),
                 })
                 .collect(),
-        })
+        };
+        interface.validate_unique_mcp_tool_names()?;
+        Ok(interface)
     }
 
     pub fn capability_requests(&self) -> std::collections::BTreeSet<String> {
@@ -314,6 +308,7 @@ impl ToolInterfaceContract {
         manifest: &verlet_abi::WasmOperationManifest,
         projections: &crate::OperationProjectionSet,
     ) -> crate::VerletResult<()> {
+        self.validate_unique_mcp_tool_names()?;
         if self.identity.name != record_name {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "tool interface identity {:?} does not match operation record {:?}",
@@ -348,10 +343,28 @@ impl ToolInterfaceContract {
                     })?;
                 if projection.mcp.tool_name != mcp.tool_name {
                     return Err(crate::VerletOperationsError::RuntimeFactory(format!(
-                        "tool interface operation {:?} MCP tool {:?} does not match generated projection {:?}",
+                        "tool interface operation {:?} MCP tool {:?} does not match stored projection {:?}",
                         operation.name, mcp.tool_name, projection.mcp.tool_name
                     )));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_unique_mcp_tool_names(&self) -> crate::VerletResult<()> {
+        let mut owners = std::collections::BTreeMap::new();
+        for operation in &self.operations {
+            let Some(mcp) = &operation.mcp else {
+                continue;
+            };
+            if let Some(first_operation) =
+                owners.insert(mcp.tool_name.clone(), operation.name.clone())
+            {
+                return Err(crate::VerletOperationsError::RuntimeFactory(format!(
+                    "tool interface operations.mcp.tool_name {:?} is duplicated by operations {:?} and {:?}",
+                    mcp.tool_name, first_operation, operation.name
+                )));
             }
         }
         Ok(())
@@ -832,6 +845,51 @@ mod tests {
 
         assert!(err.to_string().contains("JSON fixture"));
         assert!(err.to_string().contains("missing required"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tool_interface_rejects_duplicate_mcp_tool_names() {
+        let root = temp_package_root("tool-interface-duplicate-mcp-name");
+        write_json(&root.join("input.json"), r#"{"type":"object"}"#);
+        write_json(&root.join("output.json"), r#"{"type":"object"}"#);
+        let mut package = package_source(&root, Vec::new());
+        package.manifest.operations[0].mcp = Some(crate::tool_package::ToolMcpContract {
+            tool_name: "shared_name".to_string(),
+            description: None,
+        });
+        let mut second_operation = package.manifest.operations[0].clone();
+        second_operation.name = "summarize".to_string();
+        package.manifest.operations.push(second_operation);
+        let mut manifest = wasm_manifest(
+            verlet_abi::WasmOperationValueKind::Json,
+            verlet_abi::WasmOperationValueKind::Json,
+        );
+        manifest
+            .operations
+            .push(verlet_abi::WasmOperationDefinition {
+                id: 2,
+                name: "summarize".to_string(),
+                input: verlet_abi::WasmOperationValueKind::Json,
+                output: verlet_abi::WasmOperationValueKind::Json,
+                events: verlet_abi::WasmOperationEventKind::None,
+                mode: verlet_abi::WasmOperationMode::Sync,
+                required_capabilities: Vec::new(),
+            });
+        let projections = operation_projections(&manifest);
+
+        let err = crate::tool_package::ToolInterfaceContract::from_package(
+            &package,
+            &manifest,
+            &projections,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("operations.mcp.tool_name"), "{message}");
+        assert!(message.contains("shared_name"), "{message}");
+        assert!(message.contains("profile"), "{message}");
+        assert!(message.contains("summarize"), "{message}");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "root": { "type": "string" },
+    "args": {
+      "type": "object",
+      "properties": {
+        "pattern": { "type": "string" },
+        "path": { "type": ["string", "null"] },
+        "glob": { "type": ["string", "null"] },
+        "ignoreCase": { "type": "boolean" },
+        "literal": { "type": "boolean" },
+        "context": { "type": ["integer", "null"] },
+        "limit": { "type": ["integer", "null"] }
+      },
+      "required": ["pattern"],
+      "additionalProperties": true
+    }
+  },
+  "required": ["root", "args"],
+  "additionalProperties": true
+}

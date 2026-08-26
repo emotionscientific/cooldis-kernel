@@ -1,0 +1,8 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "pattern": "hit",
+    "path": "corpus",
+    "context": 1
+  }
+}

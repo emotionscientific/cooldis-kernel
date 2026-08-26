@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "start_line": { "type": "integer" },
+        "end_line": { "type": "integer" },
+        "total_lines": { "type": "integer" },
+        "truncation": {
+          "type": "object",
+          "properties": {
+            "content": { "type": "string" },
+            "truncated": { "type": "boolean" },
+            "truncatedBy": {
+              "type": ["string", "null"],
+              "enum": ["lines", "bytes", null]
+            },
+            "totalLines": { "type": "integer" },
+            "totalBytes": { "type": "integer" },
+            "outputLines": { "type": "integer" },
+            "outputBytes": { "type": "integer" },
+            "lastLinePartial": { "type": "boolean" },
+            "firstLineExceedsLimit": { "type": "boolean" },
+            "maxLines": { "type": "integer" },
+            "maxBytes": { "type": "integer" }
+          },
+          "required": [
+            "content",
+            "truncated",
+            "truncatedBy",
+            "totalLines",
+            "totalBytes",
+            "outputLines",
+            "outputBytes",
+            "lastLinePartial",
+            "firstLineExceedsLimit",
+            "maxLines",
+            "maxBytes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": ["text", "start_line", "end_line", "total_lines"],
+      "additionalProperties": false
+    },
+    "error": { "type": "string" }
+  },
+  "additionalProperties": false
+}

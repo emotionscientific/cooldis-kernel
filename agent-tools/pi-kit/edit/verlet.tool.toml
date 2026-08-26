@@ -1,0 +1,41 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "pi-edit"
+version = "0.1.0"
+description = "Pi-parity in-place edit with exact and normalized matching."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "../../wasm/edit"
+state = "stateless"
+max_input_bytes = 1048576
+max_output_bytes = 262144
+
+[[operations]]
+name = "edit"
+description = "Apply one or more old/new text replacements with Pi diff output and error envelopes."
+input_schema = "schemas/edit.input.json"
+output_schema = "schemas/edit.output.json"
+required_capabilities = ["fs.write"]
+
+[operations.command]
+name = "pi edit"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "edit"
+
+[[fixtures]]
+name = "edit_unique_match"
+operation = "edit"
+input = "fixtures/edit_unique_match.input.json"
+expect = "fixtures/edit_unique_match.expect.json"
+
+[[fixtures]]
+name = "edit_ambiguous_match"
+operation = "edit"
+input = "fixtures/edit_ambiguous_match.input.json"
+expect = "fixtures/edit_ambiguous_match.expect.json"

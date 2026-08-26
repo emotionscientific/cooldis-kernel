@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "match_count": { "type": "integer" },
+        "limit_reached": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "lines_truncated": { "type": "boolean" }
+      },
+      "required": ["text", "match_count", "limit_reached", "truncated", "lines_truncated"],
+      "additionalProperties": false
+    },
+    "error": { "type": "string" }
+  },
+  "additionalProperties": false
+}

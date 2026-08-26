@@ -1,0 +1,7 @@
+{
+  "ok": {
+    "text": "Successfully wrote 13 bytes to nested/deeper/file.txt",
+    "bytes_written": 13,
+    "replaced": false
+  }
+}

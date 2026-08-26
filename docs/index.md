@@ -31,6 +31,9 @@ allowed to exercise.
 - Attach tools and resources, with explicit secret and private-network config.
 - Install a local kit of tool packages into content-addressed operation records
   plus one removable installed-kit record.
+- Use the checked-in Pi kit for pinned `read`, `write`, `edit`, `find`, and
+  `grep` tools, or build its precompiled distributable without requiring Cargo
+  at install time.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.

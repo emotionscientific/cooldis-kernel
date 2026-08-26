@@ -1,3 +1,4 @@
+use bashkit::FileSystem as _;
 use sha2::Digest as _;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -213,6 +214,284 @@ effect_class = "pure"
         "{absent}"
     );
     assert!(registry.load_record("fixture-member").is_ok());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn verlet_cli_pi_kit_install_publishes_pinned_tools_and_default_manifest_rows() {
+    let root = temp_dir("pi-kit-install");
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let kit_root = repo.join("agent-tools/pi-kit");
+    let registry_root = root.join("operations");
+    let kits_root = root.join("kits");
+
+    let install = run_verlet([
+        "kit",
+        "install",
+        kit_root.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    assert!(install.contains("installed kit pi"), "{install}");
+    for package in ["pi-read", "pi-write", "pi-edit", "pi-search"] {
+        assert!(
+            install.contains(&format!("published {package}")),
+            "{install}"
+        );
+    }
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
+    let records = registry.list_records().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pi-edit", "pi-read", "pi-search", "pi-write"]
+    );
+    let fixture_operations = records
+        .iter()
+        .flat_map(|record| {
+            record
+                .interface
+                .as_ref()
+                .unwrap()
+                .fixtures
+                .iter()
+                .map(|fixture| fixture.operation.as_str())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        fixture_operations,
+        std::collections::BTreeSet::from(["edit", "find", "grep", "read", "write"])
+    );
+    for (package, operation_names) in [
+        ("pi-read", &["read"][..]),
+        ("pi-write", &["write"][..]),
+        ("pi-edit", &["edit"][..]),
+        ("pi-search", &["find", "grep"][..]),
+    ] {
+        let record = registry.load_record(package).unwrap();
+        assert_eq!(
+            record
+                .projections
+                .operations
+                .iter()
+                .map(|projection| (
+                    projection.operation_name.as_str(),
+                    projection.mcp.tool_name.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            operation_names
+                .iter()
+                .map(|operation| (*operation, *operation))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let installed = verlet_operations::kit_package::InstalledKitStore::new(&kits_root)
+        .load("pi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(installed.tools.len(), 5);
+    assert_eq!(
+        installed
+            .tools
+            .iter()
+            .map(|tool| (tool.tool_name.as_str(), tool.effect_class.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("read", "idempotent"),
+            ("write", "at-most-once"),
+            ("edit", "at-most-once"),
+            ("find", "idempotent"),
+            ("grep", "idempotent"),
+        ]
+    );
+    for tool in &installed.tools {
+        assert!(tool.operation_ref.starts_with("op://pi-"));
+        assert!(tool.operation_ref.contains("@sha256:"));
+    }
+    let write_tool = installed
+        .tools
+        .iter()
+        .find(|tool| tool.tool_name == "write")
+        .unwrap();
+    let write_hash = write_tool.operation_ref.split_once("@sha256:").unwrap().1;
+    let edit_tool = installed
+        .tools
+        .iter()
+        .find(|tool| tool.tool_name == "edit")
+        .unwrap();
+    let edit_hash = edit_tool.operation_ref.split_once("@sha256:").unwrap().1;
+
+    let original_write_record = registry.load_record("pi-write").unwrap();
+    let original_edit_record = registry.load_record("pi-edit").unwrap();
+    registry
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "pi-write".to_string(),
+                artifact_path: original_edit_record.build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: original_edit_record.build.artifact_path.clone(),
+                },
+                interface: None,
+                capability_grants: original_edit_record.capability_grants.clone(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    registry
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "pi-edit".to_string(),
+                artifact_path: original_write_record.build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: original_write_record.build.artifact_path.clone(),
+                },
+                interface: None,
+                capability_grants: original_write_record.capability_grants.clone(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        registry
+            .load_record("pi-write")
+            .unwrap()
+            .active_artifact_hash,
+        write_hash
+    );
+    assert_ne!(
+        registry
+            .load_record("pi-edit")
+            .unwrap()
+            .active_artifact_hash,
+        edit_hash
+    );
+
+    let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
+    vfs.mount(
+        "/workspace",
+        std::sync::Arc::new(bashkit::InMemoryFs::new()),
+    )
+    .unwrap();
+    let write_input =
+        r#"{"root":"/workspace","args":{"path":"nested/written.txt","content":"installed write"}}"#;
+    let write_record = registry
+        .load_version_record("pi-write", write_hash)
+        .unwrap();
+    let write_config = registry
+        .load_runtime_config_for_record(&write_record)
+        .await
+        .unwrap()
+        .with_vfs(vfs.clone());
+    let write_factory =
+        verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(write_config).unwrap();
+    let write = write_factory
+        .invoke_operation_bytes("write", write_input.as_bytes().to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&write.output).unwrap()["ok"]["text"],
+        "Successfully wrote 15 bytes to nested/written.txt"
+    );
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/nested/written.txt"))
+            .await
+            .unwrap(),
+        b"installed write"
+    );
+
+    vfs.write_file(
+        std::path::Path::new("/workspace/editable.txt"),
+        b"alpha\nneedle beta\ngamma\n",
+    )
+    .await
+    .unwrap();
+    let edit_input = r#"{"root":"/workspace","args":{"path":"editable.txt","edits":[{"oldText":"needle beta","newText":"needle delta"}]}}"#;
+    let edit_record = registry.load_version_record("pi-edit", edit_hash).unwrap();
+    let edit_config = registry
+        .load_runtime_config_for_record(&edit_record)
+        .await
+        .unwrap()
+        .with_vfs(vfs.clone());
+    let edit_factory =
+        verlet::capabilities::wasm_runner::WasmRuntimeFactory::new(edit_config).unwrap();
+    let edit = edit_factory
+        .invoke_operation_bytes("edit", edit_input.as_bytes().to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&edit.output).unwrap()["ok"]["edits_applied"],
+        1
+    );
+    assert_eq!(
+        vfs.read_file(std::path::Path::new("/workspace/editable.txt"))
+            .await
+            .unwrap(),
+        b"alpha\nneedle delta\ngamma\n"
+    );
+
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut config = verlet::adapters::app_server::VerletAppServerConfig::local(
+        verlet::adapters::app_server::AppServerListenAddr::Unix(root.join("app-server.sock")),
+        &workspace,
+    );
+    config.capsule_bindings = verlet::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&registry_root);
+    config.agent_registry_root = root.join("agents");
+    config.blob_registry_root = root.join("agent-blobs");
+    let agent_registry_root = config.agent_registry_root.clone();
+    let blob_registry_root = config.blob_registry_root.clone();
+    let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
+        .await
+        .unwrap();
+    let default_record = verlet::agent::manifest::LocalAgentRegistry::new(agent_registry_root)
+        .with_blob_registry_root(blob_registry_root)
+        .load_ref("agent://verlet/default@latest")
+        .unwrap();
+    let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(default_record.resolved_manifest).unwrap();
+    let rows = manifest
+        .tools
+        .iter()
+        .filter_map(|tool| match tool {
+            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool)
+                if tool.id.starts_with("kit.pi.") =>
+            {
+                Some(tool)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            "kit.pi.edit",
+            "kit.pi.find",
+            "kit.pi.grep",
+            "kit.pi.read",
+            "kit.pi.write",
+        ]
+    );
+    for row in rows {
+        let installed_tool = installed
+            .tools
+            .iter()
+            .find(|tool| tool.tool_name == row.tool_name)
+            .unwrap();
+        assert_eq!(row.operation_ref, installed_tool.operation_ref);
+        assert!(row.operation_ref.contains("@sha256:"));
+    }
+
+    drop(app);
     let _ = std::fs::remove_dir_all(root);
 }
 

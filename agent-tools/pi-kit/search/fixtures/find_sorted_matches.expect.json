@@ -1,0 +1,8 @@
+{
+  "ok": {
+    "text": "a.txt\nb.txt",
+    "paths": ["a.txt", "b.txt"],
+    "limit_reached": false,
+    "truncated": false
+  }
+}

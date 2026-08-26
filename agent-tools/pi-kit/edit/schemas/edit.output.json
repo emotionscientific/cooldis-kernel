@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "details": {
+          "type": "object",
+          "properties": {
+            "diff": { "type": "string" },
+            "patch": { "type": "string" },
+            "firstChangedLine": { "type": "integer" }
+          },
+          "required": ["diff", "patch"],
+          "additionalProperties": false
+        },
+        "edits_applied": { "type": "integer" }
+      },
+      "required": ["text", "details", "edits_applied"],
+      "additionalProperties": false
+    },
+    "error": { "type": "string" }
+  },
+  "additionalProperties": false
+}

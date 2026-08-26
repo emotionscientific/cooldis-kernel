@@ -399,12 +399,13 @@ pub(crate) async fn build_tool_package(
         capability_grants: declared_capabilities,
         metadata: std::collections::BTreeMap::new(),
     };
-    let projections = registered.projections();
+    let generated_projections = registered.projections();
     let interface = verlet_operations::tool_package::ToolInterfaceContract::from_package(
         &package,
         &manifest,
-        &projections,
+        &generated_projections,
     )?;
+    let projections = generated_projections.with_tool_interface(Some(&interface));
     let fixtures = run_tool_package_fixtures(&package, &artifact_path, &interface).await?;
     let receipt = verlet_operations::tool_package::ToolBuildReceipt::new(
         &package,
