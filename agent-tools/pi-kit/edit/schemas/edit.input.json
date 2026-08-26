@@ -15,14 +15,14 @@
               "newText": { "type": "string" }
             },
             "required": ["oldText", "newText"],
-            "additionalProperties": false
+            "additionalProperties": true
           }
         }
       },
       "required": ["path", "edits"],
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "required": ["root", "args"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

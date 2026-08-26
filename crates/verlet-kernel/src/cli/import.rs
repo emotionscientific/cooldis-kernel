@@ -234,11 +234,10 @@ pub(crate) async fn build_import_package(
         capability_grants: capabilities.clone(),
         metadata: std::collections::BTreeMap::new(),
     };
-    interface.validate_against_operation_record(
-        &plan.name,
-        &manifest,
-        &registered.projections(),
-    )?;
+    let projections = registered
+        .projections()
+        .with_tool_interface(Some(&interface));
+    interface.validate_against_operation_record(&plan.name, &manifest, &projections)?;
     let receipt = verlet_operations::import_package::ImportBuildReceipt {
         kind: verlet_operations::import_package::IMPORT_BUILD_RECEIPT_KIND.to_string(),
         schema_version: verlet_operations::import_package::IMPORT_BUILD_RECEIPT_SCHEMA_VERSION,

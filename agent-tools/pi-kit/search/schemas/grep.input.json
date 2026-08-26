@@ -6,17 +6,17 @@
       "type": "object",
       "properties": {
         "pattern": { "type": "string" },
-        "path": { "type": "string" },
-        "glob": { "type": "string" },
+        "path": { "type": ["string", "null"] },
+        "glob": { "type": ["string", "null"] },
         "ignoreCase": { "type": "boolean" },
         "literal": { "type": "boolean" },
-        "context": { "type": "integer" },
-        "limit": { "type": "integer" }
+        "context": { "type": ["integer", "null"] },
+        "limit": { "type": ["integer", "null"] }
       },
       "required": ["pattern"],
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "required": ["root", "args"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

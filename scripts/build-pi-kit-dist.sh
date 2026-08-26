@@ -12,8 +12,9 @@ build-pi-kit-dist.sh - build a standalone Pi kit with prebuilt Wasm modules.
 Usage:
   scripts/build-pi-kit-dist.sh [--out-dir DIR]
 
-The output directory must not already exist. The emitted kit uses bin_path in
-each member manifest, so `verlet kit install DIR` does not invoke Cargo.
+An existing output is replaced only after the complete kit has been staged.
+The emitted kit uses bin_path in each member manifest, so
+`verlet kit install DIR` does not invoke Cargo.
 USAGE
 }
 
@@ -38,8 +39,18 @@ done
 if [[ "$OUT_DIR" != /* ]]; then
   OUT_DIR="$ROOT/$OUT_DIR"
 fi
-if [[ -e "$OUT_DIR" ]]; then
-  echo "output already exists: $OUT_DIR" >&2
+out_name="$(basename "$OUT_DIR")"
+if [[ -z "$out_name" || "$out_name" == "/" \
+  || "$out_name" == "." || "$out_name" == ".." ]]; then
+  echo "refusing unsafe output directory: $OUT_DIR" >&2
+  exit 1
+fi
+parent="$(dirname "$OUT_DIR")"
+mkdir -p "$parent"
+parent="$(cd "$parent" && pwd -P)"
+OUT_DIR="$parent/$out_name"
+if [[ "$OUT_DIR" == "/" || "$OUT_DIR" == "$ROOT" ]]; then
+  echo "refusing unsafe output directory: $OUT_DIR" >&2
   exit 1
 fi
 
@@ -67,20 +78,30 @@ for module in "${modules[@]}"; do
     exit 1
   fi
   artifact="$target_dir/$TARGET/release/verlet_tool_wasm_${module}.wasm"
-  if [[ ! -f "$artifact" ]]; then
-    echo "built Wasm artifact was not found: $artifact" >&2
+  if [[ ! -s "$artifact" ]]; then
+    echo "built Wasm artifact is missing or empty: $artifact" >&2
     exit 1
   fi
   artifacts+=("$artifact")
 done
 
-parent="$(dirname "$OUT_DIR")"
-mkdir -p "$parent"
 stage="$(mktemp -d "$parent/.pi-kit-dist.XXXXXX")"
+backup=
 cleanup() {
+  status=$?
+  if [[ -n "$backup" && ( -e "$backup" || -L "$backup" ) \
+    && ! -e "$OUT_DIR" && ! -L "$OUT_DIR" ]]; then
+    if ! mv "$backup" "$OUT_DIR"; then
+      echo "failed to restore previous output from $backup" >&2
+    fi
+  fi
   if [[ -d "$stage" ]]; then
     rm -rf "$stage"
   fi
+  if [[ -n "$backup" && ( -e "$backup" || -L "$backup" ) ]]; then
+    rm -rf "$backup"
+  fi
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -94,13 +115,24 @@ for index in "${!modules[@]}"; do
     "s|^module_path = \"../../wasm/$module\"$|bin_path = \"bin/pi-$module.wasm\"|" \
     "$member/verlet.tool.toml" >"$member/verlet.tool.toml.tmp"
   mv "$member/verlet.tool.toml.tmp" "$member/verlet.tool.toml"
-  if ! grep -F 'bin_path = "bin/pi-' "$member/verlet.tool.toml" >/dev/null; then
-    echo "failed to rewrite runtime source for $module" >&2
+  bin_path_count="$(grep -c -F "bin_path = \"bin/pi-$module.wasm\"" "$member/verlet.tool.toml" || true)"
+  if grep -F 'module_path =' "$member/verlet.tool.toml" >/dev/null \
+    || [[ "$bin_path_count" != 1 ]]; then
+    echo "failed to rewrite runtime.module_path to runtime.bin_path for $module" >&2
     exit 1
   fi
 done
 
+if [[ -e "$OUT_DIR" || -L "$OUT_DIR" ]]; then
+  backup="$(mktemp -d "$parent/.pi-kit-previous.XXXXXX")"
+  rmdir "$backup"
+  mv "$OUT_DIR" "$backup"
+fi
 mv "$stage/pi-kit" "$OUT_DIR"
 rmdir "$stage"
+if [[ -n "$backup" ]]; then
+  rm -rf "$backup"
+  backup=
+fi
 trap - EXIT
 printf 'pi kit distributable: %s\n' "$OUT_DIR"

@@ -9,9 +9,9 @@
         "content": { "type": "string" }
       },
       "required": ["path", "content"],
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "required": ["root", "args"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

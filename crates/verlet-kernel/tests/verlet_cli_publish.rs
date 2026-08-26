@@ -313,6 +313,65 @@ async fn verlet_cli_pi_kit_install_publishes_pinned_tools_and_default_manifest_r
         assert!(tool.operation_ref.starts_with("op://pi-"));
         assert!(tool.operation_ref.contains("@sha256:"));
     }
+    let write_tool = installed
+        .tools
+        .iter()
+        .find(|tool| tool.tool_name == "write")
+        .unwrap();
+    let write_hash = write_tool.operation_ref.split_once("@sha256:").unwrap().1;
+    let edit_tool = installed
+        .tools
+        .iter()
+        .find(|tool| tool.tool_name == "edit")
+        .unwrap();
+    let edit_hash = edit_tool.operation_ref.split_once("@sha256:").unwrap().1;
+
+    let original_write_record = registry.load_record("pi-write").unwrap();
+    let original_edit_record = registry.load_record("pi-edit").unwrap();
+    registry
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "pi-write".to_string(),
+                artifact_path: original_edit_record.build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: original_edit_record.build.artifact_path.clone(),
+                },
+                interface: None,
+                capability_grants: original_edit_record.capability_grants.clone(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    registry
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: "pi-edit".to_string(),
+                artifact_path: original_write_record.build.artifact_path.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: original_write_record.build.artifact_path.clone(),
+                },
+                interface: None,
+                capability_grants: original_write_record.capability_grants.clone(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        registry
+            .load_record("pi-write")
+            .unwrap()
+            .active_artifact_hash,
+        write_hash
+    );
+    assert_ne!(
+        registry
+            .load_record("pi-edit")
+            .unwrap()
+            .active_artifact_hash,
+        edit_hash
+    );
 
     let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
         bashkit::InMemoryFs::new(),
@@ -324,12 +383,6 @@ async fn verlet_cli_pi_kit_install_publishes_pinned_tools_and_default_manifest_r
     .unwrap();
     let write_input =
         r#"{"root":"/workspace","args":{"path":"nested/written.txt","content":"installed write"}}"#;
-    let write_tool = installed
-        .tools
-        .iter()
-        .find(|tool| tool.tool_name == "write")
-        .unwrap();
-    let write_hash = write_tool.operation_ref.split_once("@sha256:").unwrap().1;
     let write_record = registry
         .load_version_record("pi-write", write_hash)
         .unwrap();
@@ -362,12 +415,6 @@ async fn verlet_cli_pi_kit_install_publishes_pinned_tools_and_default_manifest_r
     .await
     .unwrap();
     let edit_input = r#"{"root":"/workspace","args":{"path":"editable.txt","edits":[{"oldText":"needle beta","newText":"needle delta"}]}}"#;
-    let edit_tool = installed
-        .tools
-        .iter()
-        .find(|tool| tool.tool_name == "edit")
-        .unwrap();
-    let edit_hash = edit_tool.operation_ref.split_once("@sha256:").unwrap().1;
     let edit_record = registry.load_version_record("pi-edit", edit_hash).unwrap();
     let edit_config = registry
         .load_runtime_config_for_record(&edit_record)

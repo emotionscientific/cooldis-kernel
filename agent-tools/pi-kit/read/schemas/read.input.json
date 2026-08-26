@@ -6,13 +6,13 @@
       "type": "object",
       "properties": {
         "path": { "type": "string" },
-        "offset": { "type": "integer" },
-        "limit": { "type": "integer" }
+        "offset": { "type": ["integer", "null"] },
+        "limit": { "type": ["integer", "null"] }
       },
       "required": ["path"],
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "required": ["root", "args"],
-  "additionalProperties": false
+  "additionalProperties": true
 }
