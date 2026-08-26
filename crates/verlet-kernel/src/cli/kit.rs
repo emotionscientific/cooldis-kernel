@@ -107,6 +107,16 @@ async fn kit_install(
             Ok(build) => build,
             Err(err) => return Err(kit_install_member_error(&member_name, err, &published)),
         };
+        if build.package.manifest.identity.name != member_name {
+            return Err(kit_install_member_error(
+                &member_name,
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "kit packages identity.name changed from {member_name:?} to {:?} between validation and build",
+                    build.package.manifest.identity.name
+                )),
+                &published,
+            ));
+        }
         let record = match registry
             .publish_artifact(
                 verlet_operations::operation_store::PublishOperationRequest {
@@ -132,34 +142,8 @@ async fn kit_install(
         published.push(record);
     }
 
-    let records_by_name = published
-        .iter()
-        .map(|record| (record.name.as_str(), record))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let tools = source
-        .manifest
-        .tools
-        .iter()
-        .map(|tool| {
-            let record = records_by_name.get(tool.package.as_str()).ok_or_else(|| {
-                crate::cli::usage_error(format!(
-                    "kit tools.package {:?} was not published",
-                    tool.package
-                ))
-            })?;
-            Ok(verlet_operations::kit_package::InstalledKitTool {
-                tool_name: tool.tool_name.clone(),
-                operation_ref: format!(
-                    "op://{}/{operation}@sha256:{}",
-                    record.name,
-                    record.active_artifact_hash,
-                    operation = tool.operation
-                ),
-                effect_class: tool.effect_class.clone(),
-                required_capabilities: record.capability_grants.clone(),
-            })
-        })
-        .collect::<crate::kernel::runtime_host::VerletResult<Vec<_>>>()?;
+    let tools = resolve_installed_tools(&source.manifest, &published)
+        .map_err(|err| kit_install_record_error(err, &published))?;
     let installed = verlet_operations::kit_package::InstalledKitRecord {
         schema_version: verlet_operations::kit_package::INSTALLED_KIT_SCHEMA_VERSION,
         name: source.manifest.identity.name.clone(),
@@ -172,12 +156,9 @@ async fn kit_install(
         tools,
     };
     let store = verlet_operations::kit_package::InstalledKitStore::new(&options.kits_root);
-    store.save(&installed).map_err(|err| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "kit install published every member but failed to write the installed-kit record: {err}; no installed-kit record was written; {}",
-            published_install_detail(&published)
-        ))
-    })?;
+    store
+        .save(&installed)
+        .map_err(|err| kit_install_record_error(err.into(), &published))?;
 
     println!("installed kit {}", installed.name);
     println!(
@@ -280,9 +261,17 @@ fn parse_kit_install_args(
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
             "--registry-root" => {
-                registry_root = Some(required_path_value(&mut iter, "--registry-root")?)
+                registry_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--registry-root",
+                )?)
             }
-            "--kits-root" => kits_root = Some(required_path_value(&mut iter, "--kits-root")?),
+            "--kits-root" => {
+                kits_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--kits-root",
+                )?)
+            }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown kit install argument {other:?}"
@@ -317,7 +306,12 @@ fn parse_kit_list_args(
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
-            "--kits-root" => kits_root = Some(required_path_value(&mut iter, "--kits-root")?),
+            "--kits-root" => {
+                kits_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--kits-root",
+                )?)
+            }
             "--json" => json = true,
             other => {
                 return Err(crate::cli::usage_error(format!(
@@ -340,13 +334,24 @@ fn parse_kit_remove_args(
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.to_string_lossy().as_ref() {
-            "--kits-root" => kits_root = Some(required_path_value(&mut iter, "--kits-root")?),
+            "--kits-root" => {
+                kits_root = Some(crate::cli::tool::required_path_value(
+                    &mut iter,
+                    "--kits-root",
+                )?)
+            }
             other if other.starts_with('-') => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown kit remove argument {other:?}"
                 )));
             }
-            _ if name.is_none() => name = Some(arg.to_string_lossy().to_string()),
+            _ if name.is_none() => {
+                name = Some(arg.into_string().map_err(|value| {
+                    crate::cli::usage_error(format!(
+                        "kit remove <name> must be valid UTF-8, got {value:?}"
+                    ))
+                })?)
+            }
             other => {
                 return Err(crate::cli::usage_error(format!(
                     "unexpected kit remove name {other:?}"
@@ -360,15 +365,6 @@ fn parse_kit_remove_args(
     })
 }
 
-fn required_path_value(
-    iter: &mut impl Iterator<Item = std::ffi::OsString>,
-    flag: &str,
-) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
-    iter.next()
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
-}
-
 fn kit_install_member_error(
     member_name: &str,
     err: crate::kernel::runtime_host::VerletError,
@@ -378,6 +374,59 @@ fn kit_install_member_error(
         "kit install failed for member {member_name:?}: {err}; no installed-kit record was written; {}",
         published_install_detail(published)
     ))
+}
+
+fn kit_install_record_error(
+    err: crate::kernel::runtime_host::VerletError,
+    published: &[verlet_operations::operation_store::PublishedOperationRecord],
+) -> crate::kernel::runtime_host::VerletError {
+    crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+        "kit install published every member but did not update the installed-kit record: {err}; an existing record, if any, remains unchanged; {}",
+        published_install_detail(published)
+    ))
+}
+
+fn resolve_installed_tools(
+    manifest: &verlet_operations::kit_package::KitManifest,
+    published: &[verlet_operations::operation_store::PublishedOperationRecord],
+) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_operations::kit_package::InstalledKitTool>>
+{
+    let records_by_name = published
+        .iter()
+        .map(|record| (record.name.as_str(), record))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    manifest
+        .tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            let record = records_by_name.get(tool.package.as_str()).ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "kit tools.package {:?} at tools[{index}] was not published from the rebuilt package",
+                    tool.package
+                ))
+            })?;
+            if record.manifest.operation(&tool.operation).is_none() {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "kit tools.operation {:?} at tools[{index}] is absent from rebuilt package {:?}",
+                        tool.operation, tool.package
+                    ),
+                ));
+            }
+            Ok(verlet_operations::kit_package::InstalledKitTool {
+                tool_name: tool.tool_name.clone(),
+                operation_ref: format!(
+                    "op://{}/{operation}@sha256:{}",
+                    record.name,
+                    record.active_artifact_hash,
+                    operation = tool.operation
+                ),
+                effect_class: tool.effect_class.clone(),
+                required_capabilities: record.capability_grants.clone(),
+            })
+        })
+        .collect()
 }
 
 fn published_install_detail(
@@ -402,4 +451,125 @@ fn wall_clock_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn kit_parsers_reject_flag_looking_values_and_duplicate_positionals() {
+        let missing_value = super::parse_kit_list_args(vec![
+            std::ffi::OsString::from("--kits-root"),
+            std::ffi::OsString::from("--json"),
+        ])
+        .err()
+        .expect("flag-looking value should fail")
+        .to_string();
+        assert!(missing_value.contains("--kits-root requires a value"));
+        assert!(missing_value.contains("--json"));
+
+        let duplicate_install = super::parse_kit_install_args(vec![
+            std::ffi::OsString::from("first"),
+            std::ffi::OsString::from("second"),
+        ])
+        .err()
+        .expect("duplicate install path should fail")
+        .to_string();
+        assert!(duplicate_install.contains("unexpected kit install path"));
+
+        let duplicate_remove = super::parse_kit_remove_args(vec![
+            std::ffi::OsString::from("first"),
+            std::ffi::OsString::from("second"),
+        ])
+        .err()
+        .expect("duplicate remove name should fail")
+        .to_string();
+        assert!(duplicate_remove.contains("unexpected kit remove name"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kit_path_flags_preserve_non_utf8_os_strings() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = std::ffi::OsString::from_vec(b"kits-\xff".to_vec());
+        let parsed =
+            super::parse_kit_list_args(vec![std::ffi::OsString::from("--kits-root"), path.clone()])
+                .unwrap();
+
+        assert_eq!(parsed.kits_root, std::path::PathBuf::from(path));
+    }
+
+    #[test]
+    fn installed_tool_resolution_rejects_operation_missing_after_build() {
+        let manifest = verlet_operations::kit_package::KitManifest {
+            kind: verlet_operations::kit_package::KIT_KIND.to_string(),
+            schema_version: verlet_operations::kit_package::KIT_SCHEMA_VERSION,
+            identity: verlet_operations::kit_package::KitIdentity {
+                name: "fixture-kit".to_string(),
+                version: None,
+                description: None,
+            },
+            packages: vec![std::path::PathBuf::from("member")],
+            tools: vec![verlet_operations::kit_package::KitToolDeclaration {
+                tool_name: "read".to_string(),
+                package: "member".to_string(),
+                operation: "read".to_string(),
+                effect_class: "idempotent".to_string(),
+            }],
+        };
+        let published = published_record("member", &["replacement"]);
+
+        let error = super::resolve_installed_tools(&manifest, &[published])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("tools.operation"), "{error}");
+        assert!(error.contains("read"), "{error}");
+        assert!(error.contains("rebuilt package"), "{error}");
+    }
+
+    fn published_record(
+        name: &str,
+        operations: &[&str],
+    ) -> verlet_operations::operation_store::PublishedOperationRecord {
+        let manifest = verlet_abi::WasmOperationManifest {
+            abi: "cooldis.operation/0.1".to_string(),
+            operations: operations
+                .iter()
+                .enumerate()
+                .map(|(index, operation)| verlet_abi::WasmOperationDefinition {
+                    id: (index + 1) as u32,
+                    name: (*operation).to_string(),
+                    input: Default::default(),
+                    output: Default::default(),
+                    events: Default::default(),
+                    mode: Default::default(),
+                    required_capabilities: Vec::new(),
+                })
+                .collect(),
+        };
+        let registered = verlet_operations::RegisteredOperation {
+            name: name.to_string(),
+            manifest: manifest.clone(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        verlet_operations::operation_store::PublishedOperationRecord {
+            schema_version: 1,
+            name: name.to_string(),
+            active_artifact_hash: "a".repeat(64),
+            manifest,
+            projections: registered.projections(),
+            interface: None,
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
+            source: verlet_operations::operation_store::PublishedOperationSource::Kernel {
+                package: "test".to_string(),
+            },
+            build: verlet_operations::operation_store::PublishedOperationBuild {
+                artifact_path: std::path::PathBuf::from("<test>"),
+                published_at_ms: 1,
+            },
+        }
+    }
 }

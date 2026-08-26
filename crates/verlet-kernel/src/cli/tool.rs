@@ -1621,9 +1621,15 @@ pub(crate) fn required_path_value(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
 ) -> crate::kernel::runtime_host::VerletResult<std::path::PathBuf> {
-    iter.next()
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))
+    let value = iter
+        .next()
+        .ok_or_else(|| crate::cli::usage_error(format!("{flag} requires a value")))?;
+    if value.to_string_lossy().starts_with('-') {
+        return Err(crate::cli::usage_error(format!(
+            "{flag} requires a value, got flag {value:?}"
+        )));
+    }
+    Ok(std::path::PathBuf::from(value))
 }
 
 pub(crate) fn required_string_value(

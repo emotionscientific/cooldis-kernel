@@ -105,6 +105,50 @@ fn verlet_cli_kit_installs_reinstalls_lists_and_removes() {
         verlet_operations::kit_package::InstalledKitSource::Path { path }
             if path == &std::fs::canonicalize(&kit_root).unwrap()
     ));
+    let raw_record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.record_path("alpha-kit")).unwrap()).unwrap();
+    assert_eq!(raw_record["name"], "alpha-kit");
+    assert_eq!(
+        raw_record["tools"][0]["operation_ref"],
+        first.tools[0].operation_ref
+    );
+
+    let agent_manifest_path = root.join("kit-ref.verlet.agent.toml");
+    std::fs::write(
+        &agent_manifest_path,
+        format!(
+            r#"[agent]
+name = "kit-ref"
+version = "0.1.0"
+
+[[model_profiles]]
+id = "default"
+provider_ref = "provider://openai_compatible"
+model_ref = "model://example-chat-model"
+
+[[tools]]
+type = "direct_tool"
+id = "fixture_cat"
+tool_name = "fixture_cat"
+operation_ref = "{}"
+effect_class = "pure"
+"#,
+            first.tools[0].operation_ref
+        ),
+    )
+    .unwrap();
+    let agent_registry_root = root.join("agents");
+    run_verlet([
+        "agent",
+        "publish",
+        agent_manifest_path.to_str().unwrap(),
+        "--registry-root",
+        agent_registry_root.to_str().unwrap(),
+        "--operations-registry-root",
+        registry_root.to_str().unwrap(),
+    ]);
+    let agent = agent_record(&agent_registry_root, "kit-ref");
+    assert_eq!(agent.tool_refs[0].reference, first.tools[0].operation_ref);
 
     write_cli_kit_fixture(&kit_root, "alpha-kit", "1.1.0", false);
     run_verlet([
@@ -2913,6 +2957,12 @@ fn write_cli_kit_fixture(
     let member = kit_root.join("member");
     write_json_file(&member.join("schemas/path.json"), r#"{"type":"string"}"#);
     write_json_file(&member.join("schemas/bytes.json"), r#"{"type":"string"}"#);
+    write_json_file(
+        &member.join("fixtures/cat.input.txt"),
+        "/fixtures/sample.txt",
+    );
+    write_json_file(&member.join("fixtures/cat.expect.txt"), "kit fixture\n");
+    write_json_file(&member.join("fixtures/sample.txt"), "kit fixture\n");
     std::fs::write(
         member.join("verlet.tool.toml"),
         format!(
@@ -2945,6 +2995,12 @@ required_capabilities = ["fs.write"]
 
 [operations.command]
 name = "fixture put"
+
+[[fixtures]]
+name = "cat_fixture_file"
+operation = "cat"
+input = "fixtures/cat.input.txt"
+expect = "fixtures/cat.expect.txt"
 "#,
             module_path.display()
         ),

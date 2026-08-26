@@ -9,7 +9,6 @@
 //! against the content-addressed operations its installation published.
 
 use sha2::Digest as _;
-use std::io::Write as _;
 
 pub const KIT_KIND: &str = "verlet.kit";
 pub const KIT_SCHEMA_VERSION: u32 = 0;
@@ -212,47 +211,11 @@ impl InstalledKitStore {
     pub fn save(&self, record: &InstalledKitRecord) -> crate::VerletResult<()> {
         validate_installed_kit_record(record)?;
         let path = self.record_path(&record.name);
-        std::fs::create_dir_all(&self.root).map_err(|err| {
-            crate::VerletOperationsError::RuntimeFactory(format!(
-                "failed to create installed-kit root {}: {err}",
-                self.root.display()
-            ))
-        })?;
-        let tmp_path = self
-            .root
-            .join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
-        let bytes = serde_json::to_vec_pretty(record).map_err(|err| {
-            crate::VerletOperationsError::RuntimeFactory(format!(
-                "failed to encode installed-kit record name {:?}: {err}",
-                record.name
-            ))
-        })?;
-        {
-            let mut file = std::fs::File::create(&tmp_path).map_err(|err| {
-                crate::VerletOperationsError::RuntimeFactory(format!(
-                    "failed to create temp installed-kit record {}: {err}",
-                    tmp_path.display()
-                ))
-            })?;
-            file.write_all(&bytes).map_err(|err| {
-                crate::VerletOperationsError::RuntimeFactory(format!(
-                    "failed to write temp installed-kit record {}: {err}",
-                    tmp_path.display()
-                ))
-            })?;
-            file.sync_all().map_err(|err| {
-                crate::VerletOperationsError::RuntimeFactory(format!(
-                    "failed to sync temp installed-kit record {}: {err}",
-                    tmp_path.display()
-                ))
-            })?;
-        }
-        std::fs::rename(&tmp_path, &path).map_err(|err| {
-            crate::VerletOperationsError::RuntimeFactory(format!(
-                "failed to atomically install installed-kit record {}: {err}",
-                path.display()
-            ))
-        })
+        crate::operation_store::write_json_atomically(
+            &path,
+            format!("installed-kit record name {:?}", record.name),
+            record,
+        )
     }
 
     pub fn load(&self, name: &str) -> crate::VerletResult<Option<InstalledKitRecord>> {
@@ -307,13 +270,28 @@ impl InstalledKitStore {
                 ))
             })?;
             let path = entry.path();
+            let file_type = entry.file_type().map_err(|err| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
+                    "failed to inspect installed-kit entry {}: {err}",
+                    path.display()
+                ))
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            names.push(validate_kit_record_name("name", name)?);
+            if name.starts_with(".verlet.tmp.") {
+                continue;
+            }
+            let Ok(name) = validate_kit_record_name("name", name) else {
+                continue;
+            };
+            names.push(name);
         }
         names.sort();
         names
@@ -590,6 +568,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(outside);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn kit_source_confines_canonical_paths_and_accepts_inside_symlinks() {
+        let root = valid_kit_root("canonical-paths");
+        let link_root =
+            root.with_file_name(format!("verlet-kit-package-link-{}", uuid::Uuid::now_v7()));
+        std::os::unix::fs::symlink(&root, &link_root).unwrap();
+        let from_link = super::KitSource::load(&link_root).unwrap();
+        assert_eq!(from_link.kit_root, std::fs::canonicalize(&root).unwrap());
+
+        let member_link = root.join("member-link");
+        std::os::unix::fs::symlink(root.join("member-a"), &member_link).unwrap();
+        let mut manifest = read_manifest(&root);
+        manifest.packages = vec![std::path::PathBuf::from("member-link/")];
+        write_manifest(&root, &manifest);
+        let source = super::KitSource::load(&root).unwrap();
+        assert_eq!(source.member_packages().unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(link_root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kit_source_rejects_member_symlink_outside_canonical_root() {
+        let root = valid_kit_root("outside-symlink");
+        let outside = root.with_file_name(format!(
+            "verlet-kit-package-outside-{}",
+            uuid::Uuid::now_v7()
+        ));
+        write_tool_package(&outside, "outside", "outside_op");
+        std::os::unix::fs::symlink(&outside, root.join("member-link")).unwrap();
+        let mut manifest = read_manifest(&root);
+        manifest.packages = vec![std::path::PathBuf::from("member-link")];
+        write_manifest(&root, &manifest);
+
+        let error = super::KitSource::load(&root).unwrap_err().to_string();
+
+        assert!(error.contains("packages[0]"), "{error}");
+        assert!(error.contains("outside the kit root"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn kit_source_rejects_member_path_that_is_a_file() {
+        assert_manifest_error("member-file", "packages[0]", |manifest, root| {
+            std::fs::write(root.join("member-file"), "not a directory").unwrap();
+            manifest.packages = vec![std::path::PathBuf::from("member-file")];
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn member_confinement_handles_filesystem_root_and_tmp_aliases() {
+        let tmp_root = std::path::Path::new("/tmp").join(format!(
+            "verlet-kit-package-tmp-alias-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        write_tool_package(&tmp_root.join("member-a"), "member-a", "read");
+        let canonical_member = std::fs::canonicalize(tmp_root.join("member-a")).unwrap();
+        let relative_from_root = canonical_member.strip_prefix("/").unwrap().to_path_buf();
+        let manifest = super::KitManifest {
+            kind: super::KIT_KIND.to_string(),
+            schema_version: super::KIT_SCHEMA_VERSION,
+            identity: super::KitIdentity {
+                name: "root-kit".to_string(),
+                version: None,
+                description: None,
+            },
+            packages: vec![relative_from_root],
+            tools: vec![super::KitToolDeclaration {
+                tool_name: "read".to_string(),
+                package: "member-a".to_string(),
+                operation: "read".to_string(),
+                effect_class: "pure".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            super::load_member_packages(&manifest, std::path::Path::new("/"))
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
     #[test]
     fn kit_source_rejects_member_that_is_not_a_tool_package() {
         assert_manifest_error("bad-member", "packages", |manifest, root| {
@@ -659,9 +726,47 @@ mod tests {
         alpha.installed_at_ms = 3;
         store.save(&alpha).unwrap();
         assert_eq!(store.load("alpha").unwrap(), Some(alpha.clone()));
+        let raw: super::InstalledKitRecord =
+            serde_json::from_slice(&std::fs::read(store.record_path("alpha")).unwrap()).unwrap();
+        assert_eq!(raw, alpha);
         assert!(store.remove("alpha").unwrap());
         assert_eq!(store.load("alpha").unwrap(), None);
         assert!(!store.remove("alpha").unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_kit_store_cleans_temp_file_when_atomic_rename_fails() {
+        let root = temp_root("installed-kit-temp-cleanup");
+        let store = super::InstalledKitStore::new(root.join("kits"));
+        std::fs::create_dir_all(store.record_path("alpha")).unwrap();
+
+        let error = store
+            .save(&installed_record("alpha", "1.0.0", 1))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("atomically install"), "{error}");
+        let leftovers = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".verlet.tmp."))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_kit_store_list_ignores_foreign_jsonish_entries() {
+        let root = temp_root("installed-kit-foreign-files");
+        let store = super::InstalledKitStore::new(root.join("kits"));
+        let alpha = installed_record("alpha", "1.0.0", 1);
+        store.save(&alpha).unwrap();
+        std::fs::write(store.root().join("invalid name.json"), "foreign").unwrap();
+        std::fs::write(store.root().join(".verlet.tmp.crash.json"), "partial").unwrap();
+        std::fs::create_dir(store.root().join("directory.json")).unwrap();
+
+        assert_eq!(store.list().unwrap(), vec![alpha]);
         let _ = std::fs::remove_dir_all(root);
     }
 

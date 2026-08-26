@@ -648,7 +648,17 @@ impl LocalOperationRegistry {
     }
 }
 
-fn write_json_atomically<T: serde::Serialize>(
+struct TempFileCleanup {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempFileCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub(crate) fn write_json_atomically<T: serde::Serialize>(
     path: &std::path::Path,
     label: String,
     value: &T,
@@ -666,6 +676,9 @@ fn write_json_atomically<T: serde::Serialize>(
         ))
     })?;
     let tmp_path = parent.join(format!(".verlet.tmp.{}", uuid::Uuid::now_v7()));
+    let cleanup = TempFileCleanup {
+        path: tmp_path.clone(),
+    };
     let bytes = serde_json::to_vec_pretty(value).map_err(|err| {
         crate::VerletOperationsError::RuntimeFactory(format!("failed to encode {label}: {err}"))
     })?;
@@ -689,7 +702,7 @@ fn write_json_atomically<T: serde::Serialize>(
             ))
         })?;
     }
-    std::fs::rename(&tmp_path, &path).map_err(|err| {
+    std::fs::rename(&cleanup.path, &path).map_err(|err| {
         crate::VerletOperationsError::RuntimeFactory(format!(
             "failed to atomically install {label} {}: {err}",
             path.display()
