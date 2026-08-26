@@ -244,10 +244,12 @@ publishing kits for others to install.
 Installed records are JSON files at `.verlet/kits/<kit-name>.json` by default.
 `verlet kit list` reads those records, and `verlet kit remove <kit-name>`
 deletes only the selected record. Published operations remain in the registry.
-Once EMO-608 lands, the daemon's default manifest will read these records at
-startup and synthesize one `direct_tool` row for each installed tool. Until
-then, install and record management work, but default-manifest pickup remains
-the intentionally empty seam.
+The daemon reads installed records when it synthesizes the default manifest at
+startup. After `verlet kit install`, restart the daemon to make each installed
+tool available as a pinned `direct_tool` row. After `verlet kit remove`, restart
+the daemon again and the removed kit's tools are gone from the default
+manifest. Tool rows are sorted by kit name and tool name, and duplicate model
+tool names across kits fail daemon startup instead of shadowing one another.
 
 ## Agent Skill Shape
 
