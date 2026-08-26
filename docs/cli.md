@@ -112,7 +112,10 @@ daemon through `thread/events/list`, or a stopped daemon's Turso journal with
 lists raw event records with optional thread, kind, and inclusive sequence
 filters. Without `--journal` it reads through the live owner RPC. With
 `--journal` it opens a cold Turso store read-only and refuses a store held by a
-live owner. `--json` emits an array of raw records. `verlet debug rpc` is
+live owner. Sequence bounds must be positive and apply to each stream's local
+sequence. Without `--thread`, one range can therefore return records from many
+streams with the same sequence numbers. `--json` emits an array of raw records.
+`verlet debug rpc` is
 protocol tooling for maintainers and smoke tests; it is not the default user
 console.
 

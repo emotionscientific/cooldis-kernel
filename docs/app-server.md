@@ -1132,8 +1132,10 @@ thread with no matching events returns an empty `data` array and null cursors.
 Params:
 `{ "threadId": "...", "kind": "tool.call.requested", "fromSequence": 10, "toSequence": 30 }`.
 Every field is optional. Sequence bounds are inclusive and apply to each event's
-stream-local sequence. A reversed range, malformed thread id, or unknown kind
-is rejected as invalid params.
+stream-local sequence. Bounds must be positive. Without `threadId`, a range can
+therefore return records from many streams with the same sequence numbers. A
+reversed range, malformed thread id, or unknown kind is rejected as invalid
+params.
 
 Result: `{ "data": [...] }`. `data` is an array of raw `EventRecord` values in
 database insertion order. This is a read-only Host-authority method used by

@@ -84,7 +84,7 @@ pub(crate) fn is_cross_process_database_guidance(
 }
 
 pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
-    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
+    // turso 0.8.0-pre.7 erases LimboError::LockingError through turso::Error.
     let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
         return false;
     };

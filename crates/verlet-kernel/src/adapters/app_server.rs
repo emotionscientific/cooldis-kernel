@@ -941,6 +941,7 @@ struct VerletAppServerInner {
     metadata_store_path: std::path::PathBuf,
     user_metadata_store_path: std::path::PathBuf,
     session_store_path: std::path::PathBuf,
+    session_store: verlet_history_sqlite::SqliteSessionStore,
     lease_epoch: u64,
     metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
     user_metadata_store: verlet_metadata::provider_store::SqliteMetadataStore,
@@ -1444,6 +1445,7 @@ impl VerletAppServer {
             .await
             .map_err(history_store_error)?
             .with_lease_epoch(config.lease_epoch);
+        let session_store = identity_store.clone();
         let runtime_store = std::sync::Arc::new(identity_store.clone())
             as std::sync::Arc<dyn verlet_history::RuntimeStore>;
         let runtime_store = match session_store_decorator {
@@ -1527,6 +1529,7 @@ impl VerletAppServer {
                 metadata_store_path,
                 user_metadata_store_path,
                 session_store_path,
+                session_store,
                 lease_epoch: config.lease_epoch,
                 metadata_store,
                 user_metadata_store,
@@ -1597,11 +1600,7 @@ impl VerletAppServer {
             // standalone app-server serving, and in-process/local JSON-RPC users.
             // Run recovery before returning the first callable surface.
             process_dispatcher.assert_startup_registry_empty().await?;
-            let recovery_store =
-                verlet_history_sqlite::SqliteSessionStore::open(&app.inner.session_store_path)
-                    .await
-                    .map_err(history_store_error)?
-                    .with_lease_epoch(app.inner.lease_epoch);
+            let recovery_store = app.inner.session_store.clone();
             crate::daemon::recovery_sweep::StartupRecoverySweep::new(
                 recovery_store,
                 process_dispatcher,

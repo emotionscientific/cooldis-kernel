@@ -152,11 +152,18 @@ fn parse_debug_journal_sequence(
     iter: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &'static str,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventSequence> {
-    let value = required_debug_journal_value(iter, flag)?;
+    let value = iter
+        .next()
+        .ok_or_else(|| debug_journal_usage_error(format!("{flag} requires a value")))?;
     let value = value.to_string_lossy();
     let sequence = value.parse::<i64>().map_err(|err| {
         debug_journal_usage_error(format!("invalid {flag} value {value:?}: {err}"))
     })?;
+    if sequence < 1 {
+        return Err(debug_journal_usage_error(format!(
+            "{flag} sequence must be positive"
+        )));
+    }
     Ok(verlet_history::EventSequence::new(sequence))
 }
 
@@ -258,7 +265,9 @@ Usage:\n\
 \n\
 List raw event records for forensic inspection. Live mode reads through the\n\
 owner RPC. --journal directly opens a cold Turso store read-only and is refused\n\
-while another owner process holds that store. Sequence filters are inclusive.\n"
+while another owner process holds that store. Sequence filters are positive,\n\
+inclusive, and apply to each stream's local sequence; without --thread the\n\
+result can contain records from many streams with the same sequence.\n"
     );
 }
 

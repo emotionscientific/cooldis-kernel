@@ -502,12 +502,13 @@ impl DebugRpcServer {
             verlet::adapters::app_server::VerletAppServerConfig::local(listen, workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
-        let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
-            .await
-            .unwrap();
-        let store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
-            .await
-            .unwrap();
+        let principal = verlet::daemon::identity::PrincipalId::new(&config.user_id);
+        let adapter = verlet::daemon::identity::PrincipalId::new("adapter:debug-rpc-error-test");
+        let store = verlet_history_sqlite::SqliteSessionStore::open(
+            config.state_home.join("session_history.turso"),
+        )
+        .await
+        .unwrap();
         let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
             store,
             std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
@@ -515,13 +516,11 @@ impl DebugRpcServer {
         )
         .await
         .unwrap();
-        let principal = verlet::daemon::identity::PrincipalId::new(app.user_id());
         let token = authority
-            .mint_credential(&principal, &principal, None)
+            .bootstrap_operator(&principal, "Debug RPC test operator")
             .await
             .unwrap()
-            .1;
-        let adapter = verlet::daemon::identity::PrincipalId::new("adapter:debug-rpc-error-test");
+            .2;
         authority
             .declare_principal(
                 &principal,
@@ -536,6 +535,10 @@ impl DebugRpcServer {
             .await
             .unwrap()
             .1;
+        drop(authority);
+        let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
         let task = tokio::spawn(async move { app.serve_websocket_listener(listener).await });
         let server = Self {
             addr,

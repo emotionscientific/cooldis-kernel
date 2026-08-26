@@ -57,6 +57,49 @@ fn parse_debug_journal_rejects_reversed_sequence_range() {
 }
 
 #[test]
+fn parse_debug_journal_rejects_non_positive_sequences_explicitly() {
+    for (flag, value) in [("--from-sequence", "0"), ("--to-sequence", "-1")] {
+        let error =
+            crate::cli::debug_journal::parse_debug_journal_args(vec![flag.into(), value.into()])
+                .unwrap_err();
+
+        assert!(
+            error.to_string().contains("sequence must be positive"),
+            "unexpected {flag} error: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn parse_debug_journal_preserves_non_utf8_path_arguments() {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let journal = std::ffi::OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+    let options = crate::cli::debug_journal::parse_debug_journal_args(vec![
+        "--journal".into(),
+        journal.clone(),
+    ])
+    .unwrap();
+    assert_eq!(
+        options.journal.unwrap().as_os_str().as_bytes(),
+        journal.as_os_str().as_bytes()
+    );
+
+    let config = std::ffi::OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xfe]);
+    let options = crate::cli::debug_journal::parse_debug_journal_args(vec![
+        "--config".into(),
+        config.clone(),
+    ])
+    .unwrap();
+    assert_eq!(
+        options.endpoint.config.unwrap().as_os_str().as_bytes(),
+        config.as_os_str().as_bytes()
+    );
+}
+
+#[test]
 fn render_debug_journal_keeps_each_record_on_one_compact_line() {
     let thread_id = verlet_runtime_contracts::ThreadId::new();
     let record = verlet_history::EventRecord {

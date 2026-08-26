@@ -51,6 +51,8 @@ pub mod io {
 pub enum SqliteError {
     #[error("sqlite engine error: {0}")]
     Engine(#[from] turso::Error),
+    #[error("sqlite engine error: {0}")]
+    Core(#[from] turso_core::LimboError),
     #[error("sqlite io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -127,12 +129,8 @@ pub struct DbConfig {
     pub journal_mode: JournalMode,
     pub foreign_keys: bool,
     pub busy_timeout: std::time::Duration,
-    /// Applied per connection with `PRAGMA query_only`. ADVISORY, not
-    /// enforced: the pinned Turso 0.7 pre-releases have no local read-only
-    /// open flag (checked on pre.18; pin now pre.19), and a
-    /// caller can flip the pragma back on a connection it holds. This catches
-    /// accidental writes (they error), which is the contract our read-only
-    /// paths need today.
+    /// Enforced by Turso's engine-level read-only open flag. Connections also
+    /// receive `PRAGMA query_only` as defense in depth.
     pub read_only: bool,
 }
 
@@ -155,6 +153,11 @@ impl Default for DbConfig {
 pub struct Db {
     inner: turso::Database,
     config: DbConfig,
+    /// Shared Turso file lock acquired before an engine-level read-only
+    /// database. Turso's read-only flag deliberately skips its automatic
+    /// owner lock, so this guard preserves the verified cross-process refusal
+    /// without opening the evidence file for write access.
+    _owner_lock: Option<std::sync::Arc<dyn turso_core::File>>,
 }
 
 impl Db {
@@ -164,8 +167,17 @@ impl Db {
         let path = path.as_ref();
         let path_str = sqlite_path(path)?;
         prepare_path(path, config.read_only)?;
-        let inner = turso::Builder::new_local(path_str).build().await?;
-        Self::from_database(inner, config).await
+        let builder = turso::Builder::new_local(path_str).read_only(config.read_only);
+        let (builder, owner_lock) = if config.read_only {
+            let io: std::sync::Arc<dyn turso_core::IO> =
+                std::sync::Arc::new(turso_core::PlatformIO::new()?);
+            let owner_lock = acquire_read_lock(path_str, &io)?;
+            (builder.with_io_impl(io), Some(owner_lock))
+        } else {
+            (builder, None)
+        };
+        let inner = builder.build().await?;
+        Self::from_database(inner, config, owner_lock).await
     }
 
     /// Open with a caller-supplied IO implementation. This is the DST seam:
@@ -180,21 +192,31 @@ impl Db {
     ) -> SqliteResult<Self> {
         let path = path.as_ref();
         let path_str = sqlite_path(path)?;
+        let owner_lock = if config.read_only {
+            Some(acquire_read_lock(path_str, &io)?)
+        } else {
+            None
+        };
         let inner = turso::Builder::new_local(path_str)
+            .read_only(config.read_only)
             .with_io_impl(io)
             .build()
             .await?;
-        Self::from_database(inner, config).await
+        Self::from_database(inner, config, owner_lock).await
     }
 
     /// In-memory database for tests; same pragma treatment as [`Db::open`].
     pub async fn in_memory(config: DbConfig) -> SqliteResult<Self> {
-        let inner = turso::Builder::new_local(":memory:").build().await?;
-        Self::from_database(inner, config).await
+        let inner = turso::Builder::new_local(":memory:")
+            .read_only(config.read_only)
+            .build()
+            .await?;
+        Self::from_database(inner, config, None).await
     }
 
     /// A new connection with this database's pragmas applied
-    /// (`busy_timeout`, `foreign_keys`, `query_only` when read-only).
+    /// (`busy_timeout`, `foreign_keys`, and defense-in-depth `query_only` for
+    /// an engine-enforced read-only database).
     pub async fn connect(&self) -> SqliteResult<Connection> {
         let conn = self.inner.connect()?;
         apply_connection_config(&conn, &self.config).await?;
@@ -208,8 +230,16 @@ impl Db {
 
     /// Construct a handle and apply file-level journal policy once before
     /// handing out independently configured connections.
-    async fn from_database(inner: turso::Database, config: DbConfig) -> SqliteResult<Self> {
-        let db = Self { inner, config };
+    async fn from_database(
+        inner: turso::Database,
+        config: DbConfig,
+        owner_lock: Option<std::sync::Arc<dyn turso_core::File>>,
+    ) -> SqliteResult<Self> {
+        let db = Self {
+            inner,
+            config,
+            _owner_lock: owner_lock,
+        };
         let conn = db.connect().await?;
         if !db.config.read_only {
             let journal_mode = match db.config.journal_mode {
@@ -220,6 +250,15 @@ impl Db {
         }
         Ok(db)
     }
+}
+
+fn acquire_read_lock(
+    path: &str,
+    io: &std::sync::Arc<dyn turso_core::IO>,
+) -> SqliteResult<std::sync::Arc<dyn turso_core::File>> {
+    let file = io.open_file(path, turso_core::OpenFlags::ReadOnly, true)?;
+    file.lock_file(false)?;
+    Ok(file)
 }
 
 fn sqlite_path(path: &std::path::Path) -> SqliteResult<&str> {
@@ -387,6 +426,18 @@ mod tests {
         .await
         .expect("pragma query");
         value.expect("pragma returned one row")
+    }
+
+    fn directory_file_bytes(
+        path: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -577,8 +628,20 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut checkpoint = conn
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .unwrap();
+        while checkpoint.next().await.unwrap().is_some() {}
+        drop(checkpoint);
         drop(conn);
         drop(writable);
+        let before = directory_file_bytes(temp.path());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
 
         let read_only = crate::Db::open(
             &path,
@@ -604,11 +667,21 @@ mod tests {
                 .unwrap(),
             "seed"
         );
+        drop(rows);
+        conn.pragma_update("query_only", 0).await.unwrap();
         assert!(
             conn.execute("INSERT INTO records VALUES ('denied')", ())
                 .await
                 .is_err()
         );
+        drop(conn);
+        drop(read_only);
+        assert_eq!(directory_file_bytes(temp.path()), before);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

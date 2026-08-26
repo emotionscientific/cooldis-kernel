@@ -11050,6 +11050,100 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
 }
 
 #[tokio::test]
+async fn journal_events_list_reads_concurrently_while_a_turn_is_running() {
+    let root = unique_test_root("journal-events-active-turn");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let client = std::sync::Arc::new(BlockingProviderClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+    let turn_id = start_text_turn(&app, &connection, &thread_id, "inspect the live journal").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.wait_for_request(),
+    )
+    .await
+    .expect("provider request did not start");
+    assert_eq!(
+        app.handle_for_thread(&thread_id).await.unwrap().status(),
+        verlet_runtime_contracts::ThreadStatus::Running
+    );
+
+    let params = Some(serde_json::json!({ "threadId": thread_id }));
+    let (first, second) = tokio::join!(
+        app.dispatch_request(&connection, "journal/events/list", params.clone()),
+        app.dispatch_request(&connection, "journal/events/list", params),
+    );
+    for result in [first.unwrap(), second.unwrap()] {
+        let records = result["data"].as_array().unwrap();
+        assert!(!records.is_empty());
+        assert!(records.iter().all(|record| {
+            record["coordinates"]["thread_id"].as_str() == Some(thread_id.as_str())
+        }));
+        assert!(
+            records
+                .iter()
+                .any(|record| { record["kind"].as_str() == Some("session.entry.appended") })
+        );
+    }
+
+    client.release_request();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
+    app.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn journal_events_list_requires_host_authority_and_positive_sequences() {
+    let app = test_app().await;
+    let (mut interactive_connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&interactive_connection).await;
+    interactive_connection.resolved_principal.kind = crate::daemon::identity::PrincipalKind::Member;
+    let denied = app
+        .dispatch_request(
+            &interactive_connection,
+            "journal/events/list",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, -32003);
+    assert_eq!(
+        denied.message,
+        "request is not authorized for this principal"
+    );
+
+    let (operator_connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&operator_connection).await;
+    for params in [
+        serde_json::json!({ "fromSequence": 0 }),
+        serde_json::json!({ "toSequence": -1 }),
+    ] {
+        let invalid = app
+            .dispatch_request(&operator_connection, "journal/events/list", Some(params))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, -32602);
+        assert!(invalid.message.contains("sequence must be positive"));
+    }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let root = unique_test_root("app-server-thread-events-query");
     let workspace = root.join("workspace");
