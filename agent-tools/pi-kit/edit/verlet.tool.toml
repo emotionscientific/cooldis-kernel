@@ -20,6 +20,10 @@ input_schema = "schemas/edit.input.json"
 output_schema = "schemas/edit.output.json"
 required_capabilities = ["fs.write"]
 
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+
 [operations.command]
 name = "pi edit"
 stdin = "json"

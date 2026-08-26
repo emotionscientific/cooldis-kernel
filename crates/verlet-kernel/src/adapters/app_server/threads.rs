@@ -696,6 +696,11 @@ impl crate::adapters::app_server::VerletAppServer {
         let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
+        let default_workspace = app_server_default_workspace_for_record(
+            &record,
+            self.inner.default_workspace.as_ref(),
+            &self.inner.cwd,
+        );
         crate::agent::manifest_bind::bind_published_agent_record_with_placement(
             &record,
             alias,
@@ -709,7 +714,7 @@ impl crate::adapters::app_server::VerletAppServer {
             overrides,
             Some(&self.inner.default_placement),
             placement_override,
-            self.inner.default_workspace.as_ref(),
+            default_workspace.as_ref(),
             workspace_override,
             self.remote_event_store_served(),
         )
@@ -2332,6 +2337,7 @@ pub(crate) struct CapsuleBindingRuntimeFactory {
 struct ThreadOperationCatalog {
     registry: std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>,
     tool_aliases: Vec<crate::agent::agent_tool_router::OperationToolAlias>,
+    bash_hidden_operations: std::collections::BTreeSet<(String, String)>,
     /// The per-thread workspace VFS installed into catalog-loaded operations and
     /// virtual bash so filesystem surfaces do not drift into separate trees.
     workspace_vfs: std::sync::Arc<verlet_vfs::VerletVfs>,
@@ -2341,6 +2347,80 @@ struct ThreadOperationCatalog {
 pub(crate) struct ThreadOperationBinding {
     pub(crate) binding: crate::agent::manifest_bind::AgentManifestOperationBinding,
     pub(crate) attach_event_id: Option<verlet_history::EventRecordId>,
+}
+
+/// Resolves the model-facing surface for a direct tool row from the
+/// published record's interface contract and the binding's attach
+/// configuration (lexicon: bound parameter). Returns `None` when the
+/// operation declares no surface. Bound values come from the fold's
+/// attach-time `bound_parameters` for this binding; a declared bound
+/// parameter with no attach-time value, or a value that fails its property
+/// schema, is an alias-build error rather than a silent skip.
+fn tool_call_surface_for_operation(
+    record: &verlet_operations::operation_store::PublishedOperationRecord,
+    operation_name: &str,
+    bound_parameters: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> crate::kernel::runtime_host::VerletResult<
+    Option<crate::agent::agent_tool_router::ToolCallSurface>,
+> {
+    let Some(operation) = record.interface.as_ref().and_then(|interface| {
+        interface
+            .operations
+            .iter()
+            .find(|operation| operation.name == operation_name)
+    }) else {
+        return Ok(None);
+    };
+    let Some(surface) = &operation.surface else {
+        return Ok(None);
+    };
+    let mut bound_values = std::collections::BTreeMap::new();
+    for name in &surface.bound {
+        let value = bound_parameters.get(name).cloned().ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "operation {:?}/{} surface requires bound parameter {name:?}, but its attachment has no value",
+                record.name, operation_name
+            ))
+        })?;
+        let schema = operation
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get(name))
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "operation {:?}/{} surface has no schema for bound parameter {name:?}",
+                    record.name, operation_name
+                ))
+            })?;
+        verlet_runtime_contracts::schema::validate_json_value_against_schema(
+            schema,
+            &value,
+            &format!(
+                "operation {:?}/{} bound parameter {name:?}",
+                record.name, operation_name
+            ),
+        )
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "operation {:?}/{} bound parameter {name:?} is invalid: {err}",
+                record.name, operation_name
+            ))
+        })?;
+        bound_values.insert(name.clone(), value);
+    }
+    let model_input_schema = operation.model_input_schema().map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "operation {:?}/{} has an invalid model-facing surface: {err}",
+            record.name, operation_name
+        ))
+    })?;
+    Ok(Some(crate::agent::agent_tool_router::ToolCallSurface {
+        model_input_schema,
+        envelope_input_schema: operation.input_schema.clone(),
+        args_field: surface.args_field.clone(),
+        bound_values,
+    }))
 }
 
 fn context_operation_binding_plan(
@@ -2436,6 +2516,7 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
             let ThreadOperationCatalog {
                 registry,
                 tool_aliases,
+                bash_hidden_operations,
                 workspace_vfs,
             } = catalog;
             let capability_grants = operation_registry_capability_grants(&registry).await;
@@ -2448,6 +2529,7 @@ impl crate::kernel::runtime_host::runtime_api::AgentRuntimeFactory
             factory = factory.with_bash_tool(bash_config_with_skill_files(
                 crate::capabilities::execution::VirtualBashRuntimeConfig::default()
                     .with_operation_registry(registry)
+                    .with_hidden_operations(bash_hidden_operations)
                     .with_workspace_vfs(workspace_vfs)
                     .with_capability_grants(capability_grants),
                 &skill_files,
@@ -2520,6 +2602,11 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
+        let default_workspace = app_server_default_workspace_for_record(
+            &record,
+            self.default_workspace.as_ref(),
+            &self.cwd,
+        );
         let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
             &record,
             alias,
@@ -2535,7 +2622,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
             &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
             Some(&self.default_placement),
             self.placement_override.as_ref(),
-            self.default_workspace.as_ref(),
+            default_workspace.as_ref(),
             self.workspace_override.as_ref(),
             self.remote_event_store_served
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -2551,6 +2638,33 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
                 .unwrap_or_else(|| caller.coordinates.user_id.clone()),
         )
     }
+}
+
+/// The ordinary configured default remains authoritative. When none exists,
+/// only the synthesized default manifest may derive one from the app-server
+/// cwd, and only when that manifest declares a workspace requirement. The
+/// manifest contributes the guest path; this binding contributes the host
+/// directory and is canonicalized and witnessed by manifest bind.
+fn app_server_default_workspace_for_record(
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    configured: Option<&crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    cwd: &std::path::Path,
+) -> Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding> {
+    configured.cloned().or_else(|| {
+        (record.name == crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAME
+            && record.namespace.as_deref()
+                == Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAMESPACE)
+            && record
+                .resolved_manifest
+                .get("workspace")
+                .is_some_and(|workspace| !workspace.is_null()))
+        .then(
+            || crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
+                host_path: cwd.to_path_buf(),
+                mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            },
+        )
+    })
 }
 
 impl AppServerThreadSpawnAgentResolver {
@@ -2754,6 +2868,7 @@ impl CapsuleBindingRuntimeFactory {
             verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
         let mut records = Vec::new();
         let mut tool_aliases = Vec::new();
+        let mut bash_hidden_operations = std::collections::BTreeSet::new();
         for thread_binding in manifest_operation_bindings {
             let ThreadOperationBinding {
                 binding,
@@ -2764,6 +2879,7 @@ impl CapsuleBindingRuntimeFactory {
                 artifact_hash,
                 effect_class: _,
                 attachment_config,
+                bound_parameters,
                 operations,
                 direct_tools,
             } = binding;
@@ -2775,40 +2891,55 @@ impl CapsuleBindingRuntimeFactory {
                         name, artifact_hash
                     ))
                 })?;
+            let selected_operation_names = operations.iter().cloned().collect();
+            crate::agent::manifest_bind::validate_bound_parameters_for_record(
+                &format!("operation binding {name:?}@sha256:{artifact_hash}"),
+                &record,
+                &selected_operation_names,
+                &bound_parameters,
+            )?;
             let is_kernel = matches!(
                 &record.source,
                 verlet_operations::operation_store::PublishedOperationSource::Kernel { .. }
             );
             let alias_attach_event_id = if is_kernel { None } else { attach_event_id };
-            tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
-                crate::agent::agent_tool_router::OperationToolAlias {
+            for direct_tool in direct_tools {
+                let surface = tool_call_surface_for_operation(
+                    &record,
+                    &direct_tool.operation,
+                    &bound_parameters,
+                )?;
+                if surface.is_some() {
+                    bash_hidden_operations.insert((name.clone(), direct_tool.operation.clone()));
+                }
+                tool_aliases.push(crate::agent::agent_tool_router::OperationToolAlias {
                     tool_name: direct_tool.tool_name,
                     registered_name: name.clone(),
                     operation_name: direct_tool.operation,
                     attach_event_id: alias_attach_event_id,
-                }
-            }));
+                    surface,
+                });
+            }
             if !is_kernel {
-                tool_aliases.extend(
-                    record
-                        .manifest
-                        .operations
-                        .iter()
-                        .filter(|operation| {
-                            operations.is_empty() || operations.contains(&operation.name)
-                        })
-                        .map(
-                            |operation| crate::agent::agent_tool_router::OperationToolAlias {
-                                tool_name: verlet_operations::projection_tool_name(
-                                    &name,
-                                    &operation.name,
-                                ),
-                                registered_name: name.clone(),
-                                operation_name: operation.name.clone(),
-                                attach_event_id: alias_attach_event_id,
-                            },
-                        ),
-                );
+                for operation in record.manifest.operations.iter().filter(|operation| {
+                    operations.is_empty() || operations.contains(&operation.name)
+                }) {
+                    let surface = tool_call_surface_for_operation(
+                        &record,
+                        &operation.name,
+                        &bound_parameters,
+                    )?;
+                    if surface.is_some() {
+                        bash_hidden_operations.insert((name.clone(), operation.name.clone()));
+                    }
+                    tool_aliases.push(crate::agent::agent_tool_router::OperationToolAlias {
+                        tool_name: verlet_operations::projection_tool_name(&name, &operation.name),
+                        registered_name: name.clone(),
+                        operation_name: operation.name.clone(),
+                        attach_event_id: alias_attach_event_id,
+                        surface,
+                    });
+                }
             }
             let record = if operations.is_empty() {
                 crate::operations::plugins::LocalPluginCatalogRecord::whole_record(record)
@@ -2856,6 +2987,7 @@ impl CapsuleBindingRuntimeFactory {
         Ok(Some(ThreadOperationCatalog {
             registry: catalog.operation_registry(),
             tool_aliases,
+            bash_hidden_operations,
             workspace_vfs: catalog.vfs(),
         }))
     }
@@ -3005,4 +3137,162 @@ pub(crate) async fn operation_registry_capability_grants(
         .into_iter()
         .flat_map(|operation| operation.capability_grants)
         .collect()
+}
+
+#[cfg(test)]
+mod surface_tests {
+    #[test]
+    fn alias_surface_uses_record_schema_and_attach_time_bound_values() {
+        let record = surface_record();
+        let bound_parameters = std::collections::BTreeMap::from([(
+            "root".to_string(),
+            serde_json::json!("/workspace"),
+        )]);
+
+        let result = crate::adapters::app_server::threads::tool_call_surface_for_operation(
+            &record,
+            "write",
+            &bound_parameters,
+        );
+        assert!(result.is_ok());
+        let surface = result.ok().flatten();
+        assert!(surface.is_some());
+        let Some(surface) = surface else {
+            return;
+        };
+
+        assert_eq!(surface.model_input_schema, model_schema());
+        assert_eq!(surface.envelope_input_schema, envelope_schema());
+        assert_eq!(surface.args_field, "args");
+        assert_eq!(surface.bound_values, bound_parameters);
+    }
+
+    #[test]
+    fn alias_surface_rejects_a_missing_attach_time_bound_value() {
+        let result = crate::adapters::app_server::threads::tool_call_surface_for_operation(
+            &surface_record(),
+            "write",
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(result.is_err());
+        let Some(error) = result.err().map(|error| error.to_string()) else {
+            return;
+        };
+
+        assert!(error.contains("requires bound parameter"), "{error}");
+        assert!(error.contains("root"), "{error}");
+    }
+
+    #[test]
+    fn alias_surface_rejects_an_invalid_refolded_bound_value() {
+        let result = crate::adapters::app_server::threads::tool_call_surface_for_operation(
+            &surface_record(),
+            "write",
+            &std::collections::BTreeMap::from([("root".to_string(), serde_json::json!(42))]),
+        );
+        let error = result.unwrap_err().to_string();
+
+        assert!(error.contains("bound parameter"), "{error}");
+        assert!(error.contains("root"), "{error}");
+        assert!(error.contains("expected string"), "{error}");
+    }
+
+    fn surface_record() -> verlet_operations::operation_store::PublishedOperationRecord {
+        let manifest = verlet_abi::WasmOperationManifest {
+            abi: verlet_wasm::runner::OPERATION_ABI.to_string(),
+            operations: vec![verlet_abi::WasmOperationDefinition {
+                id: 1,
+                name: "write".to_string(),
+                input: verlet_abi::WasmOperationValueKind::Json,
+                output: verlet_abi::WasmOperationValueKind::Json,
+                events: verlet_abi::WasmOperationEventKind::None,
+                mode: verlet_abi::WasmOperationMode::Sync,
+                required_capabilities: Vec::new(),
+            }],
+        };
+        let interface = verlet_operations::tool_package::ToolInterfaceContract {
+            schema_version: verlet_operations::tool_package::TOOL_PACKAGE_SCHEMA_VERSION,
+            identity: verlet_operations::tool_package::ToolPackageIdentity {
+                name: "pi-write".to_string(),
+                version: Some("0.1.0".to_string()),
+                description: None,
+                owner: None,
+            },
+            runtime: verlet_operations::tool_package::ToolRuntimeContract {
+                kind: "wasm32-unknown-unknown".to_string(),
+                state: Some("stateless".to_string()),
+                module_path: None,
+                bin_path: Some(std::path::PathBuf::from("pi-write.wasm")),
+                release: None,
+                timeout_ms: None,
+                max_input_bytes: None,
+                max_output_bytes: None,
+            },
+            operations: vec![verlet_operations::tool_package::ToolOperationInterface {
+                name: "write".to_string(),
+                description: None,
+                input_schema: envelope_schema(),
+                output_schema: serde_json::json!({"type": "object"}),
+                required_capabilities: std::collections::BTreeSet::new(),
+                surface: Some(verlet_operations::tool_package::ToolSurfaceContract {
+                    args_field: "args".to_string(),
+                    bound: std::collections::BTreeSet::from(["root".to_string()]),
+                }),
+                command: None,
+                mcp: None,
+                manual: None,
+            }],
+            fixtures: Vec::new(),
+        };
+        let registered = verlet_operations::RegisteredOperation {
+            name: "pi-write".to_string(),
+            manifest: manifest.clone(),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        let projections = registered
+            .projections()
+            .with_tool_interface(Some(&interface));
+        verlet_operations::operation_store::PublishedOperationRecord {
+            schema_version: 1,
+            name: registered.name,
+            active_artifact_hash: "a".repeat(64),
+            manifest,
+            projections,
+            interface: Some(interface),
+            capability_grants: std::collections::BTreeSet::new(),
+            metadata: std::collections::BTreeMap::new(),
+            source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                bin_path: std::path::PathBuf::from("pi-write.wasm"),
+            },
+            build: verlet_operations::operation_store::PublishedOperationBuild {
+                artifact_path: std::path::PathBuf::from("pi-write.wasm"),
+                published_at_ms: 1,
+            },
+        }
+    }
+
+    fn model_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        })
+    }
+
+    fn envelope_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root": {"type": "string"},
+                "args": model_schema()
+            },
+            "required": ["root", "args"],
+            "additionalProperties": false
+        })
+    }
 }

@@ -258,6 +258,157 @@ async fn router_rejects_non_object_json_tool_arguments() {
     ));
 }
 
+#[test]
+fn surface_envelope_mounts_model_arguments_and_bound_values() {
+    let surface = write_tool_surface();
+
+    let envelope = crate::agent::agent_tool_router::assemble_surface_envelope(
+        "call_1",
+        "write",
+        &surface,
+        serde_json::json!({"path": "notes.txt", "content": "hello"}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        envelope,
+        serde_json::json!({
+            "root": "/workspace",
+            "args": {"path": "notes.txt", "content": "hello"}
+        })
+    );
+}
+
+#[test]
+fn surface_envelope_validates_the_assembled_host_input() {
+    let mut surface = write_tool_surface();
+    surface
+        .bound_values
+        .insert("root".to_string(), serde_json::json!(42));
+
+    let error = crate::agent::agent_tool_router::assemble_surface_envelope(
+        "call_1",
+        "write",
+        &surface,
+        serde_json::json!({"path": "notes.txt", "content": "hello"}),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("assembled envelope"), "{error}");
+    assert!(error.contains("root"), "{error}");
+}
+
+#[tokio::test]
+async fn surface_router_projects_derived_schema_and_invokes_with_host_envelope() {
+    let router = router_with_operation("surface", "echo", "json", Vec::new())
+        .await
+        .with_tool_aliases([crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "write".to_string(),
+            registered_name: "surface".to_string(),
+            operation_name: "search".to_string(),
+            attach_event_id: None,
+            surface: Some(write_tool_surface()),
+        }]);
+
+    let definitions = router.tool_definitions().await;
+    assert_eq!(definitions[0].name, "write");
+    assert_eq!(definitions[0].input_schema, write_model_input_schema());
+
+    let result = router
+        .invoke_tool_call(
+            "call_1",
+            "write",
+            serde_json::json!({"path": "notes.txt", "content": "hello"}),
+        )
+        .await;
+    let verlet_history::CanonicalMessage::ToolResult {
+        is_error: false,
+        content,
+        ..
+    } = result
+    else {
+        panic!("expected successful surface tool result");
+    };
+    let envelope = tool_result_text(&content)
+        .strip_prefix("echo:")
+        .map(|value| serde_json::from_str::<serde_json::Value>(value).unwrap())
+        .unwrap();
+    assert_eq!(
+        envelope,
+        serde_json::json!({
+            "root": "/workspace",
+            "args": {"path": "notes.txt", "content": "hello"}
+        })
+    );
+}
+
+#[tokio::test]
+async fn surface_router_returns_tool_error_text_for_bound_parameter_collision() {
+    let router = router_with_operation("surface", "echo", "json", Vec::new())
+        .await
+        .with_tool_aliases([crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "write".to_string(),
+            registered_name: "surface".to_string(),
+            operation_name: "search".to_string(),
+            attach_event_id: None,
+            surface: Some(write_tool_surface()),
+        }]);
+
+    let result = router
+        .invoke_tool_call(
+            "call_1",
+            "write",
+            serde_json::json!({
+                "root": "/model-owned",
+                "path": "notes.txt",
+                "content": "hello"
+            }),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        verlet_history::CanonicalMessage::ToolResult {
+            is_error: true,
+            content,
+            ..
+        } if {
+            let text = tool_result_text(&content);
+            text.contains("bound parameter") && text.contains("root")
+        }
+    ));
+}
+
+#[tokio::test]
+async fn surface_router_returns_schema_error_text_for_model_arguments() {
+    let router = router_with_operation("surface", "echo", "json", Vec::new())
+        .await
+        .with_tool_aliases([crate::agent::agent_tool_router::OperationToolAlias {
+            tool_name: "write".to_string(),
+            registered_name: "surface".to_string(),
+            operation_name: "search".to_string(),
+            attach_event_id: None,
+            surface: Some(write_tool_surface()),
+        }]);
+
+    let result = router
+        .invoke_tool_call("call_1", "write", serde_json::json!({"path": "notes.txt"}))
+        .await;
+
+    assert!(matches!(
+        result,
+        verlet_history::CanonicalMessage::ToolResult {
+            is_error: true,
+            content,
+            ..
+        } if {
+            let text = tool_result_text(&content);
+            text.contains("failed schema validation") && text.contains("content")
+        }
+    ));
+}
+
 #[tokio::test]
 async fn router_invokes_attached_operation_without_manifest_capability_check() {
     let router = router_with_operation(
@@ -633,6 +784,7 @@ async fn router_with_kernel_process_operation(
             registered_name: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }
@@ -649,12 +801,14 @@ fn router_attach_provenance_is_only_present_on_fold_derived_aliases() {
             registered_name: "bound".to_string(),
             operation_name: "run".to_string(),
             attach_event_id: Some(attach_event_id),
+            surface: None,
         },
         crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: "kernel_operation".to_string(),
             registered_name: "kernel".to_string(),
             operation_name: "run".to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ]);
 
@@ -694,12 +848,14 @@ async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_route
             operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
                 .to_string(),
             attach_event_id: None,
+            surface: None,
         },
         crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }
@@ -746,6 +902,7 @@ async fn router_with_kernel_thread_operations(
                     .to_string(),
                 operation_name: operation.to_string(),
                 attach_event_id: None,
+                surface: None,
             },
         ),
     )
@@ -768,6 +925,38 @@ fn tool_result_text(content: &[verlet_history::CanonicalContent]) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+fn write_model_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"}
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    })
+}
+
+fn write_tool_surface() -> crate::agent::agent_tool_router::ToolCallSurface {
+    crate::agent::agent_tool_router::ToolCallSurface {
+        model_input_schema: write_model_input_schema(),
+        envelope_input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root": {"type": "string"},
+                "args": write_model_input_schema()
+            },
+            "required": ["root", "args"],
+            "additionalProperties": false
+        }),
+        args_field: "args".to_string(),
+        bound_values: std::collections::BTreeMap::from([(
+            "root".to_string(),
+            serde_json::json!("/workspace"),
+        )]),
+    }
 }
 
 fn echo_operation_guest(prefix: &str, input: &str, required_capabilities: &[&str]) -> String {
@@ -885,6 +1074,7 @@ fn kernel_identity_router(
             registered_name: "thread-identity".to_string(),
             operation_name: "identify-thread".to_string(),
             attach_event_id: None,
+            surface: None,
         }])
 }
 

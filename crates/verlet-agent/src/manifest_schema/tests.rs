@@ -202,7 +202,10 @@ fn operation_attachment_config_parses_with_the_wasm_attachment_shape() {
 allowed_secrets = ["WORKSPACE_TOKEN"]
 
 [tools.attachment.allowed_private_network]
-"https://internal.example.test" = ["GET"]"#,
+"https://internal.example.test" = ["GET"]
+
+[tools.attachment.bound_parameters]
+root = "/workspace""#,
     );
 
     let manifest = parse(&source).unwrap();
@@ -213,7 +216,8 @@ allowed_secrets = ["WORKSPACE_TOKEN"]
             "allowed_secrets": ["WORKSPACE_TOKEN"],
             "allowed_private_network": {
                 "https://internal.example.test": ["GET"]
-            }
+            },
+            "bound_parameters": {"root": "/workspace"}
         })
     );
 }

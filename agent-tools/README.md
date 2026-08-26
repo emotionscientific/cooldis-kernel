@@ -46,6 +46,15 @@ CLI harness:
 {"root":"/workspace","args":{"path":"notes.txt"}}
 ```
 
+The Pi package manifests are surface-declared: direct model tool rows derive
+their input schema from the nested `args` schema, while the host binds `root`
+to the guest `/workspace` path at attach time. The default manifest declares
+that read-write mount without a host path; the app-server bind layer supplies
+its configured cwd as the witnessed host directory. Those schemas reject
+unknown model arguments, and the same operations are withheld from raw
+virtual-bash operation commands. CLI and fixture calls remain envelope-shaped
+because those callers act as the host.
+
 It returns exactly one CLI envelope, either `{"ok": <tool output>}` or
 `{"error": <text>}`. Tool and argument errors remain successful ABI calls so
 the caller receives the Pi-compatible error text. Only source and sink

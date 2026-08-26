@@ -148,6 +148,7 @@ fn pre_overlay_record_with_generated_mcp_name_still_validates() {
                 input_schema: serde_json::json!({"type": "string"}),
                 output_schema: serde_json::json!({"type": "string"}),
                 required_capabilities: std::collections::BTreeSet::new(),
+                surface: None,
                 command: None,
                 mcp: Some(crate::tool_package::ToolMcpContract {
                     tool_name: generated_mcp_name,

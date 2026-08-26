@@ -20,6 +20,10 @@ input_schema = "schemas/find.input.json"
 output_schema = "schemas/find.output.json"
 required_capabilities = []
 
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+
 [operations.command]
 name = "pi find"
 stdin = "json"
@@ -34,6 +38,10 @@ description = "Regex search with Pi context rendering, clipping, and truncation.
 input_schema = "schemas/grep.input.json"
 output_schema = "schemas/grep.output.json"
 required_capabilities = []
+
+[operations.surface]
+args_field = "args"
+bound = ["root"]
 
 [operations.command]
 name = "pi grep"

@@ -642,6 +642,7 @@ pub struct BoundCouplingFunction {
 #[derive(Clone, Debug, Default)]
 struct OperationBindingAccumulator {
     attachment_config: verlet_wasm::WasmAttachmentConfig,
+    bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     operations: std::collections::BTreeSet<String>,
     direct_tools: std::collections::BTreeSet<AgentManifestDirectToolBinding>,
     effect_class: Option<verlet_agent::manifest_schema::EffectClass>,
@@ -657,19 +658,33 @@ impl OperationBindingAccumulator {
     ) {
         self.merge_with_attachment(
             verlet_wasm::WasmAttachmentConfig::default(),
+            std::collections::BTreeMap::new(),
             operation,
             direct_tool,
             verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-        );
+        )
+        .unwrap();
     }
 
     fn merge_with_attachment(
         &mut self,
         attachment_config: verlet_wasm::WasmAttachmentConfig,
+        bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
         effect_class: verlet_agent::manifest_schema::EffectClass,
-    ) {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
+        for (name, value) in &bound_parameters {
+            if let Some(existing) = self.bound_parameters.get(name)
+                && existing != value
+            {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "operation binding has conflicting values for bound parameter {name:?}"
+                    ),
+                ));
+            }
+        }
         self.attachment_config
             .allowed_secrets
             .extend(attachment_config.allowed_secrets);
@@ -679,6 +694,9 @@ impl OperationBindingAccumulator {
                 .entry(origin)
                 .or_default()
                 .extend(methods);
+        }
+        for (name, value) in bound_parameters {
+            self.bound_parameters.insert(name, value);
         }
         if let Some(direct_tool) = direct_tool {
             self.direct_tools.insert(direct_tool);
@@ -698,6 +716,7 @@ impl OperationBindingAccumulator {
                 self.operations.clear();
             }
         }
+        Ok(())
     }
 
     fn operation_names(&self) -> Vec<String> {
@@ -2070,6 +2089,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     wasm_attachment_config(&tool.attachment),
+                    tool.attachment.bound_parameters.clone(),
                     tool.effect_class,
                     None,
                     operation_registry_root,
@@ -2088,6 +2108,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     wasm_attachment_config(&tool.attachment),
+                    tool.attachment.bound_parameters.clone(),
                     tool.effect_class,
                     Some(&tool.tool_name),
                     operation_registry_root,
@@ -2277,6 +2298,7 @@ fn operation_bindings_from_map(
                 artifact_hash,
                 effect_class: binding.effect_class.unwrap_or_default(),
                 attachment_config: binding.attachment_config,
+                bound_parameters: binding.bound_parameters,
                 operations,
                 direct_tools: binding.direct_tools.into_iter().collect(),
             }
@@ -2384,6 +2406,7 @@ async fn bind_operation_ref(
         tool_id,
         operation_ref,
         verlet_wasm::WasmAttachmentConfig::default(),
+        std::collections::BTreeMap::new(),
         verlet_agent::manifest_schema::EffectClass::AtMostOnce,
         direct_tool_name,
         operation_registry_root,
@@ -2396,6 +2419,7 @@ async fn bind_operation_ref_with_attachment(
     tool_id: &str,
     operation_ref: &str,
     attachment_config: verlet_wasm::WasmAttachmentConfig,
+    bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     effect_class: verlet_agent::manifest_schema::EffectClass,
     direct_tool_name: Option<&str>,
     operation_registry_root: Option<&std::path::Path>,
@@ -2407,6 +2431,25 @@ async fn bind_operation_ref_with_attachment(
         ))
     })?;
     let verification = verify_operation_ref(tool_id, operation_ref, registry_root)?;
+    let selected_names = verification
+        .operation
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let subject = format!("tool {tool_id:?} operation_ref {operation_ref:?}");
+    let has_surface = validate_bound_parameters_for_record(
+        &subject,
+        &verification.record,
+        &selected_names,
+        &bound_parameters,
+    )?;
+    if direct_tool_name.is_none() && has_surface {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{subject} binds a surface-declared operation as bash_tool; use direct_tool so the host can assemble bound parameters"
+            ),
+        ));
+    }
     let direct_tool_binding = direct_tool_name
         .map(|tool_name| {
             let operation = direct_tool_operation_name(
@@ -2429,11 +2472,105 @@ async fn bind_operation_ref_with_attachment(
         .or_default()
         .merge_with_attachment(
             attachment_config,
+            bound_parameters,
             verification.operation,
             direct_tool_binding,
             effect_class,
-        );
+        )
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "tool {tool_id:?} operation_ref {operation_ref:?} failed to merge its attachment: {err}"
+            ))
+        })?;
     Ok(())
+}
+
+/// Revalidates both new bind inputs and event-refolded attachment values.
+pub(crate) fn validate_bound_parameters_for_record(
+    subject: &str,
+    record: &verlet_operations::operation_store::PublishedOperationRecord,
+    selected_names: &std::collections::BTreeSet<String>,
+    bound_parameters: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> crate::kernel::runtime_host::VerletResult<bool> {
+    let Some(interface) = &record.interface else {
+        if let Some(name) = bound_parameters.keys().next() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("{subject} supplies unused bound parameter {name:?}"),
+            ));
+        }
+        return Ok(false);
+    };
+    let selected = interface
+        .operations
+        .iter()
+        .filter(|operation| selected_names.is_empty() || selected_names.contains(&operation.name));
+    let mut surface_operations = Vec::new();
+    let mut expected_names = std::collections::BTreeSet::new();
+    for operation in selected {
+        let Some(surface) = &operation.surface else {
+            continue;
+        };
+        expected_names.extend(surface.bound.iter().cloned());
+        surface_operations.push(operation);
+    }
+    for name in &expected_names {
+        if !bound_parameters.contains_key(name) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "{subject} surface requires bound parameter {name:?}, but its attachment has no value"
+                ),
+            ));
+        }
+    }
+    for name in bound_parameters.keys() {
+        if !expected_names.contains(name) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("{subject} supplies unused bound parameter {name:?}"),
+            ));
+        }
+    }
+    for operation in &surface_operations {
+        let surface = operation.surface.as_ref().ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "{subject} selected operation {:?} lost its surface during validation",
+                operation.name
+            ))
+        })?;
+        let properties = operation
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} operation {:?} surface has no input_schema properties",
+                    operation.name
+                ))
+            })?;
+        for name in &surface.bound {
+            let value = bound_parameters.get(name).ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} surface requires bound parameter {name:?}, but its attachment has no value"
+                ))
+            })?;
+            let schema = properties.get(name).ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} operation {:?} surface has no schema for bound parameter {name:?}",
+                    operation.name
+                ))
+            })?;
+            verlet_runtime_contracts::schema::validate_json_value_against_schema(
+                schema,
+                value,
+                &format!("{subject} bound parameter {name:?}"),
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} bound parameter {name:?} failed schema validation: {err}"
+                ))
+            })?;
+        }
+    }
+    Ok(!surface_operations.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -3103,7 +3240,7 @@ impl AgentManifestCouplingBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestOperationBinding {
     pub name: String,
@@ -3118,6 +3255,10 @@ pub struct AgentManifestOperationBinding {
         skip_serializing_if = "verlet_wasm::WasmAttachmentConfig::is_empty"
     )]
     pub attachment_config: verlet_wasm::WasmAttachmentConfig,
+    /// Router-owned values for operation surface bound parameters. These are
+    /// witnessed beside, never inserted into, the Wasm attachment config.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     /// Empty means the binding exposes the whole record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<String>,
@@ -3175,6 +3316,7 @@ pub(crate) fn binding_attached_payload(
         attachment_config: verlet_history::BindingAttachmentConfig {
             allowed_secrets: binding.attachment_config.allowed_secrets.clone(),
             allowed_private_network: binding.attachment_config.allowed_private_network.clone(),
+            bound_parameters: binding.bound_parameters.clone(),
         },
         effect_class: effect_class(binding.effect_class),
         requested_by: principal_id.to_string(),
@@ -3210,6 +3352,7 @@ pub(crate) fn operation_binding_from_attached_payload(
             allowed_secrets: payload.attachment_config.allowed_secrets,
             allowed_private_network: payload.attachment_config.allowed_private_network,
         },
+        bound_parameters: payload.attachment_config.bound_parameters,
         operations: payload.operations,
         direct_tools: payload
             .direct_tools

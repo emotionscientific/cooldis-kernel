@@ -138,6 +138,7 @@ fn installed_kits_synthesize_sorted_direct_rows_with_pinned_refs_and_attachments
     .unwrap();
     let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
         serde_json::from_value(plan.resolved_manifest).unwrap();
+    assert!(manifest.workspace.is_none());
     let rows = manifest
         .tools
         .iter()
@@ -195,6 +196,124 @@ fn installed_kits_synthesize_sorted_direct_rows_with_pinned_refs_and_attachments
         ["WRITE_TOKEN".to_string()].into_iter().collect()
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn installed_kit_surface_rows_bind_the_guest_workspace_root() {
+    let root = default_manifest_kit_test_root("bound-root");
+    let config = default_manifest_kit_test_config(&root);
+    default_manifest_kit_store(&config)
+        .save(&installed_kit_record(
+            "pi",
+            vec![installed_kit_surface_tool(
+                &config,
+                "pi-write",
+                "write",
+                "at-most-once",
+                &["fs.write"],
+            )],
+        ))
+        .unwrap();
+
+    let plan = crate::adapters::app_server::default_manifest::default_manifest_publish_plan(
+        &config, false, "1.0.0",
+    )
+    .unwrap();
+    let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(plan.resolved_manifest).unwrap();
+    let row = manifest
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool)
+                if tool.tool_name == "write" =>
+            {
+                Some(tool)
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        row.attachment.bound_parameters,
+        std::collections::BTreeMap::from([(
+            "root".to_string(),
+            serde_json::Value::String("/workspace".to_string()),
+        )])
+    );
+    assert_eq!(
+        manifest.workspace,
+        Some(
+            verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement {
+                guest_path: "/workspace".to_string(),
+                min_mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            }
+        )
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn installed_kit_surface_rows_reject_unsupported_bound_parameters() {
+    let root = default_manifest_kit_test_root("unsupported-bound");
+    let config = default_manifest_kit_test_config(&root);
+    default_manifest_kit_store(&config)
+        .save(&installed_kit_record(
+            "custom",
+            vec![installed_kit_tool_with_surface(
+                &config,
+                "custom-write",
+                "write",
+                "at-most-once",
+                &[],
+                Some(verlet_operations::tool_package::ToolSurfaceContract {
+                    args_field: "args".to_string(),
+                    bound: std::collections::BTreeSet::from(["tenant".to_string()]),
+                }),
+            )],
+        ))
+        .unwrap();
+
+    let error = crate::adapters::app_server::default_manifest::default_manifest_publish_plan(
+        &config, false, "1.0.0",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("custom"), "{error}");
+    assert!(error.contains("tenant"), "{error}");
+    assert!(error.contains("only root"), "{error}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn installed_kit_surface_workspace_declaration_is_host_path_free() {
+    let root = default_manifest_kit_test_root("host-path-free-workspace");
+    let config = default_manifest_kit_test_config(&root);
+    default_manifest_kit_store(&config)
+        .save(&installed_kit_record(
+            "pi",
+            vec![installed_kit_surface_tool(
+                &config,
+                "pi-write",
+                "write",
+                "at-most-once",
+                &[],
+            )],
+        ))
+        .unwrap();
+
+    let plan = crate::adapters::app_server::default_manifest::default_manifest_publish_plan(
+        &config, false, "1.0.0",
+    )
+    .unwrap();
+    assert!(
+        plan.authored_source
+            .contains("[workspace]\nguest_path = \"/workspace\"\nmin_mode = \"rw\""),
+        "{}",
+        plan.authored_source
+    );
+    assert!(!plan.authored_source.contains("host_path"));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -657,6 +776,44 @@ fn installed_kit_tool(
     effect_class: &str,
     required_capabilities: &[&str],
 ) -> verlet_operations::kit_package::InstalledKitTool {
+    installed_kit_tool_with_surface(
+        config,
+        operation_record_name,
+        tool_name,
+        effect_class,
+        required_capabilities,
+        None,
+    )
+}
+
+fn installed_kit_surface_tool(
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+    operation_record_name: &str,
+    tool_name: &str,
+    effect_class: &str,
+    required_capabilities: &[&str],
+) -> verlet_operations::kit_package::InstalledKitTool {
+    installed_kit_tool_with_surface(
+        config,
+        operation_record_name,
+        tool_name,
+        effect_class,
+        required_capabilities,
+        Some(verlet_operations::tool_package::ToolSurfaceContract {
+            args_field: "args".to_string(),
+            bound: std::collections::BTreeSet::from(["root".to_string()]),
+        }),
+    )
+}
+
+fn installed_kit_tool_with_surface(
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+    operation_record_name: &str,
+    tool_name: &str,
+    effect_class: &str,
+    required_capabilities: &[&str],
+    surface: Option<verlet_operations::tool_package::ToolSurfaceContract>,
+) -> verlet_operations::kit_package::InstalledKitTool {
     let required_capabilities = required_capabilities
         .iter()
         .map(|capability| (*capability).to_string())
@@ -694,9 +851,13 @@ fn installed_kit_tool(
         operations: vec![verlet_operations::tool_package::ToolOperationInterface {
             name: tool_name.to_string(),
             description: None,
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: surface.as_ref().map_or_else(
+                || serde_json::json!({"type": "object"}),
+                installed_kit_surface_input_schema,
+            ),
             output_schema: serde_json::json!({"type": "object"}),
             required_capabilities: required_capabilities.clone(),
+            surface,
             command: None,
             mcp: None,
             manual: None,
@@ -727,4 +888,27 @@ fn installed_kit_tool(
         effect_class: effect_class.to_string(),
         required_capabilities,
     }
+}
+
+fn installed_kit_surface_input_schema(
+    surface: &verlet_operations::tool_package::ToolSurfaceContract,
+) -> serde_json::Value {
+    let mut properties = serde_json::Map::from_iter([(
+        surface.args_field.clone(),
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        }),
+    )]);
+    for name in &surface.bound {
+        properties.insert(name.clone(), serde_json::json!({"type": "string"}));
+    }
+    let mut required = surface.bound.iter().cloned().collect::<Vec<_>>();
+    required.push(surface.args_field.clone());
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
 }

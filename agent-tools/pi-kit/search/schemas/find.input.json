@@ -10,9 +10,9 @@
         "limit": { "type": ["integer", "null"] }
       },
       "required": ["pattern"],
-      "additionalProperties": true
+      "additionalProperties": false
     }
   },
   "required": ["root", "args"],
-  "additionalProperties": true
+  "additionalProperties": false
 }

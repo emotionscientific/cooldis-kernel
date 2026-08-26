@@ -152,6 +152,36 @@ Agent manifest        references published operations with pinned op:// refs
 Raw `--module-path` and `--bin-path` remain useful for low-level conversion and
 debugging. Package build/publish is the authoring happy path.
 
+### Model-facing operation surfaces
+
+An operation whose ABI input is a host envelope can derive a narrower model
+surface from that same schema:
+
+```toml
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+```
+
+The input schema remains the one authored ABI contract. Publish validation
+requires its top-level properties to be exactly `args_field` plus the bound
+parameters, all required, with `additionalProperties = false`. The
+`args_field` subschema must also be a closed object and cannot expose a bound
+parameter name. Direct model rows receive that subschema; attach-time
+configuration supplies every bound parameter, and the router validates both
+the model arguments and the assembled envelope. Bind and replay validate the
+bound values against their property schemas. Surface operations are withheld
+from the model's raw virtual-bash command projection. CLI invocation keeps the
+full envelope because the caller is the host in that lane.
+
+For installed-kit surfaces, the synthesized default manifest declares a
+read-write `/workspace` requirement and binds `root` to that guest path. The
+requirement is deliberately host-path-free. At bind, the app-server supplies
+its configured cwd as the machine-local `AgentManifestWorkspaceBinding` unless
+an explicit default or RPC override wins; the resolved mount is witnessed in
+the bind receipt. `AbiFs` interprets `root` in this guest VFS namespace, and
+host confinement comes from the mount rather than from the envelope string.
+
 ## Importing An Existing REST API Instead
 
 When the desired tool is an existing REST API mirror, use a witnessed OpenAPI

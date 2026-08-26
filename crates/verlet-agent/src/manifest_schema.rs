@@ -605,12 +605,10 @@ pub struct AgentManifestDirectTool {
 }
 
 /// Host-enforced configuration carried by one manifest operation attachment.
-/// This intentionally matches `verlet_wasm::WasmAttachmentConfig` at the
-/// schema boundary without making the agent schema depend on a runtime
-/// implementation crate.
-#[derive(
-    Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
+/// Secret and private-network fields project into the Wasm runtime. Bound
+/// parameters stay router-side and supply operation envelope fields that are
+/// never model-owned.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestAttachment {
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -618,11 +616,17 @@ pub struct AgentManifestAttachment {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub allowed_private_network:
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Top-level operation input fields supplied by the host from this
+    /// attachment instead of by the model.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl AgentManifestAttachment {
     pub fn is_empty(&self) -> bool {
-        self.allowed_secrets.is_empty() && self.allowed_private_network.is_empty()
+        self.allowed_secrets.is_empty()
+            && self.allowed_private_network.is_empty()
+            && self.bound_parameters.is_empty()
     }
 }
 

@@ -86,12 +86,32 @@ impl ToolInvocationCancellation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The model-facing surface of a direct tool row whose operation declares an
+/// envelope split (lexicon: bound parameter). Resolved where the alias is
+/// built, from the published interface contract plus the binding's attach
+/// configuration; the router consumes it without touching the record store.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCallSurface {
+    /// Derived via `ToolOperationInterface::model_input_schema`; what the
+    /// model sees and what its arguments are validated against.
+    pub model_input_schema: serde_json::Value,
+    /// The authored ABI envelope schema used to validate the host-assembled
+    /// invocation before guest dispatch.
+    pub envelope_input_schema: serde_json::Value,
+    /// Envelope field the validated model arguments mount into.
+    pub args_field: String,
+    /// Bound parameter values pinned at attach; assembled into the envelope
+    /// host-side. A model-supplied value for one of these keys is rejected.
+    pub bound_values: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct OperationToolAlias {
     pub tool_name: String,
     pub registered_name: String,
     pub operation_name: String,
     pub attach_event_id: Option<verlet_history::EventRecordId>,
+    pub surface: Option<ToolCallSurface>,
 }
 
 #[async_trait::async_trait]
@@ -197,13 +217,18 @@ impl AgentToolRouter {
                     )
                     .await
             {
+                let input_schema = alias
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface.model_input_schema.clone())
+                    .unwrap_or_else(|| input_schema_for_value_kind(&projection.input));
                 definitions.push(verlet_provider::ToolDefinition::new(
                     alias.tool_name.clone(),
                     format!(
                         "Run Verlet operation {}/{}.",
                         projection.registered_name, projection.operation_name
                     ),
-                    input_schema_for_value_kind(&projection.input),
+                    input_schema,
                 ));
             }
         }
@@ -422,6 +447,14 @@ impl AgentToolRouter {
                     format!("tool {tool_name:?} has a hidden durable sink"),
                 ));
             }
+            let arguments = match self
+                .tool_aliases
+                .get(tool_name)
+                .and_then(|alias| alias.surface.as_ref())
+            {
+                Some(surface) => assemble_surface_envelope(call_id, tool_name, surface, arguments)?,
+                None => arguments,
+            };
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
             let operation_registry =
                 verlet_operations::operation_registry::ScopedOperationRegistry::new(
@@ -579,6 +612,66 @@ fn text_input_schema(description: &str) -> serde_json::Value {
         "required": ["input"],
         "additionalProperties": false
     })
+}
+
+/// Assembles the host-side envelope for a surface-declared operation:
+/// rejects model-supplied values for bound parameters, validates the model
+/// arguments against `surface.model_input_schema`, mounts them at
+/// `surface.args_field`, merges `surface.bound_values` at the top level, and
+/// validates the result against `surface.envelope_input_schema`.
+/// Validation failures return the schema error as tool-error text so the
+/// model can correct itself; a bound-parameter collision is always an error.
+fn assemble_surface_envelope(
+    call_id: &str,
+    tool_name: &str,
+    surface: &ToolCallSurface,
+    arguments: serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+    if let Some(arguments) = arguments.as_object() {
+        for name in surface.bound_values.keys() {
+            if arguments.contains_key(name) {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                    format!(
+                        "tool {tool_name:?} call {call_id} supplied bound parameter {name:?}; bound parameters are host-supplied"
+                    ),
+                ));
+            }
+        }
+    }
+    verlet_runtime_contracts::schema::validate_json_value_against_schema(
+        &surface.model_input_schema,
+        &arguments,
+        &format!("tool {tool_name:?} call {call_id} model arguments"),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+            "tool {tool_name:?} call {call_id} arguments failed schema validation: {err}"
+        ))
+    })?;
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(surface.args_field.clone(), arguments);
+    for (name, value) in &surface.bound_values {
+        if envelope.insert(name.clone(), value.clone()).is_some() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
+                format!(
+                    "tool {tool_name:?} call {call_id} surface args_field {:?} collides with bound parameter {name:?}",
+                    surface.args_field
+                ),
+            ));
+        }
+    }
+    let envelope = serde_json::Value::Object(envelope);
+    verlet_runtime_contracts::schema::validate_json_value_against_schema(
+        &surface.envelope_input_schema,
+        &envelope,
+        &format!("tool {tool_name:?} call {call_id} assembled envelope"),
+    )
+    .map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeExecution(format!(
+            "tool {tool_name:?} call {call_id} assembled envelope failed schema validation: {err}"
+        ))
+    })?;
+    Ok(envelope)
 }
 
 fn encode_tool_input(

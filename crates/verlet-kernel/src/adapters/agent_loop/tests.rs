@@ -223,6 +223,7 @@ fn recovery_bind_receipt(
             artifact_hash: "test".to_string(),
             effect_class,
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+            bound_parameters: std::collections::BTreeMap::new(),
             operations: vec!["recovery_tool".to_string()],
             direct_tools: vec![
                 crate::agent::manifest_bind::AgentManifestDirectToolBinding {
@@ -8312,6 +8313,7 @@ async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRou
             registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }
