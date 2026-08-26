@@ -181,6 +181,65 @@ V0 stores JSON schemas in the accepted interface contract and uses fixtures as
 the executable proof. Full JSON Schema validation belongs to the next package
 validator pass.
 
+## Kits
+
+A kit is a directory that groups one or more `verlet.tool.toml` packages and
+declares the model-facing tools they provide together. Its manifest is
+`verlet.kit.toml`:
+
+```toml
+kind = "verlet.kit"
+schema_version = 0
+packages = ["tools/file-read", "tools/file-write"]
+
+[identity]
+name = "filesystem"
+version = "0.1.0"
+description = "Read and write files through explicit VFS capabilities."
+
+[[tools]]
+tool_name = "file_read"
+package = "file-read"
+operation = "file_read"
+effect_class = "pure"
+
+[[tools]]
+tool_name = "file_write"
+package = "file-write"
+operation = "file_write"
+effect_class = "at-most-once"
+```
+
+Each `packages` entry is a relative directory confined to the kit root. The
+`package` value in a tool row names that member package's `identity.name`, not
+its directory. `operation` names an operation declared by the member package.
+`tool_name` values must be unique within the kit. `effect_class` accepts
+`pure`, `idempotent`, or `at-most-once` and defaults to `at-most-once`.
+
+Install a local kit with:
+
+```bash
+verlet kit install . \
+  --registry-root .verlet/operations \
+  --kits-root .verlet/kits
+```
+
+Install first validates the complete kit. It then builds every member through
+the same package proof gate as `verlet tool publish --package`, publishes each
+artifact to the operation registry, resolves every tool row to a pinned
+`op://<package>/<operation>@sha256:<artifact-hash>` reference, and writes one
+installed-kit record. The record is written only after all members publish.
+If a later member fails, earlier content-addressed publishes remain harmless
+and unreferenced. Reinstall overwrites the installed-kit record.
+
+Installed records are JSON files at `.verlet/kits/<kit-name>.json` by default.
+`verlet kit list` reads those records, and `verlet kit remove <kit-name>`
+deletes only the selected record. Published operations remain in the registry.
+Once EMO-608 lands, the daemon's default manifest will read these records at
+startup and synthesize one `direct_tool` row for each installed tool. Until
+then, install and record management work, but default-manifest pickup remains
+the intentionally empty seam.
+
 ## Agent Skill Shape
 
 The agent-facing skill should teach a model how to author a narrow deterministic

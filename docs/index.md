@@ -29,6 +29,8 @@ allowed to exercise.
 
 - Build an agent locally from a manifest.
 - Attach tools and resources, with explicit secret and private-network config.
+- Install a local kit of tool packages into content-addressed operation records
+  plus one removable installed-kit record.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.
@@ -83,6 +85,7 @@ capabilities, and run it under policy.
 Verlet is experimental. The repository is focused on V1 runtime primitives:
 agent manifests, operation publishing, ABI contracts, macro-authored custom Wasm
 couplings, witnessed OpenAPI operation imports, offline coupling replay,
+local tool-kit installation and installed-record management,
 local runtime execution, provider adapters including OpenAI Codex access through
 a user's ChatGPT plan,
 virtual bash, VFS-backed oversized-output spill receipts,
@@ -117,5 +120,6 @@ private-network binds require an explicit config opt-in; see
 - [Threat Model](threat-model.md)
 - [Frozen Format IDs](format-ids.md)
 - [OpenAPI Operation Imports](openapi-adapter.md)
+- [Wasm Operation Dev Kit And Kits](wasm-operation-dev-kit.md#kits)
 - [How Verlet Is Tested](how-verlet-is-tested.md)
 - [Roadmap](roadmap.md)

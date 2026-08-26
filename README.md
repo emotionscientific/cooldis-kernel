@@ -104,6 +104,8 @@ The V1 work is focused on runtime primitives:
   drainable lifecycles;
 - agent manifest planning, publishing, listing, showing, and local running;
 - operation publication and ABI-backed invocation;
+- local tool-kit installation that lowers member packages into ordinary
+  content-addressed operation publishes plus one removable installed-kit record;
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication with floating author refs pinned in bind receipts,
   static indexes, and read-only VFS bodies;
@@ -164,7 +166,7 @@ the record of why it moved is in the commit history and the formalism.
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.
 - [Wasm operation dev kit](docs/wasm-operation-dev-kit.md): Rust guest
-  macros, fixtures, custom coupling authoring, and replay.
+  macros, fixtures, tool kits, custom coupling authoring, and replay.
 - [OpenAPI adapter](docs/openapi-adapter.md): import a witnessed REST contract
   into ordinary published operations without SDK generation.
 - [Agent CLI](docs/agent-cli.md): manifest authoring and local agent commands.

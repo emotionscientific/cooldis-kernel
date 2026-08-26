@@ -376,11 +376,11 @@ pub(crate) fn compact_json(value: &serde_json::Value) -> String {
 
 #[derive(Debug)]
 pub(crate) struct BuiltToolPackage {
-    package: verlet_operations::tool_package::ToolPackageSource,
-    artifact_path: std::path::PathBuf,
-    source: verlet_operations::operation_store::PublishedOperationSource,
+    pub(crate) package: verlet_operations::tool_package::ToolPackageSource,
+    pub(crate) artifact_path: std::path::PathBuf,
+    pub(crate) source: verlet_operations::operation_store::PublishedOperationSource,
     manifest: verlet_abi::WasmOperationManifest,
-    interface: verlet_operations::tool_package::ToolInterfaceContract,
+    pub(crate) interface: verlet_operations::tool_package::ToolInterfaceContract,
     receipt: verlet_operations::tool_package::ToolBuildReceipt,
 }
 

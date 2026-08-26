@@ -36,6 +36,179 @@ fn verlet_cli_tool_help_is_canonical() {
 }
 
 #[test]
+fn verlet_cli_kit_help_is_canonical() {
+    let help = run_verlet(["kit", "--help"]);
+    assert!(help.contains("verlet kit <subcommand>"));
+    assert!(help.contains("install <path>"));
+    assert!(help.contains("list"));
+    assert!(help.contains("remove <name>"));
+
+    let install_help = run_verlet(["kit", "install", "--help"]);
+    assert!(install_help.contains("verlet kit install <kit-dir>"));
+    assert!(install_help.contains("--registry-root"));
+    assert!(install_help.contains("--kits-root"));
+
+    let unknown = run_verlet_failed(["kit", "unknown", "--help"]);
+    assert!(stderr(&unknown).contains("unknown kit subcommand"));
+}
+
+#[test]
+fn verlet_cli_kit_installs_reinstalls_lists_and_removes() {
+    let root = temp_dir("kit-install");
+    let kit_root = root.join("fixture-kit");
+    let registry_root = root.join("operations");
+    let kits_root = root.join("kits");
+    write_cli_kit_fixture(&kit_root, "alpha-kit", "1.0.0", false);
+
+    let install = run_verlet([
+        "kit",
+        "install",
+        kit_root.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    assert!(install.contains("installed kit alpha-kit"), "{install}");
+    assert!(install.contains("published fixture-member"), "{install}");
+    assert!(
+        install.contains("tool fixture_cat op://fixture-member/cat@sha256:"),
+        "{install}"
+    );
+    assert!(install.contains("next daemon startup"), "{install}");
+
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root);
+    let published = registry.load_record("fixture-member").unwrap();
+    assert_eq!(
+        published.capability_grants,
+        std::collections::BTreeSet::from(["fs.write".to_string()])
+    );
+    let store = verlet_operations::kit_package::InstalledKitStore::new(&kits_root);
+    let first = store.load("alpha-kit").unwrap().unwrap();
+    assert_eq!(first.version.as_deref(), Some("1.0.0"));
+    assert_eq!(first.tools.len(), 2);
+    assert_eq!(
+        first.tools[0].operation_ref,
+        format!(
+            "op://fixture-member/cat@sha256:{}",
+            published.active_artifact_hash
+        )
+    );
+    assert_eq!(
+        first.tools[0].required_capabilities,
+        published.capability_grants
+    );
+    assert_eq!(first.tools[0].effect_class, "pure");
+    assert_eq!(first.tools[1].effect_class, "at-most-once");
+    assert!(matches!(
+        &first.source,
+        verlet_operations::kit_package::InstalledKitSource::Path { path }
+            if path == &std::fs::canonicalize(&kit_root).unwrap()
+    ));
+
+    write_cli_kit_fixture(&kit_root, "alpha-kit", "1.1.0", false);
+    run_verlet([
+        "kit",
+        "install",
+        kit_root.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    let second = store.load("alpha-kit").unwrap().unwrap();
+    assert_eq!(second.version.as_deref(), Some("1.1.0"));
+    assert_ne!(second.source_hash, first.source_hash);
+
+    let bravo = verlet_operations::kit_package::InstalledKitRecord {
+        name: "bravo-kit".to_string(),
+        version: Some("2.0.0".to_string()),
+        installed_at_ms: second.installed_at_ms,
+        ..second.clone()
+    };
+    store.save(&bravo).unwrap();
+    let list = run_verlet(["kit", "list", "--kits-root", kits_root.to_str().unwrap()]);
+    let lines = list.lines().collect::<Vec<_>>();
+    assert!(lines[0].starts_with("alpha-kit "), "{list}");
+    assert!(lines[1].starts_with("bravo-kit "), "{list}");
+
+    let list_json = run_verlet([
+        "kit",
+        "list",
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+        "--json",
+    ]);
+    let records: Vec<verlet_operations::kit_package::InstalledKitRecord> =
+        serde_json::from_str(&list_json).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha-kit", "bravo-kit"]
+    );
+
+    let removed = run_verlet([
+        "kit",
+        "remove",
+        "alpha-kit",
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    assert!(removed.contains("removed kit alpha-kit"), "{removed}");
+    let absent = run_verlet([
+        "kit",
+        "remove",
+        "alpha-kit",
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    assert!(
+        absent.contains("kit alpha-kit was not installed"),
+        "{absent}"
+    );
+    assert!(registry.load_record("fixture-member").is_ok());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn verlet_cli_kit_failed_member_writes_no_installed_record() {
+    let root = temp_dir("kit-failed-member");
+    let kit_root = root.join("fixture-kit");
+    let registry_root = root.join("operations");
+    let kits_root = root.join("kits");
+    write_cli_kit_fixture(&kit_root, "failing-kit", "1.0.0", true);
+
+    let failed = run_verlet_failed([
+        "kit",
+        "install",
+        kit_root.to_str().unwrap(),
+        "--registry-root",
+        registry_root.to_str().unwrap(),
+        "--kits-root",
+        kits_root.to_str().unwrap(),
+    ]);
+    let error = stderr(&failed);
+    assert!(
+        error.contains("published member packages remain content-addressed and unreferenced"),
+        "{error}"
+    );
+    assert!(
+        verlet_operations::operation_store::LocalOperationRegistry::new(&registry_root)
+            .load_record("fixture-member")
+            .is_ok()
+    );
+    assert_eq!(
+        verlet_operations::kit_package::InstalledKitStore::new(&kits_root)
+            .load("failing-kit")
+            .unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn verlet_cli_tool_list_is_canonical_and_legacy_bare_lookup_fails() {
     let registry_root = temp_dir("canonical-kernel-package-list");
     verlet::operations::kernel_packages::ensure_verlet_threads_published(Some(&registry_root))
@@ -2727,6 +2900,112 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("verlet-cli-{label}-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn write_cli_kit_fixture(
+    kit_root: &std::path::Path,
+    kit_name: &str,
+    version: &str,
+    failing_member: bool,
+) {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let module_path = repo.join("tests/fixtures/wasm-vfs-tools");
+    let member = kit_root.join("member");
+    write_json_file(&member.join("schemas/path.json"), r#"{"type":"string"}"#);
+    write_json_file(&member.join("schemas/bytes.json"), r#"{"type":"string"}"#);
+    std::fs::write(
+        member.join("verlet.tool.toml"),
+        format!(
+            r#"kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "fixture-member"
+version = "0.1.0"
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "{}"
+state = "stateless"
+
+[[operations]]
+name = "cat"
+input_schema = "schemas/path.json"
+output_schema = "schemas/bytes.json"
+required_capabilities = []
+
+[operations.command]
+name = "fixture cat"
+
+[[operations]]
+name = "put"
+input_schema = "schemas/path.json"
+output_schema = "schemas/bytes.json"
+required_capabilities = ["fs.write"]
+
+[operations.command]
+name = "fixture put"
+"#,
+            module_path.display()
+        ),
+    )
+    .unwrap();
+
+    let mut packages = "packages = [\"member\"]".to_string();
+    if failing_member {
+        let broken = kit_root.join("broken");
+        write_json_file(&broken.join("schemas/path.json"), r#"{"type":"string"}"#);
+        std::fs::write(
+            broken.join("verlet.tool.toml"),
+            r#"kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "broken-member"
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "missing-module"
+
+[[operations]]
+name = "cat"
+input_schema = "schemas/path.json"
+output_schema = "schemas/path.json"
+
+[operations.command]
+name = "broken cat"
+"#,
+        )
+        .unwrap();
+        packages = "packages = [\"member\", \"broken\"]".to_string();
+    }
+    std::fs::write(
+        kit_root.join("verlet.kit.toml"),
+        format!(
+            r#"kind = "verlet.kit"
+schema_version = 0
+{packages}
+
+[identity]
+name = "{kit_name}"
+version = "{version}"
+description = "CLI fixture kit."
+
+[[tools]]
+tool_name = "fixture_cat"
+package = "fixture-member"
+operation = "cat"
+effect_class = "pure"
+
+[[tools]]
+tool_name = "fixture_put"
+package = "fixture-member"
+operation = "put"
+effect_class = "at-most-once"
+"#
+        ),
+    )
+    .unwrap();
 }
 
 fn write_json_file(path: &std::path::Path, body: &str) {
