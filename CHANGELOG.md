@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.5.1 (2026-08-26)
+
+### Tool kits
+
+- Added the kit surface: a kit is a directory of tool packages with a
+  `verlet.kit.toml` manifest declaring the tool set it exposes.
+  `verlet kit install <kit-dir>` builds and proves each member package,
+  publishes the operations content-addressed, and writes one installed-kit
+  record under `.verlet/kits/`. The daemon's default manifest synthesizes
+  `direct_tool` rows from installed-kit records at startup, so installed
+  tools appear after the next daemon restart.
+- Added the pi kit under `agent-tools/`: read, write, edit, find, and grep
+  file tools compiled to wasm, exposed to models under their plain names.
+  `scripts/build-pi-kit-dist.sh` builds the distributable kit directory.
+- A tool package can now declare the model-facing tool name for an
+  operation (`[operations.mcp] tool_name`); the declared name overlays the
+  stored projection on every derivation lane.
+- `verlet chat` setup gained a "Tool kits" step: an "Install tools" row on
+  the setup home screen, and a one-shot first-run offer after the first
+  model selection when the recommended kit is not installed. Installs run
+  the same pipeline as `verlet kit install` against the project instance;
+  attached sessions are directed to run the install on the instance host.
+
+### Dependencies
+
+- bashkit 0.14.3 to 0.17.1, tuika 0.8.0 to 0.11.1, turso and turso_core
+  0.7.0-pre.19 to 0.8.0-pre.7.
+- The virtual shell's `yaml` builtin is gone: bashkit removed it, and its
+  `yq` replacement needs a bashkit feature this build does not enable. The
+  `yaml` name is no longer reserved and can be claimed by an operation.
+- The virtual shell gained bashkit's new builtins (bzip2 family), tighter
+  resource bounds on heavy scripts, and stricter parsing (malformed `$(...)`
+  fails closed). The reserved-command list is now pinned to bashkit's real
+  builtin set by a test, and shell grammar keywords (`time`, `if`, `case`,
+  ...) are reserved too: operations can no longer claim names the shell
+  parses as syntax.
+- Shell output is bounded at the text boundary: non-UTF-8 bytes from a
+  shell pipeline can no longer expand past the 64 MiB retention ceiling,
+  and truncation reported by nested operation and external-proxy outputs
+  now survives into the final command result instead of being dropped.
+
+### Fixes
+
+- The Linux verification lane no longer kills its own container: trace-ab
+  terminates child process groups with a direct killpg syscall, and lane
+  diagnostics name the known SIGKILL causes.
+- Cargo lane locks are keyed so containers cannot see stale locks from
+  another container's run.
+- Socket-release assertions retry to absorb close-notify latency.
+
 ## v0.5.0 (2026-08-24)
 
 ### Control plane
