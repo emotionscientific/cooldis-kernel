@@ -709,7 +709,11 @@ impl bashkit::Builtin for OperationShellCommandBuiltin {
                 Ok(projection) => projection,
                 Err(err) => return Ok(bashkit::ExecResult::err(format!("verlet: {err}\n"), 127)),
             };
-        let input = match crate::operation_shell_input(&projection, ctx.args, ctx.stdin) {
+        let input = match crate::operation_shell_input(
+            &projection,
+            ctx.args,
+            ctx.stdin.map(|stdin| &**stdin),
+        ) {
             Ok(input) => input,
             Err(err) => return Ok(bashkit::ExecResult::err(format!("verlet: {err}\n"), 2)),
         };
@@ -750,7 +754,9 @@ impl bashkit::Builtin for VerletBuiltin {
                 }
                 let registered_name = ctx.args[1].clone();
                 let operation_name = ctx.args[2].clone();
-                let stdin = ctx.stdin.unwrap_or_default().as_bytes().to_vec();
+                let stdin = ctx
+                    .stdin
+                    .map_or_else(Vec::new, |stdin| stdin.as_bytes().to_vec());
                 let Some(record) = registry.describe(&registered_name).await else {
                     return Ok(bashkit::ExecResult::err(
                         format!("verlet: registered operation {registered_name:?} was not found\n"),
@@ -857,7 +863,7 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
         };
         let deadline = ctx
             .execution_extension::<verlet_process::execution::ExecutionDeadline>()
-            .cloned()
+            .and_then(|deadline| deadline.try_with(Clone::clone).ok())
             .unwrap_or_else(|| {
                 verlet_process::execution::ExecutionDeadline::from_now(std::time::Duration::ZERO)
             });
@@ -875,7 +881,7 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
 
         let execution = match ctx
             .execution_extension::<tokio_util::sync::CancellationToken>()
-            .cloned()
+            .and_then(|cancellation| cancellation.try_with(Clone::clone).ok())
         {
             Some(cancellation) => executor.exec_cancellable(request, cancellation).await,
             None => executor.exec(request).await,

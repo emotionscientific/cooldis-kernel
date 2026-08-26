@@ -320,8 +320,8 @@ pub fn virtual_command_output_from_exec_result(
     result: bashkit::ExecResult,
 ) -> verlet_process::execution::VirtualCommandOutput {
     verlet_process::execution::VirtualCommandOutput {
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout: result.stdout.to_string(),
+        stderr: result.stderr.to_string(),
         exit_code: result.exit_code,
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
@@ -332,8 +332,8 @@ pub fn exec_result_from_virtual_output(
     output: verlet_process::execution::VirtualCommandOutput,
 ) -> bashkit::ExecResult {
     bashkit::ExecResult {
-        stdout: output.stdout,
-        stderr: output.stderr,
+        stdout: output.stdout.into(),
+        stderr: output.stderr.into(),
         exit_code: output.exit_code,
         stdout_truncated: output.stdout_truncated,
         stderr_truncated: output.stderr_truncated,
