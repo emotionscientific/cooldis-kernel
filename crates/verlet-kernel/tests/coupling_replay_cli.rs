@@ -6,7 +6,7 @@ async fn coupling_replay_reports_counter_proposals_without_mutating_journal() {
     let example_module = repo.join("../../examples/wasm-counter-coupling");
     let root = temp_dir("coupling-replay-counter");
     let registry_root = root.join("operations");
-    let recording_path = root.join("session_history.sqlite3");
+    let recording_path = root.join("session_history.turso");
     let coupling_path = root.join("coupling.json");
     let quota_coupling_path = root.join("quota-coupling.json");
 
@@ -177,7 +177,7 @@ async fn coupling_replay_guides_user_when_daemon_holds_journal() {
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_module = repo.join("../../examples/wasm-counter-coupling");
     let root = temp_dir("coupling-replay-held-journal");
-    let journal_path = root.join("session_history.sqlite3");
+    let journal_path = root.join("session_history.turso");
     let coupling_path = root.join("coupling.json");
 
     let build = verlet::operations::operation_builder::build_rust_wasm_module(

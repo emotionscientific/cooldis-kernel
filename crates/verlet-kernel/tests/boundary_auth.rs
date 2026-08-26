@@ -899,7 +899,7 @@ async fn console_credential_lifecycle_keeps_one_active_credential_across_restart
         .await
         .unwrap();
     drop(authority);
-    let store_path = bootstrap_config.state_home.join("session_history.sqlite3");
+    let store_path = bootstrap_config.state_home.join("session_history.turso");
     let baseline = active_credential_count(&store_path, OPERATOR_ID).await;
 
     for _ in 0..4 {
@@ -960,7 +960,7 @@ async fn identity_authority(
     config: &verlet::adapters::app_server::VerletAppServerConfig,
 ) -> verlet::daemon::identity::SqliteIdentityAuthority {
     let store = verlet_history_sqlite::SqliteSessionStore::open(
-        config.state_home.join("session_history.sqlite3"),
+        config.state_home.join("session_history.turso"),
     )
     .await
     .unwrap();

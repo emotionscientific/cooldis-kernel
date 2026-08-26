@@ -840,6 +840,7 @@ fn verlet_cli_uses_clean_public_entrypoints() {
     assert!(commands.contains("verlet chat [PROMPT]"));
     assert!(commands.contains("verlet debug rpc call"));
     assert!(commands.contains("verlet debug bind"));
+    assert!(commands.contains("verlet debug journal"));
     assert!(commands.contains("verlet tool manual"));
     assert!(commands.contains("verlet skill publish"));
     assert!(commands.contains("verlet skill import"));
@@ -888,6 +889,9 @@ fn verlet_cli_uses_clean_public_entrypoints() {
     let help_debug_bind = run_verlet(["help", "debug", "bind"]);
     assert!(help_debug_bind.contains("verlet debug bind"));
 
+    let help_debug_journal = run_verlet(["help", "debug", "journal"]);
+    assert!(help_debug_journal.contains("verlet debug journal"));
+
     let rpc = run_verlet(["rpc", "--help"]);
     assert!(rpc.contains("verlet rpc"));
     assert!(rpc.contains("--listen"));
@@ -921,6 +925,10 @@ fn verlet_cli_uses_clean_public_entrypoints() {
 
     let debug_bind = run_verlet(["debug", "bind", "--help"]);
     assert!(debug_bind.contains("recorded manifest compile and bind"));
+
+    let debug_journal = run_verlet(["debug", "journal", "--help"]);
+    assert!(debug_journal.contains("raw event records"));
+    assert!(debug_journal.contains("cold Turso store"));
 
     let old_tool_plan = run_verlet_failed(["tool", "plan", "--help"]);
     assert!(stderr(&old_tool_plan).contains("unknown tool subcommand"));

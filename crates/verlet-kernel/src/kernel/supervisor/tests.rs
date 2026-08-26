@@ -442,7 +442,7 @@ async fn supervisor_runtime_contexts_keep_tenant_homes_and_stores_isolated() {
     assert_eq!(tenant_a.context.codex_home, runtime_a.join("codex-home"));
     assert_eq!(
         tenant_a.context.session_history_path,
-        state_a.join("session_history.sqlite3")
+        state_a.join("session_history.turso")
     );
     assert_eq!(tenant_b.context.runtime_home, runtime_b);
     assert_eq!(tenant_b.context.state_home, state_b);

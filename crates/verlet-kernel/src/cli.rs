@@ -6,6 +6,7 @@ mod console;
 mod coupling;
 mod daemon;
 mod debug_bind;
+mod debug_journal;
 mod debug_rpc;
 mod host;
 mod identity;
@@ -240,6 +241,9 @@ fn print_command_help(path: &[String]) -> crate::kernel::runtime_host::VerletRes
         [command] if command == "debug" => crate::cli::debug_rpc::print_debug_help(),
         [command, subcommand] if command == "debug" && subcommand == "bind" => {
             crate::cli::debug_bind::print_debug_bind_help()
+        }
+        [command, subcommand] if command == "debug" && subcommand == "journal" => {
+            crate::cli::debug_journal::print_debug_journal_help()
         }
         [command, subcommand] if command == "debug" && subcommand == "rpc" => {
             crate::cli::debug_rpc::print_debug_rpc_help()
@@ -719,6 +723,7 @@ const CANONICAL_COMMANDS: &[&str] = &[
     "verlet tool source remove <name> [--state-home .verlet/state]",
     "verlet rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--cwd <path>]",
     "verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]",
+    "verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]",
     "verlet debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <verlet.toml>]",
     "verlet debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <verlet.toml>]",
     "verlet debug rpc tail --thread <id> [--url <ws-url> | --config <verlet.toml>]",

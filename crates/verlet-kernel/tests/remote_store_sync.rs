@@ -788,7 +788,7 @@ async fn unix_http_projection_removes_socket_when_serve_is_cancelled() {
 #[tokio::test]
 async fn process_backed_offline_restart_kill_and_lineage_re_lease_converge() {
     let daemon_root = temp_root_path("process-daemon");
-    let parent_path = daemon_root.join("state/session_history.sqlite3");
+    let parent_path = daemon_root.join("state/session_history.turso");
     let child_path = temp_db_path("process-child");
     let stream_id = verlet_history::EventStreamId::new("thread:process-child");
     let store = verlet_history_sqlite::SqliteSessionStore::open(&parent_path)
@@ -998,7 +998,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     let child_id = spawned["threadId"].as_str().unwrap();
     let child_thread_id = verlet_runtime_contracts::ThreadId::parse_str(child_id).unwrap();
     let parent_thread_id = verlet_runtime_contracts::ThreadId::parse_str(&parent.id).unwrap();
-    let store_path = root.join("state/session_history.sqlite3");
+    let store_path = root.join("state/session_history.turso");
     let child_stream = verlet_history::EventStreamId::new(format!("thread:{child_id}"));
 
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
@@ -1096,7 +1096,7 @@ async fn remote_thread_spawn_runs_a_separate_child_and_folds_terminal_into_paren
     let child_store_path = root
         .join("state/remote-children")
         .join(child_thread_id.to_string())
-        .join("state/session_history.sqlite3");
+        .join("state/session_history.turso");
     tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
         loop {
             match verlet_history_sqlite::SqliteSessionStore::open(&child_store_path).await {

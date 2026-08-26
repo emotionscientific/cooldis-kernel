@@ -31,12 +31,12 @@ async fn host_run_boots_two_instances_and_drains_on_sigterm() {
     let second_roots =
         verlet::adapters::app_server::instance::InstanceRoots::under(root.join("second"));
     let first_token = mint_operator_credential(
-        &first_roots.state_home.join("session_history.sqlite3"),
+        &first_roots.state_home.join("session_history.turso"),
         "operator-a",
     )
     .await;
     let second_token = mint_operator_credential(
-        &second_roots.state_home.join("session_history.sqlite3"),
+        &second_roots.state_home.join("session_history.turso"),
         "operator-b",
     )
     .await;
@@ -273,7 +273,7 @@ async fn host_run_mid_boot_failure_exits_nonzero_without_binding() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let second_state = root.join("second").join("state");
-    std::fs::create_dir_all(second_state.join("session_history.sqlite3")).unwrap();
+    std::fs::create_dir_all(second_state.join("session_history.turso")).unwrap();
     let port_reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = port_reservation.local_addr().unwrap();
     drop(port_reservation);
@@ -572,8 +572,8 @@ async fn one_instance_cut_and_recovered_while_peer_progresses() {
 #[tokio::test]
 async fn facade_shutdown_drains_connections_and_instances() {
     let (pair, first_token, second_token) = HostedPair::start("shutdown-drain").await;
-    let first_store = pair.first_roots.state_home.join("session_history.sqlite3");
-    let second_store = pair.second_roots.state_home.join("session_history.sqlite3");
+    let first_store = pair.first_roots.state_home.join("session_history.turso");
+    let second_store = pair.second_roots.state_home.join("session_history.turso");
     let mut first = connect_rpc(pair.addr, &first_token).await;
     let mut second = connect_rpc(pair.addr, &second_token).await;
     rpc_call(&mut first, 1, "account/read", serde_json::json!({}))
@@ -629,7 +629,7 @@ async fn facade_shutdown_drains_connections_and_instances() {
 #[tokio::test]
 async fn instance_shutdown_closes_its_host_routed_session() {
     let (pair, first_token, _) = HostedPair::start("instance-session-close").await;
-    let first_store = pair.first_roots.state_home.join("session_history.sqlite3");
+    let first_store = pair.first_roots.state_home.join("session_history.turso");
     let mut first = connect_rpc(pair.addr, &first_token).await;
     wait_for_sql_count(
         &first_store,
@@ -717,7 +717,7 @@ async fn standalone_shutdown_cancels_a_request_holding_the_dispatch_gate() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let config = standalone_config(&root, &workspace, addr);
-    let store = config.state_home.join("session_history.sqlite3");
+    let store = config.state_home.join("session_history.turso");
     let token = mint_operator_credential(&store, "standalone-operator").await;
     let app = verlet::adapters::app_server::VerletAppServer::new(config)
         .await
@@ -780,7 +780,7 @@ async fn standalone_shutdown_cancels_a_request_holding_the_dispatch_gate() {
 #[tokio::test]
 async fn console_protocol_route_is_witnessed_only_as_host() {
     let (pair, first_token, _) = HostedPair::start("console-protocol-surface").await;
-    let first_store = pair.first_roots.state_home.join("session_history.sqlite3");
+    let first_store = pair.first_roots.state_home.join("session_history.turso");
     let mut first = connect_console_rpc(pair.addr, &first_token).await;
     first.close(None).await.unwrap();
 
@@ -853,12 +853,12 @@ impl HostedPair {
         let first_id = verlet::adapters::host::InstanceId::new("first").unwrap();
         let second_id = verlet::adapters::host::InstanceId::new("second").unwrap();
         let first_token = mint_operator_credential(
-            &first_roots.state_home.join("session_history.sqlite3"),
+            &first_roots.state_home.join("session_history.turso"),
             "operator-a",
         )
         .await;
         let second_token = mint_operator_credential(
-            &second_roots.state_home.join("session_history.sqlite3"),
+            &second_roots.state_home.join("session_history.turso"),
             "operator-b",
         )
         .await;

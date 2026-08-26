@@ -608,7 +608,7 @@ async fn inspect_manifest_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.turso"))
             .await?;
     let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
@@ -658,7 +658,7 @@ async fn inspect_researcher_bind_receipt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.turso"))
             .await?;
     let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);
     let events = session_store.read_events(&stream_id, None).await?;
@@ -751,7 +751,7 @@ async fn inspect_history(
 ) -> Result<SmokeInspection, Box<dyn std::error::Error>> {
     let lifecycle = lifecycle_record(root, thread_id).await?;
     let session_store =
-        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.turso"))
             .await?;
     let session_context = session_store.build_context(&lifecycle.coordinates).await?;
     let transcript = session_context
@@ -1006,7 +1006,7 @@ async fn lifecycle_record(
 ) -> Result<verlet_runtime_contracts::ThreadLifecycleRecord, Box<dyn std::error::Error>> {
     let parsed = verlet_runtime_contracts::ThreadId::parse_str(thread_id)?;
     let metadata_store = verlet_metadata::provider_store::SqliteMetadataStore::open(
-        root.join("state/metadata.sqlite3"),
+        root.join("state/metadata.turso"),
     )
     .await?;
     Ok(metadata_store
@@ -1401,7 +1401,7 @@ async fn run_researcher_exa_bind_variant(
     config_app.runtime_home = variant_root.join("runtime");
     config_app.state_home = variant_root.join("state");
     config_app.agent_registry_root = agent_registry_root;
-    let metadata_path = config_app.state_home.join("metadata.sqlite3");
+    let metadata_path = config_app.state_home.join("metadata.turso");
     let app = verlet::adapters::app_server::VerletAppServer::new_local(config_app).await?;
     verlet_metadata::secret_store::SqliteSecretStore::open(&metadata_path)
         .await?
@@ -1438,7 +1438,7 @@ async fn run_researcher_exa_bind_variant(
     inspect_manifest_events(&variant_root, &thread_id, &record.manifest_hash, 1, true).await?;
     let lifecycle = lifecycle_record(&variant_root, &thread_id).await?;
     let session_store = verlet_history_sqlite::SqliteSessionStore::open(
-        variant_root.join("state/session_history.sqlite3"),
+        variant_root.join("state/session_history.turso"),
     )
     .await?;
     let stream_id = verlet_history::EventStreamId::for_thread(&lifecycle.coordinates);

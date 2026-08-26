@@ -244,6 +244,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
         (
+            "journal/events/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
             "thread/couplings/list",
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
@@ -695,7 +699,7 @@ async fn journal_less_runtime_factory_uses_the_current_context_binding_plan() {
 #[tokio::test]
 async fn persisted_thread_with_empty_event_stream_cannot_cross_the_start_boundary_again() {
     let root = unique_test_root("persisted-empty-event-stream");
-    let metadata_path = root.join("metadata.sqlite3");
+    let metadata_path = root.join("metadata.turso");
     let session_path = root.join("session.sqlite3");
     let mut context = verlet_runtime_contracts::ThreadContext::root(
         verlet_runtime_contracts::ThreadCoordinates::new(
@@ -7078,7 +7082,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -7448,7 +7452,7 @@ allow = ["default_cwd"]
     crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
         verlet_history::ProviderApi::OpenAIChatCompletions,
         "fixture",
@@ -9904,7 +9908,7 @@ allow = ["streaming"]
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -11606,7 +11610,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert!(
         export["backend"]["sessionStorePath"]
             .as_str()
-            .is_some_and(|path| path.ends_with("session_history.sqlite3"))
+            .is_some_and(|path| path.ends_with("session_history.turso"))
     );
     assert_eq!(
         export["ackClasses"].as_array().unwrap(),
@@ -12278,7 +12282,7 @@ streaming = false
     let tenant_id = config.tenant_id.clone();
     let user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -13142,7 +13146,7 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
         verlet_history::ProviderApi::OpenAIResponses,
         "openai",
@@ -13533,7 +13537,7 @@ fn apply_manifest_runtime_metadata_does_not_infer_tool_instruction_from_old_meta
 async fn catalog_provider_resolution_uses_openai_compatible_store_record_and_stored_auth() {
     let root =
         std::env::temp_dir().join(format!("verlet-provider-resolve-{}", uuid::Uuid::now_v7()));
-    let store_path = root.join("metadata.sqlite3");
+    let store_path = root.join("metadata.turso");
     let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&store_path)
         .await
         .unwrap();
@@ -17742,7 +17746,7 @@ fn hosted_roots_reject_duplicate_and_nested_paths_before_sqlite_open() {
     let mut duplicate =
         crate::adapters::app_server::instance::InstanceRoots::under(&duplicate_root);
     duplicate.state_home = duplicate.runtime_home.clone();
-    let duplicate_db = duplicate.state_home.join("metadata.sqlite3");
+    let duplicate_db = duplicate.state_home.join("metadata.turso");
     let duplicate_path = duplicate.runtime_home.display().to_string();
 
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -17770,7 +17774,7 @@ fn hosted_roots_reject_duplicate_and_nested_paths_before_sqlite_open() {
     let nested_root = unique_test_root("hosted-nested-roots");
     let mut nested = crate::adapters::app_server::instance::InstanceRoots::under(&nested_root);
     nested.state_home = nested.runtime_home.join("nested-state");
-    let nested_db = nested.state_home.join("metadata.sqlite3");
+    let nested_db = nested.state_home.join("metadata.turso");
     let runtime_path = nested.runtime_home.display().to_string();
     let state_path = nested.state_home.display().to_string();
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -17872,7 +17876,7 @@ async fn hosted_config_rejects_environment_mutation_before_sqlite_open() {
     let environment_root = unique_test_root("hosted-mutated-environment");
     let environment_roots =
         crate::adapters::app_server::instance::InstanceRoots::under(&environment_root);
-    let environment_db = environment_roots.state_home.join("metadata.sqlite3");
+    let environment_db = environment_roots.state_home.join("metadata.turso");
     let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
         environment_roots,
         hosted_test_environment(),
@@ -17891,7 +17895,7 @@ async fn hosted_config_rejects_environment_mutation_before_sqlite_open() {
 
     let cwd_root = unique_test_root("hosted-mutated-cwd");
     let cwd_roots = crate::adapters::app_server::instance::InstanceRoots::under(&cwd_root);
-    let cwd_db = cwd_roots.state_home.join("metadata.sqlite3");
+    let cwd_db = cwd_roots.state_home.join("metadata.turso");
     let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
         cwd_roots,
         hosted_test_environment(),
@@ -18030,8 +18034,8 @@ async fn hosted_config_rejects_root_mutation_before_sqlite_open() {
             .to_string()
             .contains(&reserved_state.display().to_string())
     );
-    assert!(!configured_state.join("metadata.sqlite3").exists());
-    assert!(!reserved_state.join("metadata.sqlite3").exists());
+    assert!(!configured_state.join("metadata.turso").exists());
+    assert!(!reserved_state.join("metadata.turso").exists());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -18096,7 +18100,7 @@ async fn live_hosted_instance_rejects_overlapping_root_and_releases_on_drop() {
             second_root.join(index.to_string()),
         );
         second_roots.skill_registry_root = reserved_root.clone();
-        let second_db = second_roots.state_home.join("metadata.sqlite3");
+        let second_db = second_roots.state_home.join("metadata.turso");
         let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
             second_roots,
             hosted_test_environment(),
@@ -18188,7 +18192,7 @@ async fn live_hosted_instance_rejects_symlinked_root_alias_before_sqlite_open() 
     let mut second_roots =
         crate::adapters::app_server::instance::InstanceRoots::under(&second_root);
     second_roots.blob_registry_root = alias_root.join("blobs");
-    let second_db = second_roots.state_home.join("metadata.sqlite3");
+    let second_db = second_roots.state_home.join("metadata.turso");
     let alias_path = second_roots.blob_registry_root.display().to_string();
     let reserved_path = first_roots.blob_registry_root.display().to_string();
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -21381,7 +21385,7 @@ where
         None,
         Some(config.metadata_store_path()),
         None,
-        Some(config.state_home.join("session_history.sqlite3")),
+        Some(config.state_home.join("session_history.turso")),
         config.lease_epoch,
         None,
         None,

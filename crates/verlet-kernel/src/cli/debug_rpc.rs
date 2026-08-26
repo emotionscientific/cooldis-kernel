@@ -18,6 +18,7 @@ pub(crate) async fn run_debug(
     let subcommand = args.remove(0);
     match subcommand.to_string_lossy().as_ref() {
         "bind" => crate::cli::debug_bind::run_debug_bind(args).await,
+        "journal" => crate::cli::debug_journal::run_debug_journal(args).await,
         "rpc" => run_debug_rpc(args).await,
         other => Err(crate::cli::usage_error(format!(
             "unknown debug subcommand {other:?}; use `verlet debug --help`"
@@ -585,6 +586,7 @@ pub(crate) fn print_debug_help() {
 \n\
 Usage:\n\
   verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
+  verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
   verlet debug rpc (call|turn|tail) ...   debug client for a running daemon (see `verlet debug rpc --help`)\n\
 \n\
 Maintainer and protocol inspection tools. These commands are not the public\n\

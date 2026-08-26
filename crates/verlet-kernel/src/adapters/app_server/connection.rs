@@ -633,6 +633,19 @@ pub(crate) struct ThreadEventsListParams {
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct JournalEventsListParams {
+    #[serde(default)]
+    pub(crate) thread_id: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) from_sequence: Option<i64>,
+    #[serde(default)]
+    pub(crate) to_sequence: Option<i64>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadControlListParams {
     pub(crate) thread_id: String,
     #[serde(default)]
@@ -1085,6 +1098,10 @@ pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     (
         "thread/events/list",
         crate::daemon::identity::AuthorityClass::Interactive,
+    ),
+    (
+        "journal/events/list",
+        crate::daemon::identity::AuthorityClass::Host,
     ),
     (
         "thread/couplings/list",
@@ -1851,6 +1868,10 @@ impl crate::adapters::app_server::VerletAppServer {
             "thread/events/list" => {
                 let params: ThreadEventsListParams = parse_params(params)?;
                 self.thread_events_list(params).await
+            }
+            "journal/events/list" => {
+                let params: JournalEventsListParams = parse_params(params)?;
+                self.journal_events_list(params).await
             }
             "thread/couplings/list" => {
                 let params: ThreadControlListParams = parse_params(params)?;
@@ -3530,6 +3551,65 @@ impl crate::adapters::app_server::VerletAppServer {
             .map(thread_event_record_json)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(serde_json::json!({ "data": data, "cursor": cursor, "streamCursor": stream_cursor }))
+    }
+
+    pub(crate) async fn journal_events_list(
+        &self,
+        params: JournalEventsListParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        if params
+            .from_sequence
+            .zip(params.to_sequence)
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                "journal/events/list fromSequence must not exceed toSequence",
+            ));
+        }
+        let thread_id = params
+            .thread_id
+            .as_deref()
+            .map(verlet_runtime_contracts::ThreadId::parse_str)
+            .transpose()
+            .map_err(|err| {
+                jsonrpc_error(
+                    -32602,
+                    format!("journal/events/list threadId is invalid: {err}"),
+                )
+            })?;
+        let kind = params
+            .kind
+            .as_deref()
+            .map(str::parse::<verlet_history::EventKind>)
+            .transpose()
+            .map_err(|err| {
+                jsonrpc_error(
+                    -32602,
+                    format!("journal/events/list kind is invalid: {err}"),
+                )
+            })?;
+        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
+            .await
+            .map_err(|err| {
+                internal_error(crate::kernel::runtime_host::VerletError::History(
+                    err.to_string(),
+                ))
+            })?;
+        let data = store
+            .list_event_records(
+                thread_id,
+                kind,
+                params.from_sequence.map(verlet_history::EventSequence::new),
+                params.to_sequence.map(verlet_history::EventSequence::new),
+            )
+            .await
+            .map_err(|err| {
+                internal_error(crate::kernel::runtime_host::VerletError::History(
+                    err.to_string(),
+                ))
+            })?;
+        Ok(serde_json::json!({ "data": data }))
     }
 
     pub(crate) async fn thread_couplings_list(

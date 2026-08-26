@@ -392,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn tempfile_open_creates_parents_and_applies_connection_pragmas() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("nested/state/metadata.sqlite3");
+        let path = temp.path().join("nested/state/metadata.turso");
         let config = crate::DbConfig {
             busy_timeout: std::time::Duration::from_millis(1_234),
             ..crate::DbConfig::default()

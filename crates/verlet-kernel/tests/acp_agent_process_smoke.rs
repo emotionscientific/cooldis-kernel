@@ -121,7 +121,7 @@ async fn acp_agent_process_smoke_runs_binary_over_stdio() {
         "local:process smoke"
     );
     let store =
-        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(root.join("state/session_history.turso"))
             .await
             .unwrap();
     let control_events = store

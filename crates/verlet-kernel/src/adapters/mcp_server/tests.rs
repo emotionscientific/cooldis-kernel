@@ -458,7 +458,7 @@ async fn mcp_prompt_lets_model_shaped_agent_call_secret_backed_search_wasm() {
     let http_grant = format!("net.http.private:POST:{base_url}");
     publish_search_for_url(&registry_root, &url, &http_grant, br#"{"query":"verlet"}"#).await;
     let secret_store =
-        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.turso"))
             .await
             .unwrap();
     secret_store

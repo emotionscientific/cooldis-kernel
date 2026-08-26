@@ -46,8 +46,8 @@ but browser credential writes use the user auth store.
 The public console defaults to:
 
 ```text
-<project_root>/.verlet/state/metadata.sqlite3
-~/.verlet/state/metadata.sqlite3
+<project_root>/.verlet/state/metadata.turso
+~/.verlet/state/metadata.turso
 ```
 
 Seeding is idempotent and does not overwrite stored credentials, so a daemon or
@@ -143,12 +143,12 @@ different backend when the deployment shape needs it.
 Local:
 
 ```text
-<project_root>/.verlet/state/metadata.sqlite3
+<project_root>/.verlet/state/metadata.turso
   llm_provider_records
   thread_lifecycle_records
   future config/capsule binding tables
 
-~/.verlet/state/metadata.sqlite3
+~/.verlet/state/metadata.turso
   llm_provider_credentials
   named secret values
 ```

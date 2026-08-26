@@ -121,6 +121,7 @@ private-network binds require an explicit config opt-in; see
 - [Chat Console](chat.md)
 - [Provider Setup](provider-setup.md)
 - [Daemon And Remote Placement](daemon.md)
+- [State Home Access Rules](app-server.md#state-home-access-rules)
 - [Protocol Surfaces](developers/protocol-surfaces.md)
 - [Threat Model](threat-model.md)
 - [Frozen Format IDs](format-ids.md)

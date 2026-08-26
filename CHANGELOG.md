@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### State storage
+
+- State database filenames are now `session_history.turso` and
+  `metadata.turso`. This is a compatibility break with no migration shim. Old
+  state homes remain stale and are not opened by current Verlet releases.
+- Added `verlet debug journal` for raw event record inspection. It supports
+  thread, kind, and inclusive sequence filters, reads a live store through the
+  owner RPC, and permits a direct read-only Turso open only for a cold store.
+
 ### Tool kits
 
 - Kit tools can declare a derived model-facing input surface over their

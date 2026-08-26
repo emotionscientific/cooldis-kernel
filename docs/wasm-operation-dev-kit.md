@@ -474,7 +474,7 @@ cargo run --locked --bin verlet -- coupling run --replay \
   --artifact examples/wasm-counter-coupling/target/wasm32-unknown-unknown/release/verlet_example_wasm_counter_coupling.wasm \
   --coupling-file ./counter.bound-coupling.json \
   --thread-id 018f9fe0-35a7-7a80-8f65-12e7e0b20b52 \
-  --journal .verlet/state/session_history.sqlite3 \
+  --journal .verlet/state/session_history.turso \
   --json
 ```
 
@@ -488,7 +488,7 @@ cargo run --locked --bin verlet -- coupling run --replay \
   --registry-root .verlet/operations \
   --coupling-file ./counter.bound-coupling.json \
   --thread-id <thread-id> \
-  --journal .verlet/state/session_history.sqlite3
+  --journal .verlet/state/session_history.turso
 ```
 
 Replay output is marked dry-run. JSON output uses `proposalEvents` for proposed

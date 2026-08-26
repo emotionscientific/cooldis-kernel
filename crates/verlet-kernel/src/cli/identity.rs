@@ -499,7 +499,7 @@ async fn open_identity_authority(
         None => crate::cli::secret::default_user_state_home()?,
     };
     let store =
-        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.turso"))
             .await
             .map_err(identity_cli_error)?;
     let clock: std::sync::Arc<dyn crate::daemon::clock_route::DaemonClock> =
