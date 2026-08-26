@@ -341,6 +341,7 @@ fn default_manifest_tools(
     tools.extend(installed_kit_tools(
         bindings.registry_root.as_deref(),
         &reserved_tool_names,
+        &config.cwd,
     )?);
 
     for record in records.into_values() {
@@ -354,6 +355,7 @@ fn default_manifest_tools(
         let attachment = verlet_agent::manifest_schema::AgentManifestAttachment {
             allowed_secrets: attachment_config.allowed_secrets,
             allowed_private_network: attachment_config.allowed_private_network,
+            bound_parameters: std::collections::BTreeMap::new(),
         };
         for operation in &record.projections.operations {
             tools.push(verlet_agent::manifest_schema::AgentManifestTool::Bash(
@@ -389,9 +391,13 @@ fn default_manifest_tools(
 /// operation ref and its capability-grant copy are verified against the
 /// operation registry before attachment derivation, so a corrupted record
 /// cannot silently broaden, drop, or project malformed authority.
+/// Surface-declared rows additionally bind `root` to the configured instance
+/// workspace; the value is carried by the manifest attachment, not Wasm
+/// imports.
 fn installed_kit_tools(
     operations_registry_root: Option<&std::path::Path>,
     reserved_tool_names: &std::collections::BTreeMap<String, String>,
+    workspace_root: &std::path::Path,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
 {
     let Some(operations_registry_root) = operations_registry_root else {
@@ -474,6 +480,31 @@ fn installed_kit_tools(
                 crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                     &tool.required_capabilities,
                 );
+            let has_surface = verification
+                .operation
+                .as_deref()
+                .and_then(|operation_name| {
+                    verification
+                        .record
+                        .interface
+                        .as_ref()
+                        .and_then(|interface| {
+                            interface
+                                .operations
+                                .iter()
+                                .find(|operation| operation.name == operation_name)
+                        })
+                })
+                .and_then(|operation| operation.surface.as_ref())
+                .is_some();
+            let bound_parameters = if has_surface {
+                std::collections::BTreeMap::from([(
+                    "root".to_string(),
+                    serde_json::Value::String(absolute_path_string(workspace_root)?),
+                )])
+            } else {
+                std::collections::BTreeMap::new()
+            };
             rows.push((
                 record.name.clone(),
                 tool.tool_name.clone(),
@@ -486,6 +517,7 @@ fn installed_kit_tools(
                         attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
                             allowed_secrets: attachment_config.allowed_secrets,
                             allowed_private_network: attachment_config.allowed_private_network,
+                            bound_parameters,
                         },
                     },
                 ),

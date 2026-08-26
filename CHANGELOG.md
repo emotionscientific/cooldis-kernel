@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Tool kits
+
+- Kit tools can declare a derived model-facing input surface over their
+  authored ABI envelope. The Pi tools now expose only their nested argument
+  schema to models, while `root` is bound by the host to the instance
+  workspace and witnessed on the attachment.
+
 ## v0.5.1 (2026-08-26)
 
 ### Tool kits

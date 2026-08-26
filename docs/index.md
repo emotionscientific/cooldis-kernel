@@ -33,7 +33,8 @@ allowed to exercise.
   plus one removable installed-kit record.
 - Use the checked-in Pi kit for pinned `read`, `write`, `edit`, `find`, and
   `grep` tools, or build its precompiled distributable without requiring Cargo
-  at install time.
+  at install time. Models see the nested tool arguments while the host binds
+  the instance workspace root.
 - Publish static prompt and context files as immutable blob resources.
 - Publish local skill directories, author manifests against a package name, and
   receive a content hash in the bind receipt.

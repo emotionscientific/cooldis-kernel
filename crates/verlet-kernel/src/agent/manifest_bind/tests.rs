@@ -661,6 +661,10 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                 attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
                     allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
                     allowed_private_network: Default::default(),
+                    bound_parameters: std::collections::BTreeMap::from([(
+                        "root".to_string(),
+                        serde_json::json!("/workspace"),
+                    )]),
                 },
             },
         ),
@@ -678,6 +682,10 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                     allowed_private_network: std::collections::BTreeMap::from([(
                         "http://127.0.0.1:*".to_string(),
                         std::collections::BTreeSet::from(["GET".to_string()]),
+                    )]),
+                    bound_parameters: std::collections::BTreeMap::from([(
+                        "root".to_string(),
+                        serde_json::json!("/workspace"),
                     )]),
                 },
             },
@@ -704,7 +712,45 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
             )]),
         }
     );
+    assert_eq!(
+        bound.operation_bindings[0].bound_parameters,
+        std::collections::BTreeMap::from([("root".to_string(), serde_json::json!("/workspace"),)])
+    );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn operation_binding_rejects_conflicting_bound_parameter_values() {
+    let mut binding = crate::agent::manifest_bind::OperationBindingAccumulator::default();
+    binding
+        .merge_with_attachment(
+            verlet_wasm::WasmAttachmentConfig::default(),
+            std::collections::BTreeMap::from([(
+                "root".to_string(),
+                serde_json::json!("/workspace-a"),
+            )]),
+            Some("read".to_string()),
+            None,
+            verlet_agent::manifest_schema::EffectClass::Pure,
+        )
+        .unwrap();
+
+    let error = binding
+        .merge_with_attachment(
+            verlet_wasm::WasmAttachmentConfig::default(),
+            std::collections::BTreeMap::from([(
+                "root".to_string(),
+                serde_json::json!("/workspace-b"),
+            )]),
+            Some("write".to_string()),
+            None,
+            verlet_agent::manifest_schema::EffectClass::Pure,
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("conflicting values"), "{error}");
+    assert!(error.contains("root"), "{error}");
 }
 
 #[test]
@@ -717,6 +763,7 @@ fn binding_attachment_config_matches_wasm_attachment_wire_shape() {
     let history = verlet_history::BindingAttachmentConfig {
         allowed_secrets: allowed_secrets.clone(),
         allowed_private_network: allowed_private_network.clone(),
+        bound_parameters: std::collections::BTreeMap::new(),
     };
     let wasm = verlet_wasm::WasmAttachmentConfig {
         allowed_secrets,
@@ -806,6 +853,10 @@ fn binding_attached_payload_round_trips_catalog_binding_fields() {
                 std::collections::BTreeSet::from(["GET".to_string()]),
             )]),
         },
+        bound_parameters: std::collections::BTreeMap::from([(
+            "root".to_string(),
+            serde_json::json!("/workspace"),
+        )]),
         operations: vec!["profile".to_string()],
         direct_tools: vec![
             crate::agent::manifest_bind::AgentManifestDirectToolBinding {
@@ -3047,6 +3098,7 @@ async fn two_segment_operation_ref_validates_only_named_operation() {
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+            bound_parameters: std::collections::BTreeMap::new(),
             operations: vec!["profile".to_string()],
             direct_tools: Vec::new(),
         }]
@@ -3282,6 +3334,7 @@ async fn operation_binding_merge_whole_record_absorbs_operation_subset() {
             artifact_hash: record.active_artifact_hash,
             effect_class: verlet_agent::manifest_schema::EffectClass::AtMostOnce,
             attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+            bound_parameters: std::collections::BTreeMap::new(),
             operations: Vec::new(),
             direct_tools: Vec::new(),
         }]
@@ -3898,6 +3951,7 @@ fn current_nested_bind_receipt_writer_round_trips_through_strict_readers() {
         artifact_hash: "sha256:search".to_string(),
         effect_class: verlet_agent::manifest_schema::EffectClass::Idempotent,
         attachment_config: verlet_wasm::WasmAttachmentConfig::default(),
+        bound_parameters: std::collections::BTreeMap::new(),
         operations: vec!["search".to_string()],
         direct_tools: vec![
             crate::agent::manifest_bind::AgentManifestDirectToolBinding {

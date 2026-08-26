@@ -199,6 +199,52 @@ fn installed_kits_synthesize_sorted_direct_rows_with_pinned_refs_and_attachments
 }
 
 #[test]
+fn installed_kit_surface_rows_bind_the_instance_workspace_root() {
+    let root = default_manifest_kit_test_root("bound-root");
+    let config = default_manifest_kit_test_config(&root);
+    default_manifest_kit_store(&config)
+        .save(&installed_kit_record(
+            "pi",
+            vec![installed_kit_surface_tool(
+                &config,
+                "pi-write",
+                "write",
+                "at-most-once",
+                &["fs.write"],
+            )],
+        ))
+        .unwrap();
+
+    let plan = crate::adapters::app_server::default_manifest::default_manifest_publish_plan(
+        &config, false, "1.0.0",
+    )
+    .unwrap();
+    let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
+        serde_json::from_value(plan.resolved_manifest).unwrap();
+    let row = manifest
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool)
+                if tool.tool_name == "write" =>
+            {
+                Some(tool)
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        row.attachment.bound_parameters,
+        std::collections::BTreeMap::from([(
+            "root".to_string(),
+            serde_json::Value::String(config.cwd.to_string_lossy().into_owned()),
+        )])
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn installed_kit_rows_follow_kernel_tools_and_precede_config_operation_rows() {
     let root = default_manifest_kit_test_root("row-order");
     let mut config = default_manifest_kit_test_config(&root);
@@ -657,6 +703,44 @@ fn installed_kit_tool(
     effect_class: &str,
     required_capabilities: &[&str],
 ) -> verlet_operations::kit_package::InstalledKitTool {
+    installed_kit_tool_with_surface(
+        config,
+        operation_record_name,
+        tool_name,
+        effect_class,
+        required_capabilities,
+        None,
+    )
+}
+
+fn installed_kit_surface_tool(
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+    operation_record_name: &str,
+    tool_name: &str,
+    effect_class: &str,
+    required_capabilities: &[&str],
+) -> verlet_operations::kit_package::InstalledKitTool {
+    installed_kit_tool_with_surface(
+        config,
+        operation_record_name,
+        tool_name,
+        effect_class,
+        required_capabilities,
+        Some(verlet_operations::tool_package::ToolSurfaceContract {
+            args_field: "args".to_string(),
+            bound: std::collections::BTreeSet::from(["root".to_string()]),
+        }),
+    )
+}
+
+fn installed_kit_tool_with_surface(
+    config: &crate::adapters::app_server::VerletAppServerConfig,
+    operation_record_name: &str,
+    tool_name: &str,
+    effect_class: &str,
+    required_capabilities: &[&str],
+    surface: Option<verlet_operations::tool_package::ToolSurfaceContract>,
+) -> verlet_operations::kit_package::InstalledKitTool {
     let required_capabilities = required_capabilities
         .iter()
         .map(|capability| (*capability).to_string())
@@ -694,10 +778,21 @@ fn installed_kit_tool(
         operations: vec![verlet_operations::tool_package::ToolOperationInterface {
             name: tool_name.to_string(),
             description: None,
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: if surface.is_some() {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "root": {"type": "string"},
+                        "args": {"type": "object"}
+                    },
+                    "required": ["root", "args"]
+                })
+            } else {
+                serde_json::json!({"type": "object"})
+            },
             output_schema: serde_json::json!({"type": "object"}),
             required_capabilities: required_capabilities.clone(),
-            surface: None,
+            surface,
             command: None,
             mcp: None,
             manual: None,

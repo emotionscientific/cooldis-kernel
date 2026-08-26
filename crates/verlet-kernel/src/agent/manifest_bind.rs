@@ -642,6 +642,7 @@ pub struct BoundCouplingFunction {
 #[derive(Clone, Debug, Default)]
 struct OperationBindingAccumulator {
     attachment_config: verlet_wasm::WasmAttachmentConfig,
+    bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     operations: std::collections::BTreeSet<String>,
     direct_tools: std::collections::BTreeSet<AgentManifestDirectToolBinding>,
     effect_class: Option<verlet_agent::manifest_schema::EffectClass>,
@@ -657,19 +658,22 @@ impl OperationBindingAccumulator {
     ) {
         self.merge_with_attachment(
             verlet_wasm::WasmAttachmentConfig::default(),
+            std::collections::BTreeMap::new(),
             operation,
             direct_tool,
             verlet_agent::manifest_schema::EffectClass::AtMostOnce,
-        );
+        )
+        .unwrap();
     }
 
     fn merge_with_attachment(
         &mut self,
         attachment_config: verlet_wasm::WasmAttachmentConfig,
+        bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
         operation: Option<String>,
         direct_tool: Option<AgentManifestDirectToolBinding>,
         effect_class: verlet_agent::manifest_schema::EffectClass,
-    ) {
+    ) -> crate::kernel::runtime_host::VerletResult<()> {
         self.attachment_config
             .allowed_secrets
             .extend(attachment_config.allowed_secrets);
@@ -679,6 +683,18 @@ impl OperationBindingAccumulator {
                 .entry(origin)
                 .or_default()
                 .extend(methods);
+        }
+        for (name, value) in bound_parameters {
+            if let Some(existing) = self.bound_parameters.get(&name)
+                && existing != &value
+            {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "operation binding has conflicting values for bound parameter {name:?}"
+                    ),
+                ));
+            }
+            self.bound_parameters.insert(name, value);
         }
         if let Some(direct_tool) = direct_tool {
             self.direct_tools.insert(direct_tool);
@@ -698,6 +714,7 @@ impl OperationBindingAccumulator {
                 self.operations.clear();
             }
         }
+        Ok(())
     }
 
     fn operation_names(&self) -> Vec<String> {
@@ -2070,6 +2087,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     wasm_attachment_config(&tool.attachment),
+                    tool.attachment.bound_parameters.clone(),
                     tool.effect_class,
                     None,
                     operation_registry_root,
@@ -2088,6 +2106,7 @@ async fn bind_tools(
                     &tool.id,
                     &tool.operation_ref,
                     wasm_attachment_config(&tool.attachment),
+                    tool.attachment.bound_parameters.clone(),
                     tool.effect_class,
                     Some(&tool.tool_name),
                     operation_registry_root,
@@ -2277,6 +2296,7 @@ fn operation_bindings_from_map(
                 artifact_hash,
                 effect_class: binding.effect_class.unwrap_or_default(),
                 attachment_config: binding.attachment_config,
+                bound_parameters: binding.bound_parameters,
                 operations,
                 direct_tools: binding.direct_tools.into_iter().collect(),
             }
@@ -2384,6 +2404,7 @@ async fn bind_operation_ref(
         tool_id,
         operation_ref,
         verlet_wasm::WasmAttachmentConfig::default(),
+        std::collections::BTreeMap::new(),
         verlet_agent::manifest_schema::EffectClass::AtMostOnce,
         direct_tool_name,
         operation_registry_root,
@@ -2396,6 +2417,7 @@ async fn bind_operation_ref_with_attachment(
     tool_id: &str,
     operation_ref: &str,
     attachment_config: verlet_wasm::WasmAttachmentConfig,
+    bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     effect_class: verlet_agent::manifest_schema::EffectClass,
     direct_tool_name: Option<&str>,
     operation_registry_root: Option<&std::path::Path>,
@@ -2429,10 +2451,11 @@ async fn bind_operation_ref_with_attachment(
         .or_default()
         .merge_with_attachment(
             attachment_config,
+            bound_parameters,
             verification.operation,
             direct_tool_binding,
             effect_class,
-        );
+        )?;
     Ok(())
 }
 
@@ -3103,7 +3126,7 @@ impl AgentManifestCouplingBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentManifestOperationBinding {
     pub name: String,
@@ -3118,6 +3141,10 @@ pub struct AgentManifestOperationBinding {
         skip_serializing_if = "verlet_wasm::WasmAttachmentConfig::is_empty"
     )]
     pub attachment_config: verlet_wasm::WasmAttachmentConfig,
+    /// Router-owned values for operation surface bound parameters. These are
+    /// witnessed beside, never inserted into, the Wasm attachment config.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
     /// Empty means the binding exposes the whole record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<String>,
@@ -3175,6 +3202,7 @@ pub(crate) fn binding_attached_payload(
         attachment_config: verlet_history::BindingAttachmentConfig {
             allowed_secrets: binding.attachment_config.allowed_secrets.clone(),
             allowed_private_network: binding.attachment_config.allowed_private_network.clone(),
+            bound_parameters: binding.bound_parameters.clone(),
         },
         effect_class: effect_class(binding.effect_class),
         requested_by: principal_id.to_string(),
@@ -3210,6 +3238,7 @@ pub(crate) fn operation_binding_from_attached_payload(
             allowed_secrets: payload.attachment_config.allowed_secrets,
             allowed_private_network: payload.attachment_config.allowed_private_network,
         },
+        bound_parameters: payload.attachment_config.bound_parameters,
         operations: payload.operations,
         direct_tools: payload
             .direct_tools

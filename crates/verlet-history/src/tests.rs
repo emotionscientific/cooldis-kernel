@@ -768,6 +768,10 @@ fn binding_attached_payload_wire_shape_is_frozen() {
                 "http://127.0.0.1:*".to_string(),
                 std::collections::BTreeSet::from(["GET".to_string(), "POST".to_string()]),
             )]),
+            bound_parameters: std::collections::BTreeMap::from([(
+                "root".to_string(),
+                serde_json::json!("/workspace"),
+            )]),
         },
         effect_class: crate::BindingEffectClass::Idempotent,
         requested_by: "principal:operator".to_string(),
@@ -788,7 +792,8 @@ fn binding_attached_payload_wire_shape_is_frozen() {
             "allowed_secrets": ["SEARCH_TOKEN"],
             "allowed_private_network": {
                 "http://127.0.0.1:*": ["GET", "POST"]
-            }
+            },
+            "bound_parameters": {"root": "/workspace"}
         },
         "effect_class": "idempotent",
         "requested_by": "principal:operator",

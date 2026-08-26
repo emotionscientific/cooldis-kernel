@@ -106,7 +106,8 @@ The V1 work is focused on runtime primitives:
 - operation publication and ABI-backed invocation;
 - local tool-kit installation that lowers member packages into ordinary
   content-addressed operation publishes plus one removable installed-kit record;
-- a checked-in Pi file-tools kit with source and prebuilt-distributable lanes;
+- a checked-in Pi file-tools kit with source and prebuilt-distributable lanes,
+  derived model-facing schemas, and host-bound workspace roots;
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication with floating author refs pinned in bind receipts,
   static indexes, and read-only VFS bodies;

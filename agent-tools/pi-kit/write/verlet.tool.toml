@@ -20,6 +20,10 @@ input_schema = "schemas/write.input.json"
 output_schema = "schemas/write.output.json"
 required_capabilities = ["fs.write"]
 
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+
 [operations.command]
 name = "pi write"
 stdin = "json"

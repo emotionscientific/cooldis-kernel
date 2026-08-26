@@ -414,7 +414,20 @@ impl ToolOperationInterface {
     /// is `input_schema` itself. Derived, never hand-authored: one contract,
     /// two views.
     pub fn model_input_schema(&self) -> crate::VerletResult<serde_json::Value> {
-        todo!("EMO-615: derive args_field subschema; identity when surface is None")
+        let Some(surface) = &self.surface else {
+            return Ok(self.input_schema.clone());
+        };
+        self.input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get(&surface.args_field))
+            .cloned()
+            .ok_or_else(|| {
+                crate::VerletOperationsError::RuntimeFactory(format!(
+                    "tool interface operation {:?} surface args_field {:?} has no input_schema subschema",
+                    self.name, surface.args_field
+                ))
+            })
     }
 }
 
@@ -427,10 +440,60 @@ fn validate_surface_contract(
     operation: &ToolOperationDeclaration,
     input_schema: &serde_json::Value,
 ) -> crate::VerletResult<()> {
-    let Some(_surface) = &operation.surface else {
+    let Some(surface) = &operation.surface else {
         return Ok(());
     };
-    todo!("EMO-615: enforce envelope fields == args_field + bound")
+    if surface.bound.contains(&surface.args_field) {
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
+            "tool package operation {:?} surface args_field {:?} must not also be bound",
+            operation.name, surface.args_field
+        )));
+    }
+    if input_schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
+            "tool package operation {:?} surface input_schema must be an object schema",
+            operation.name
+        )));
+    }
+    let properties = input_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            crate::VerletOperationsError::RuntimeFactory(format!(
+                "tool package operation {:?} surface input_schema must declare top-level properties",
+                operation.name
+            ))
+        })?;
+    let mut expected = surface.bound.clone();
+    expected.insert(surface.args_field.clone());
+    let actual = properties
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if actual != expected {
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
+            "tool package operation {:?} surface top-level properties must be exactly {:?}, got {:?}",
+            operation.name, expected, actual
+        )));
+    }
+    let required = input_schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if required != expected {
+        return Err(crate::VerletOperationsError::RuntimeFactory(format!(
+            "tool package operation {:?} surface required fields must be exactly {:?}, got {:?}",
+            operation.name, expected, required
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -817,6 +880,139 @@ fn value_sha256(value: &impl serde::Serialize) -> crate::VerletResult<String> {
 mod tests {
 
     #[test]
+    fn model_input_schema_is_identity_without_a_surface() {
+        let input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"]
+        });
+        let operation = tool_operation_interface(input_schema.clone(), None);
+
+        assert_eq!(operation.model_input_schema().unwrap(), input_schema);
+    }
+
+    #[test]
+    fn model_input_schema_lifts_the_args_field_subschema() {
+        let args_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        });
+        let operation = tool_operation_interface(
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root": {"type": "string"},
+                    "args": args_schema.clone()
+                },
+                "required": ["root", "args"],
+                "additionalProperties": false
+            }),
+            Some(tool_surface("args", &["root"])),
+        );
+
+        assert_eq!(operation.model_input_schema().unwrap(), args_schema);
+    }
+
+    #[test]
+    fn surface_contract_accepts_an_exact_required_envelope() {
+        let operation = tool_operation_declaration(tool_surface("args", &["root"]));
+        let input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root": {"type": "string"},
+                "args": {"type": "object"}
+            },
+            "required": ["root", "args"]
+        });
+
+        crate::tool_package::validate_surface_contract(&operation, &input_schema).unwrap();
+    }
+
+    #[test]
+    fn surface_contract_rejects_non_object_and_unaccounted_envelopes() {
+        let operation = tool_operation_declaration(tool_surface("args", &["root"]));
+        let cases = [
+            (
+                serde_json::json!({"type": "string"}),
+                "must be an object schema",
+            ),
+            (
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"root": {"type": "string"}},
+                    "required": ["root"]
+                }),
+                "top-level properties",
+            ),
+            (
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "root": {"type": "string"},
+                        "args": {"type": "object"},
+                        "ambient": {"type": "string"}
+                    },
+                    "required": ["root", "args", "ambient"]
+                }),
+                "top-level properties",
+            ),
+            (
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "root": {"type": "string"},
+                        "args": {"type": "object"}
+                    },
+                    "required": ["args"]
+                }),
+                "required",
+            ),
+            (
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "root": {"type": "string"},
+                        "args": {"type": "object"}
+                    },
+                    "required": ["root", "args", "ambient"]
+                }),
+                "required",
+            ),
+        ];
+
+        for (input_schema, expected) in cases {
+            let error = crate::tool_package::validate_surface_contract(&operation, &input_schema)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn surface_contract_rejects_args_field_as_a_bound_parameter() {
+        let operation = tool_operation_declaration(tool_surface("args", &["args", "root"]));
+        let input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root": {"type": "string"},
+                "args": {"type": "object"}
+            },
+            "required": ["root", "args"]
+        });
+
+        let error = crate::tool_package::validate_surface_contract(&operation, &input_schema)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("args_field"), "{error}");
+        assert!(error.contains("bound"), "{error}");
+    }
+
+    #[test]
     fn tool_interface_rejects_unsupported_schema_keywords() {
         let root = temp_package_root("tool-interface-unsupported-schema");
         write_json(
@@ -946,6 +1142,49 @@ mod tests {
 
     fn write_json(path: &std::path::Path, body: &str) {
         std::fs::write(path, body).unwrap();
+    }
+
+    fn tool_surface(args_field: &str, bound: &[&str]) -> crate::tool_package::ToolSurfaceContract {
+        crate::tool_package::ToolSurfaceContract {
+            args_field: args_field.to_string(),
+            bound: bound.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    fn tool_operation_declaration(
+        surface: crate::tool_package::ToolSurfaceContract,
+    ) -> crate::tool_package::ToolOperationDeclaration {
+        crate::tool_package::ToolOperationDeclaration {
+            name: "write".to_string(),
+            description: None,
+            input_schema: std::path::PathBuf::from("input.json"),
+            output_schema: std::path::PathBuf::from("output.json"),
+            required_capabilities: std::collections::BTreeSet::new(),
+            surface: Some(surface),
+            command: Some(crate::tool_package::ToolCommandContract {
+                name: "pi write".to_string(),
+                stdin: Some("json".to_string()),
+                stdout: Some("json".to_string()),
+            }),
+            mcp: None,
+        }
+    }
+
+    fn tool_operation_interface(
+        input_schema: serde_json::Value,
+        surface: Option<crate::tool_package::ToolSurfaceContract>,
+    ) -> crate::tool_package::ToolOperationInterface {
+        crate::tool_package::ToolOperationInterface {
+            name: "write".to_string(),
+            description: None,
+            input_schema,
+            output_schema: serde_json::json!({"type": "object"}),
+            required_capabilities: std::collections::BTreeSet::new(),
+            surface,
+            command: None,
+            mcp: None,
+            manual: None,
+        }
     }
 
     fn package_source(

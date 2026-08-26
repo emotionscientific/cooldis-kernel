@@ -20,6 +20,10 @@ input_schema = "schemas/read.input.json"
 output_schema = "schemas/read.output.json"
 required_capabilities = []
 
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+
 [operations.command]
 name = "pi read"
 stdin = "json"

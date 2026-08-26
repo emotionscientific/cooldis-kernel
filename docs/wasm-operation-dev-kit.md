@@ -152,6 +152,25 @@ Agent manifest        references published operations with pinned op:// refs
 Raw `--module-path` and `--bin-path` remain useful for low-level conversion and
 debugging. Package build/publish is the authoring happy path.
 
+### Model-facing operation surfaces
+
+An operation whose ABI input is a host envelope can derive a narrower model
+surface from that same schema:
+
+```toml
+[operations.surface]
+args_field = "args"
+bound = ["root"]
+```
+
+The input schema remains the one authored ABI contract. Publish validation
+requires its top-level properties to be exactly `args_field` plus the bound
+parameters, all required. Direct model rows receive the `args_field`
+subschema; attach-time configuration supplies every bound parameter, and the
+router validates both the model arguments and the assembled envelope. CLI
+invocation keeps the full envelope because the caller is the host in that
+lane.
+
 ## Importing An Existing REST API Instead
 
 When the desired tool is an existing REST API mirror, use a witnessed OpenAPI

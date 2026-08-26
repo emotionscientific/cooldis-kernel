@@ -480,9 +480,7 @@ impl BindingEffectClass {
     }
 }
 
-#[derive(
-    Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BindingAttachmentConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -490,11 +488,16 @@ pub struct BindingAttachmentConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub allowed_private_network:
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Top-level operation input fields resolved by the host at attach time.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bound_parameters: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl BindingAttachmentConfig {
     fn is_empty(&self) -> bool {
-        self.allowed_secrets.is_empty() && self.allowed_private_network.is_empty()
+        self.allowed_secrets.is_empty()
+            && self.allowed_private_network.is_empty()
+            && self.bound_parameters.is_empty()
     }
 }
 
@@ -1832,6 +1835,10 @@ fn binding_attachment_config_schema_v1() -> serde_json::Value {
             "allowed_private_network": {
                 "type": "object",
                 "additionalProperties": string_array_schema_v1()
+            },
+            "bound_parameters": {
+                "type": "object",
+                "additionalProperties": true
             }
         }
     })
