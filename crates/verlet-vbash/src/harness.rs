@@ -1127,6 +1127,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_operation_shell_commands_cover_every_harness_builtin() {
+        let harness = crate::harness::BashkitExecutionHarness::new(
+            crate::harness::BashkitExecutionConfig::default(),
+        )
+        .await
+        .unwrap();
+        let reserved = crate::reserved_operation_shell_commands();
+        let missing = harness
+            .shell
+            .builtin_names()
+            .into_iter()
+            .filter(|name| !reserved.contains(name))
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing_lines = missing
+            .iter()
+            .map(|name| format!("        \"{name}\","))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            missing.is_empty(),
+            "reserved_operation_shell_commands is missing:\n{missing_lines}"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_spill_flush_releases_the_harness_lock_and_retry_flushes() {
         let root = std::sync::Arc::new(SpillTestFs::new());
         let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(root.clone()));
