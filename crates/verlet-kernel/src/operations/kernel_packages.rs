@@ -259,6 +259,7 @@ pub fn verlet_threads_kernel_package() -> KernelPackageDefinition {
                 input_schema: (spec.input_schema)(),
                 output_schema: (spec.output_schema)(),
                 required_capabilities: required_capabilities.clone(),
+                surface: None,
                 command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
@@ -353,6 +354,7 @@ pub fn verlet_schedule_kernel_package() -> KernelPackageDefinition {
                 input_schema: (spec.input_schema)(),
                 output_schema: (spec.output_schema)(),
                 required_capabilities: required_capabilities.clone(),
+                surface: None,
                 command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
@@ -447,6 +449,7 @@ pub fn verlet_process_kernel_package() -> KernelPackageDefinition {
                 input_schema: (spec.input_schema)(),
                 output_schema: process_snapshot_output_schema(spec.receipt_operation),
                 required_capabilities: required_capabilities.clone(),
+                surface: None,
                 command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),
@@ -544,6 +547,7 @@ pub fn verlet_notify_kernel_package() -> KernelPackageDefinition {
                 input_schema: (spec.input_schema)(),
                 output_schema: notify_receipt_output_schema(spec.receipt_operation),
                 required_capabilities: required_capabilities.clone(),
+                surface: None,
                 command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: spec.name.to_string(),
                     stdin: Some("json".to_string()),

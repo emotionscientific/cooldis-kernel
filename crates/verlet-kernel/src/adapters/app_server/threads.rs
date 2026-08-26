@@ -2343,6 +2343,21 @@ pub(crate) struct ThreadOperationBinding {
     pub(crate) attach_event_id: Option<verlet_history::EventRecordId>,
 }
 
+/// Resolves the model-facing surface for a direct tool row from the
+/// published record's interface contract and the binding's attach
+/// configuration (lexicon: bound parameter). Returns `None` when the
+/// operation declares no surface. Bound values come from the fold's
+/// `attachment_config.bound_parameters` for this binding; a declared bound
+/// parameter with no attach-time value is a bind error, not a silent skip.
+fn tool_call_surface_for_operation(
+    record: &verlet_operations::operation_store::PublishedOperationRecord,
+    operation_name: &str,
+) -> Option<crate::agent::agent_tool_router::ToolCallSurface> {
+    let _ = (record, operation_name);
+    // EMO-615: read record.interface, find the operation, call
+    // model_input_schema(), and pair it with the binding's bound values.
+    None
+}
 fn context_operation_binding_plan(
     context: &verlet_runtime_contracts::ThreadContext,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<ThreadOperationBinding>> {
@@ -2781,11 +2796,13 @@ impl CapsuleBindingRuntimeFactory {
             );
             let alias_attach_event_id = if is_kernel { None } else { attach_event_id };
             tool_aliases.extend(direct_tools.into_iter().map(|direct_tool| {
+                let surface = tool_call_surface_for_operation(&record, &direct_tool.operation);
                 crate::agent::agent_tool_router::OperationToolAlias {
                     tool_name: direct_tool.tool_name,
                     registered_name: name.clone(),
                     operation_name: direct_tool.operation,
                     attach_event_id: alias_attach_event_id,
+                    surface,
                 }
             }));
             if !is_kernel {
@@ -2806,6 +2823,7 @@ impl CapsuleBindingRuntimeFactory {
                                 registered_name: name.clone(),
                                 operation_name: operation.name.clone(),
                                 attach_event_id: alias_attach_event_id,
+                                surface: tool_call_surface_for_operation(&record, &operation.name),
                             },
                         ),
                 );

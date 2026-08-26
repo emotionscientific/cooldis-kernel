@@ -195,6 +195,7 @@ pub(crate) async fn build_import_package(
                 input_schema: operation.input_schema.clone(),
                 output_schema: operation.output_schema.clone(),
                 required_capabilities: required_capabilities.clone(),
+                surface: None,
                 command: Some(verlet_operations::tool_package::ToolCommandContract {
                     name: operation.name.clone(),
                     stdin: Some("json".to_string()),

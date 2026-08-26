@@ -1454,6 +1454,7 @@ async fn kernel_thread_router() -> verlet::agent::agent_tool_router::AgentToolRo
                 .to_string(),
             operation_name: verlet::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }

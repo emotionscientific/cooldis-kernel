@@ -697,6 +697,7 @@ fn installed_kit_tool(
             input_schema: serde_json::json!({"type": "object"}),
             output_schema: serde_json::json!({"type": "object"}),
             required_capabilities: required_capabilities.clone(),
+            surface: None,
             command: None,
             mcp: None,
             manual: None,

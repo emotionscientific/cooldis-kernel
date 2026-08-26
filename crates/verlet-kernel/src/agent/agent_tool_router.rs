@@ -86,12 +86,29 @@ impl ToolInvocationCancellation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The model-facing surface of a direct tool row whose operation declares an
+/// envelope split (lexicon: bound parameter). Resolved where the alias is
+/// built, from the published interface contract plus the binding's attach
+/// configuration; the router consumes it without touching the record store.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCallSurface {
+    /// Derived via `ToolOperationInterface::model_input_schema`; what the
+    /// model sees and what its arguments are validated against.
+    pub model_input_schema: serde_json::Value,
+    /// Envelope field the validated model arguments mount into.
+    pub args_field: String,
+    /// Bound parameter values pinned at attach; assembled into the envelope
+    /// host-side. A model-supplied value for one of these keys is rejected.
+    pub bound_values: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct OperationToolAlias {
     pub tool_name: String,
     pub registered_name: String,
     pub operation_name: String,
     pub attach_event_id: Option<verlet_history::EventRecordId>,
+    pub surface: Option<ToolCallSurface>,
 }
 
 #[async_trait::async_trait]
@@ -197,13 +214,18 @@ impl AgentToolRouter {
                     )
                     .await
             {
+                let input_schema = alias
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface.model_input_schema.clone())
+                    .unwrap_or_else(|| input_schema_for_value_kind(&projection.input));
                 definitions.push(verlet_provider::ToolDefinition::new(
                     alias.tool_name.clone(),
                     format!(
                         "Run Verlet operation {}/{}.",
                         projection.registered_name, projection.operation_name
                     ),
-                    input_schema_for_value_kind(&projection.input),
+                    input_schema,
                 ));
             }
         }
@@ -422,6 +444,14 @@ impl AgentToolRouter {
                     format!("tool {tool_name:?} has a hidden durable sink"),
                 ));
             }
+            let arguments = match self
+                .tool_aliases
+                .get(tool_name)
+                .and_then(|alias| alias.surface.as_ref())
+            {
+                Some(surface) => assemble_surface_envelope(call_id, tool_name, surface, arguments)?,
+                None => arguments,
+            };
             let input = encode_tool_input(call_id, tool_name, &projection, arguments)?;
             let operation_registry =
                 verlet_operations::operation_registry::ScopedOperationRegistry::new(
@@ -579,6 +609,22 @@ fn text_input_schema(description: &str) -> serde_json::Value {
         "required": ["input"],
         "additionalProperties": false
     })
+}
+
+/// Assembles the host-side envelope for a surface-declared operation:
+/// rejects model-supplied values for bound parameters, validates the model
+/// arguments against `surface.model_input_schema`, mounts them at
+/// `surface.args_field`, and merges `surface.bound_values` at the top level.
+/// Validation failures return the schema error as tool-error text so the
+/// model can correct itself; a bound-parameter collision is always an error.
+fn assemble_surface_envelope(
+    call_id: &str,
+    tool_name: &str,
+    surface: &ToolCallSurface,
+    arguments: serde_json::Value,
+) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+    let _ = (call_id, tool_name, surface, &arguments);
+    todo!("EMO-615: validate model args, mount at args_field, merge bound values")
 }
 
 fn encode_tool_input(

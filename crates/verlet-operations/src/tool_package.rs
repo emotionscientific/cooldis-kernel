@@ -58,10 +58,25 @@ pub struct ToolOperationDeclaration {
     pub output_schema: std::path::PathBuf,
     #[serde(default)]
     pub required_capabilities: std::collections::BTreeSet<String>,
+    /// Envelope split declaration. `None` means the whole `input_schema` is
+    /// model-facing (no bound parameters, no mount field).
+    #[serde(default)]
+    pub surface: Option<ToolSurfaceContract>,
     #[serde(default)]
     pub command: Option<ToolCommandContract>,
     #[serde(default)]
     pub mcp: Option<ToolMcpContract>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolSurfaceContract {
+    /// Envelope field of `input_schema` where model-supplied arguments mount.
+    pub args_field: String,
+    /// Bound parameters: top-level envelope fields the host supplies from the
+    /// binding at attach time. Never model-visible; a model-supplied value for
+    /// one is rejected, not merged.
+    #[serde(default)]
+    pub bound: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -263,12 +278,14 @@ impl ToolInterfaceContract {
                 &output_schema,
                 package.manifest.fixtures.iter(),
             );
+            validate_surface_contract(operation, &input_schema)?;
             operations.push(ToolOperationInterface {
                 name: operation.name.clone(),
                 description: operation.description.clone(),
                 input_schema,
                 output_schema,
                 required_capabilities: operation.required_capabilities.clone(),
+                surface: operation.surface.clone(),
                 command: operation.command.clone(),
                 mcp: operation.mcp.clone(),
                 manual: Some(manual),
@@ -381,11 +398,39 @@ pub struct ToolOperationInterface {
     #[serde(default)]
     pub required_capabilities: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<ToolSurfaceContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<ToolCommandContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<ToolMcpContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual: Option<ToolOperationManual>,
+}
+
+impl ToolOperationInterface {
+    /// The model-facing input schema (lexicon: bound parameter). With a
+    /// surface declared this is the `args_field` subschema of `input_schema`
+    /// lifted to the top level; bound parameters never appear. Without one it
+    /// is `input_schema` itself. Derived, never hand-authored: one contract,
+    /// two views.
+    pub fn model_input_schema(&self) -> crate::VerletResult<serde_json::Value> {
+        todo!("EMO-615: derive args_field subschema; identity when surface is None")
+    }
+}
+
+/// Publish-time check for a declared surface: `input_schema` must be an
+/// object whose top-level properties are exactly `{args_field}` plus the
+/// bound parameters, all of them required. Anything else is a publish error;
+/// an envelope field the split does not account for would surface an
+/// unfaithful contract.
+fn validate_surface_contract(
+    operation: &ToolOperationDeclaration,
+    input_schema: &serde_json::Value,
+) -> crate::VerletResult<()> {
+    let Some(_surface) = &operation.surface else {
+        return Ok(());
+    };
+    todo!("EMO-615: enforce envelope fields == args_field + bound")
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -936,6 +981,7 @@ mod tests {
                     input_schema: root.join("input.json"),
                     output_schema: root.join("output.json"),
                     required_capabilities: std::collections::BTreeSet::new(),
+                    surface: None,
                     command: Some(crate::tool_package::ToolCommandContract {
                         name: "profile run".to_string(),
                         stdin: Some("none".to_string()),

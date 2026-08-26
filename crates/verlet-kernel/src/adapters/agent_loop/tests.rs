@@ -8029,6 +8029,7 @@ async fn kernel_thread_router() -> crate::agent::agent_tool_router::AgentToolRou
             registered_name: crate::operations::kernel_packages::VERLET_THREADS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }

@@ -633,6 +633,7 @@ async fn router_with_kernel_process_operation(
             registered_name: crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::PROCESS_EXEC_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }
@@ -649,12 +650,14 @@ fn router_attach_provenance_is_only_present_on_fold_derived_aliases() {
             registered_name: "bound".to_string(),
             operation_name: "run".to_string(),
             attach_event_id: Some(attach_event_id),
+            surface: None,
         },
         crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: "kernel_operation".to_string(),
             registered_name: "kernel".to_string(),
             operation_name: "run".to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ]);
 
@@ -694,12 +697,14 @@ async fn router_with_kernel_notify_operation() -> crate::agent::agent_tool_route
             operation_name: crate::operations::kernel_packages::NOTIFY_PREVIEW_OPERATION
                 .to_string(),
             attach_event_id: None,
+            surface: None,
         },
         crate::agent::agent_tool_router::OperationToolAlias {
             tool_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
             registered_name: crate::operations::kernel_packages::VERLET_NOTIFY_PACKAGE.to_string(),
             operation_name: crate::operations::kernel_packages::CHANNEL_EMIT_OPERATION.to_string(),
             attach_event_id: None,
+            surface: None,
         },
     ])
 }
@@ -746,6 +751,7 @@ async fn router_with_kernel_thread_operations(
                     .to_string(),
                 operation_name: operation.to_string(),
                 attach_event_id: None,
+                surface: None,
             },
         ),
     )
@@ -885,6 +891,7 @@ fn kernel_identity_router(
             registered_name: "thread-identity".to_string(),
             operation_name: "identify-thread".to_string(),
             attach_event_id: None,
+            surface: None,
         }])
 }
 
