@@ -624,6 +624,23 @@ async fn virtual_bash_projects_registry_operations_as_host_builtins() {
 }
 
 #[tokio::test]
+async fn virtual_bash_operation_stdin_preserves_legacy_text_and_empty_semantics() {
+    let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_operation_registry(named_echo_operation_registry("search", "search").await);
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
+
+    let text = harness.execute("printf 'héllo' | search").await.unwrap();
+    let absent = harness.execute("search").await.unwrap();
+    let empty = harness.execute("printf '' | search").await.unwrap();
+
+    assert_eq!(text.stdout, "op:héllo");
+    assert_eq!(absent.stdout, "op:");
+    assert_eq!(empty.stdout, absent.stdout);
+}
+
+#[tokio::test]
 async fn virtual_bash_man_describes_projected_operation_command() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(named_echo_operation_registry("search", "search").await);
@@ -861,6 +878,27 @@ async fn harness_rejects_readonly_mount_and_native_command() {
 #[derive(Default)]
 struct RecordingExternalExecutor {
     requests: tokio::sync::Mutex<Vec<verlet_process::execution::ExternalCommandRequest>>,
+    cancellable_requests: std::sync::atomic::AtomicUsize,
+}
+
+struct TruncatedProxyExternalExecutor;
+
+#[async_trait::async_trait]
+impl verlet_process::execution::ExternalCommandExecutor for TruncatedProxyExternalExecutor {
+    async fn exec(
+        &self,
+        _request: verlet_process::execution::ExternalCommandRequest,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
+        Ok(verlet_process::execution::ExternalCommandResult::new(
+            verlet_process::execution::VirtualCommandOutput {
+                stdout: "retained".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                stdout_truncated: true,
+                stderr_truncated: false,
+            },
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -905,6 +943,16 @@ impl verlet_process::execution::ExternalCommandExecutor for RecordingExternalExe
                 ))
             }
         }
+    }
+
+    async fn exec_cancellable(
+        &self,
+        request: verlet_process::execution::ExternalCommandRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> verlet_process::VerletProcessResult<verlet_process::execution::ExternalCommandResult> {
+        self.cancellable_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.exec(request).await
     }
 }
 
@@ -999,6 +1047,11 @@ async fn selective_proxy_routes_named_command_through_executor() {
         verlet_process::execution::ExternalExecutorKind::RemoteLinux
     );
     assert_eq!(requests[0].cwd, std::path::PathBuf::from("/workspace"));
+    assert_eq!(
+        requests[0].deadline.timeout,
+        std::time::Duration::from_secs(10)
+    );
+    assert!(!requests[0].deadline.remaining().is_zero());
     assert_eq!(requests[0].stdin.as_deref(), Some("hi\n"));
     assert_eq!(
         requests[0].max_output_bytes,
@@ -1038,6 +1091,55 @@ async fn selective_proxy_sub_cap_pipeline_matches_the_legacy_result() {
     assert_eq!(output.exit_code, 0);
     assert!(!output.stdout_truncated);
     assert!(!output.stderr_truncated);
+}
+
+#[tokio::test]
+async fn selective_proxy_preserves_external_stdout_truncation() {
+    let policy = verlet_vbash::BashExecutionPolicy::selective([(
+        "cargo",
+        verlet_vbash::CommandRoute::RemoteLinux,
+    )]);
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
+        crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+            .with_execution_policy(policy)
+            .with_external_executor(std::sync::Arc::new(TruncatedProxyExternalExecutor)),
+    )
+    .await
+    .unwrap();
+
+    let output = harness.execute("cargo test").await.unwrap();
+
+    assert_eq!(output.stdout, "retained");
+    assert!(output.stdout_truncated);
+}
+
+#[tokio::test]
+async fn selective_proxy_propagates_cancellation_capability() {
+    let executor = std::sync::Arc::new(RecordingExternalExecutor::default());
+    let policy = verlet_vbash::BashExecutionPolicy::selective([(
+        "cargo",
+        verlet_vbash::CommandRoute::RemoteLinux,
+    )]);
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(
+        crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+            .with_execution_policy(policy)
+            .with_external_executor(executor.clone()),
+    )
+    .await
+    .unwrap();
+
+    let output = harness
+        .execute_full_output_cancellable("cargo test", tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(output.success(), "{output:?}");
+    assert_eq!(
+        executor
+            .cancellable_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }
 
 #[tokio::test]
