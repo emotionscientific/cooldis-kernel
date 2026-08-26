@@ -5965,6 +5965,7 @@ dependencies = [
  "sha2 0.10.9",
  "strum 0.28.0",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -5985,6 +5986,12 @@ dependencies = [
  "verlet-provider",
  "verlet-runtime-contracts",
  "verlet-sqlite",
+ "verlet-tool-core",
+ "verlet-tool-edit",
+ "verlet-tool-glob",
+ "verlet-tool-grep",
+ "verlet-tool-read",
+ "verlet-tool-write",
  "verlet-vbash",
  "verlet-vfs",
  "verlet-wasm",
@@ -6206,6 +6213,16 @@ dependencies = [
  "tokio",
  "turso",
  "turso_core",
+]
+
+[[package]]
+name = "verlet-tool-abi-fs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "verlet-guest-sdk",
+ "verlet-tool-core",
 ]
 
 [[package]]

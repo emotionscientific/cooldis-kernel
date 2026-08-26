@@ -27,6 +27,7 @@ members = [
     "agent-tools/tool-edit",
     "agent-tools/tool-glob",
     "agent-tools/tool-grep",
+    "agent-tools/wasm/abi-fs",
 ]
 default-members = ["crates/verlet-kernel"]
 resolver = "3"

@@ -35,6 +35,44 @@ spaces. Tilde and file URLs that cannot resolve as literal paths inside the
 root are treated as not found; they never introduce ambient home or URL
 authority.
 
+## Wasm operation lane
+
+`wasm/read`, `wasm/write`, `wasm/edit`, and `wasm/search` package the five
+tool cores as Verlet operation ABI modules. The search module exposes both
+`find` and `grep`. Every operation accepts the same JSON object as the native
+CLI harness:
+
+```json
+{"root":"/workspace","args":{"path":"notes.txt"}}
+```
+
+It returns exactly one CLI envelope, either `{"ok": <tool output>}` or
+`{"error": <text>}`. Tool and argument errors remain successful ABI calls so
+the caller receives the Pi-compatible error text. Only source and sink
+transport failures use a non-OK ABI status. Read, find, and grep need only an
+attached VFS. Write and edit also declare and require the `fs.write` grant.
+
+Known wasm-lane divergence: the guest ABI reports symlinks as kind `Other`
+(neither file nor directory), so the walker skips symlinked entries that the
+native `StdFs` lane would follow. The ABI exposes no follow-symlink
+distinction; resolving this needs a host-side change, tracked separately.
+
+Each module directory is a standalone Cargo workspace with its own lockfile,
+a `cdylib` library target, and `panic = "abort"` in the release profile. This
+is the crate layout accepted by `verlet tool build`. Point a tool package's
+`runtime.module_path` at one of these directories, then build the package:
+
+```sh
+verlet tool build --package path/to/verlet.tool.toml
+```
+
+For a direct source build of one module, use its standalone manifest:
+
+```sh
+cargo build --manifest-path agent-tools/wasm/read/Cargo.toml \
+  --target wasm32-unknown-unknown --release
+```
+
 ## Designed divergences from Pi
 
 - **Confinement.** Every filesystem operation remains inside the explicit
