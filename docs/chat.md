@@ -117,6 +117,15 @@ upstream data.
   RPC boundary; OpenAI Codex browser/device OAuth runs in the chat client
   process before the completed credential is sent to the server. See
   [Provider Setup](provider-setup.md).
+- The setup window's "Install tools" row (and a one-shot first-run offer
+  after the first model lands) opens the tool-kit step: it lists installed
+  kits and offers to install the recommended pi kit from a local kit
+  directory (`dist/pi-kit` or `agent-tools/pi-kit`, probed in that order,
+  relative to the project directory). The install runs the `verlet kit
+  install` pipeline in the chat client process, so it works only for the
+  local project-instance connection, not `--attach` sessions; installed
+  tools load at the next daemon startup. See
+  [WASM Operation Dev Kit](wasm-operation-dev-kit.md) for the kit format.
 - `/models` opens a modal picker backed by a fresh `model/list` request.
   Selecting a row calls `model/select`; missing credentials are reported by
   the app-server without changing the active model. While a modal window is

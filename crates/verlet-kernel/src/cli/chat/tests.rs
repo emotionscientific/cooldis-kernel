@@ -126,7 +126,7 @@ async fn drive_actions(
         action_tx.send(action).unwrap();
     }
     drop(action_tx);
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver
         .drive(&mut client, action_rx, event_tx)
         .await
@@ -294,7 +294,7 @@ fn notification(
 }
 
 fn driver() -> crate::cli::chat::ChatDriver {
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver.active_turn_id = Some("turn-1".to_string());
     driver
 }
@@ -1153,7 +1153,7 @@ async fn device_login_emits_code_then_sends_oauth_credential_over_rpc() {
     .await;
     let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver.oauth_client =
         crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&oauth.base_url).unwrap();
 
@@ -1208,7 +1208,7 @@ async fn second_start_login_while_pending_reports_error_without_spawning() {
     let (mut client, _, server) = mock_operator_client(Vec::new()).await;
     let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver.oauth_client =
         crate::openai_codex::OpenAICodexOAuthClient::with_test_endpoints(&base_url).unwrap();
 
@@ -1259,7 +1259,7 @@ async fn stale_login_completion_after_cancel_is_ignored() {
     let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver.pending_login = Some(crate::cli::chat::PendingLogin {
         id: 7,
         task: tokio::spawn(std::future::pending()),
@@ -1304,7 +1304,7 @@ async fn set_provider_key_while_login_pending_is_rejected_without_rpc() {
     let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (login_tx, _) = tokio::sync::mpsc::unbounded_channel();
-    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string()).unwrap();
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), true).unwrap();
     driver.pending_login = Some(crate::cli::chat::PendingLogin {
         id: 11,
         task: tokio::spawn(std::future::pending()),
@@ -1438,4 +1438,85 @@ async fn bootstrap_with_a_configured_provider_skips_the_first_run_gate() {
 
     client.close().await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn kit_actions_on_attached_sessions_explain_instead_of_installing() {
+    let (mut client, requests, server) = mock_operator_client(Vec::new()).await;
+    let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    for action in [
+        // The first-run offer stays silent; an explicit open explains.
+        verlet_chat::Action::FetchKitStatus {
+            intent: verlet_chat::KitStatusIntent::OfferIfMissing,
+        },
+        verlet_chat::Action::FetchKitStatus {
+            intent: verlet_chat::KitStatusIntent::Open,
+        },
+        verlet_chat::Action::InstallKit {
+            name: "pi".to_string(),
+            source: "dist/pi-kit".to_string(),
+        },
+    ] {
+        action_tx.send(action).unwrap();
+    }
+    drop(action_tx);
+    let mut driver = crate::cli::chat::ChatDriver::new("thread-1".to_string(), false).unwrap();
+    driver
+        .drive(&mut client, action_rx, event_tx)
+        .await
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(events.len(), 2, "events: {events:?}");
+    let verlet_chat::ChatEvent::Error { title, .. } = &events[0] else {
+        panic!("expected an error event, got {:?}", events[0]);
+    };
+    assert_eq!(title, "kit install needs the instance host");
+    let verlet_chat::ChatEvent::KitInstallResult { name, error, .. } = &events[1] else {
+        panic!("expected an install result, got {:?}", events[1]);
+    };
+    assert_eq!(name, "pi");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("instance host")),
+        "error: {error:?}"
+    );
+    // Kit actions never touch the app-server connection.
+    assert!(requests.lock().unwrap().is_empty());
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[test]
+fn pi_kit_recommendation_probe_prefers_dist_then_checked_in_source() {
+    let root = std::env::temp_dir().join(format!("verlet-chat-kit-probe-{}", uuid::Uuid::now_v7()));
+    let dist = root.join("dist/pi-kit");
+    let checked_in = root.join("agent-tools/pi-kit");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::create_dir_all(&checked_in).unwrap();
+    for directory in [&dist, &checked_in] {
+        std::fs::write(
+            directory.join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME),
+            "",
+        )
+        .unwrap();
+    }
+
+    let rows = crate::cli::chat::recommended_kit_rows(&root);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "pi");
+    assert_eq!(rows[0].source.as_deref(), Some("dist/pi-kit"));
+
+    std::fs::remove_file(dist.join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME))
+        .unwrap();
+    let rows = crate::cli::chat::recommended_kit_rows(&root);
+    assert_eq!(rows[0].source.as_deref(), Some("agent-tools/pi-kit"));
+
+    std::fs::remove_dir_all(&root).unwrap();
 }

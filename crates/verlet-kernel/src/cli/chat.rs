@@ -58,7 +58,7 @@ async fn run_chat_console(
     let client = client.ok_or_else(|| {
         crate::cli::usage_error("chat command did not receive an instance connection")
     })?;
-    run_chat_client(client, options.prompt, "project instance".to_string()).await
+    run_chat_client(client, options.prompt, "project instance".to_string(), true).await
 }
 
 async fn run_attached_chat(
@@ -76,7 +76,7 @@ async fn run_attached_chat(
                     chat_connect_config(invocation),
                 )
                 .await?;
-                run_chat_client(client, options.prompt, label).await
+                run_chat_client(client, options.prompt, label, false).await
             }
             #[cfg(not(unix))]
             {
@@ -93,7 +93,7 @@ async fn run_attached_chat(
                 chat_connect_config(invocation),
             )
             .await?;
-            run_chat_client(client, options.prompt, label).await
+            run_chat_client(client, options.prompt, label, false).await
         }
     }
 }
@@ -138,6 +138,7 @@ async fn run_chat_client<S>(
     mut client: crate::adapters::operator_client::OperatorClient<S>,
     initial_prompt: Option<String>,
     connection_label: String,
+    local_kits: bool,
 ) -> crate::kernel::runtime_host::VerletResult<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -166,7 +167,7 @@ where
         let _ = event_tx.send(event);
     }
 
-    let mut driver = ChatDriver::new(thread.id)?;
+    let mut driver = ChatDriver::new(thread.id, local_kits)?;
 
     let run_result = {
         let ui = verlet_chat::runner::run_ui(&mut app, no_color, action_tx, event_rx);
@@ -240,6 +241,13 @@ struct ChatDriver {
     oauth_client: crate::openai_codex::OpenAICodexOAuthClient,
     pending_login: Option<PendingLogin>,
     next_login_id: u64,
+    /// Kit installs run against the cwd-relative registry roots, which only
+    /// match the daemon's roots for the local project-instance connection.
+    /// False for `--attach` sessions.
+    local_kits: bool,
+    /// The in-flight kit install, if any. Never aborted: install is not
+    /// cancellable mid-way, and the record write is atomic.
+    kit_install: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct PendingLogin {
@@ -271,7 +279,7 @@ enum LoginTaskEvent {
 }
 
 impl ChatDriver {
-    fn new(thread_id: String) -> crate::kernel::runtime_host::VerletResult<Self> {
+    fn new(thread_id: String, local_kits: bool) -> crate::kernel::runtime_host::VerletResult<Self> {
         let oauth_client = crate::openai_codex::OpenAICodexOAuthClient::new()
             .map_err(|err| crate::cli::usage_error(err.to_string()))?;
         Ok(Self {
@@ -280,6 +288,8 @@ impl ChatDriver {
             oauth_client,
             pending_login: None,
             next_login_id: 0,
+            local_kits,
+            kit_install: None,
         })
     }
 
@@ -483,6 +493,66 @@ impl ChatDriver {
                     .model_provider_auth_delete_typed(&provider_id)
                     .await?;
                 let _ = events.send(verlet_chat::ChatEvent::CredentialCleared { provider_id });
+            }
+            verlet_chat::Action::FetchKitStatus { intent } => {
+                if !self.local_kits {
+                    // The first-run offer stays silent on attached sessions;
+                    // an explicit open explains why there is nothing here.
+                    if intent == verlet_chat::KitStatusIntent::Open {
+                        let _ = events.send(verlet_chat::ChatEvent::Error {
+                            title: "kit install needs the instance host".to_string(),
+                            body: vec![
+                                "this session is attached to another instance".to_string(),
+                                "run: verlet kit install <kit-dir> where the instance runs"
+                                    .to_string(),
+                            ],
+                        });
+                    }
+                } else {
+                    let task_events = events.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let event = match kit_status_rows() {
+                            Ok((installed, recommended)) => verlet_chat::ChatEvent::KitStatus {
+                                intent,
+                                installed,
+                                recommended,
+                            },
+                            Err(message) => verlet_chat::ChatEvent::Error {
+                                title: "could not read installed kits".to_string(),
+                                body: vec![message],
+                            },
+                        };
+                        let _ = task_events.send(event);
+                    });
+                }
+            }
+            verlet_chat::Action::InstallKit { name, source } => {
+                let error = if !self.local_kits {
+                    Some(
+                        "kit install needs the instance host; run verlet kit install there"
+                            .to_string(),
+                    )
+                } else if self
+                    .kit_install
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    Some("a kit install is already running".to_string())
+                } else {
+                    None
+                };
+                if let Some(error) = error {
+                    let _ = events.send(verlet_chat::ChatEvent::KitInstallResult {
+                        name,
+                        error: Some(error),
+                        receipt: Vec::new(),
+                    });
+                } else {
+                    let task_events = events.clone();
+                    self.kit_install = Some(tokio::spawn(async move {
+                        run_kit_install_task(name, source, task_events).await;
+                    }));
+                }
             }
         }
         Ok(())
@@ -805,6 +875,99 @@ async fn run_login_task(
         provider_id,
         result,
     });
+}
+
+/// The kits the setup window recommends: `(kit name, blurb, candidate
+/// directories probed in order)`. All paths are cwd-relative, like the
+/// registry roots; there is no hosted fetch lane yet (EMO-611), so a kit
+/// whose directory is absent renders as manual-install guidance.
+const RECOMMENDED_KITS: [(&str, &str, [&str; 2]); 1] = [(
+    "pi",
+    "read, write, edit, find, grep file tools",
+    ["dist/pi-kit", "agent-tools/pi-kit"],
+)];
+
+fn kit_roots() -> (std::path::PathBuf, std::path::PathBuf) {
+    let registry_root = crate::cli::tool::default_registry_root();
+    let kits_root =
+        verlet_operations::kit_package::kits_root_for_operations_registry_root(&registry_root);
+    (registry_root, kits_root)
+}
+
+fn kit_status_rows() -> Result<
+    (
+        Vec<verlet_chat::InstalledKitRow>,
+        Vec<verlet_chat::RecommendedKitRow>,
+    ),
+    String,
+> {
+    let (_, kits_root) = kit_roots();
+    let records = verlet_operations::kit_package::InstalledKitStore::new(kits_root)
+        .list()
+        .map_err(|err| err.to_string())?;
+    let installed = records
+        .into_iter()
+        .map(|record| verlet_chat::InstalledKitRow {
+            name: record.name,
+            version: record.version,
+            tools: record
+                .tools
+                .into_iter()
+                .map(|tool| tool.tool_name)
+                .collect(),
+        })
+        .collect();
+    let recommended = recommended_kit_rows(std::path::Path::new("."));
+    Ok((installed, recommended))
+}
+
+fn recommended_kit_rows(project_root: &std::path::Path) -> Vec<verlet_chat::RecommendedKitRow> {
+    RECOMMENDED_KITS
+        .iter()
+        .map(|(name, blurb, candidates)| verlet_chat::RecommendedKitRow {
+            name: (*name).to_string(),
+            blurb: (*blurb).to_string(),
+            source: candidates
+                .iter()
+                .find(|candidate| {
+                    project_root
+                        .join(candidate)
+                        .join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME)
+                        .is_file()
+                })
+                .map(|candidate| (*candidate).to_string()),
+        })
+        .collect()
+}
+
+/// The spawned kit install: the same pipeline as `verlet kit install
+/// <source>` run in the project directory, reported as one
+/// [`verlet_chat::ChatEvent::KitInstallResult`].
+async fn run_kit_install_task(
+    name: String,
+    source: String,
+    events: tokio::sync::mpsc::UnboundedSender<verlet_chat::ChatEvent>,
+) {
+    let (registry_root, kits_root) = kit_roots();
+    let event = match crate::cli::kit::install_kit_from(
+        std::path::Path::new(&source),
+        &registry_root,
+        &kits_root,
+    )
+    .await
+    {
+        Ok(outcome) => verlet_chat::ChatEvent::KitInstallResult {
+            name: outcome.installed.name.clone(),
+            error: None,
+            receipt: outcome.receipt_lines(),
+        },
+        Err(err) => verlet_chat::ChatEvent::KitInstallResult {
+            name,
+            error: Some(err.to_string()),
+            receipt: Vec::new(),
+        },
+    };
+    let _ = events.send(event);
 }
 
 fn redact_secret_values<const N: usize>(mut message: String, secrets: [&String; N]) -> String {
