@@ -49,6 +49,8 @@ pub struct VirtualBashRuntimeConfig {
     pub mounts: Vec<verlet_vbash::VirtualMount>,
     pub operation_registry:
         Option<std::sync::Arc<verlet_operations::operation_registry::OperationRegistry>>,
+    /// Operations whose model-facing envelope must not be bypassed by shell projection.
+    pub hidden_operations: std::collections::BTreeSet<(String, String)>,
     /// Per-caller kernel dispatchers applied when the registry is projected into bash.
     pub kernel_dispatch_overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
     /// Thread workspace VFS shared with catalog-loaded operations when both surfaces
@@ -77,6 +79,7 @@ impl std::fmt::Debug for VirtualBashRuntimeConfig {
                     .as_ref()
                     .map(|_| "<OperationRegistry>"),
             )
+            .field("hidden_operations", &self.hidden_operations)
             .field(
                 "kernel_dispatch_overlay",
                 &if self.kernel_dispatch_overlay.is_empty() {
@@ -113,6 +116,7 @@ impl Default for VirtualBashRuntimeConfig {
             max_output_bytes: 1_048_576,
             mounts: verlet_vbash::default_virtual_mounts(),
             operation_registry: None,
+            hidden_operations: std::collections::BTreeSet::new(),
             kernel_dispatch_overlay:
                 verlet_operations::operation_registry::KernelDispatchOverlay::new(),
             workspace_vfs: None,
@@ -192,6 +196,14 @@ impl VirtualBashRuntimeConfig {
         self
     }
 
+    pub fn with_hidden_operations(
+        mut self,
+        operations: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.hidden_operations.extend(operations);
+        self
+    }
+
     pub fn with_kernel_dispatch_overlay(
         mut self,
         overlay: verlet_operations::operation_registry::KernelDispatchOverlay,
@@ -255,7 +267,10 @@ impl From<VirtualBashRuntimeConfig> for verlet_vbash::harness::BashkitExecutionC
                     registry,
                     config.kernel_dispatch_overlay.clone(),
                 );
-                std::sync::Arc::new(KernelVbashOperationRegistry::new(registry))
+                std::sync::Arc::new(
+                    KernelVbashOperationRegistry::new(registry)
+                        .with_hidden_operations(config.hidden_operations),
+                )
                     as std::sync::Arc<dyn verlet_vbash::harness::VbashOperationRegistry>
             }),
             workspace_vfs: config.workspace_vfs,
@@ -269,11 +284,21 @@ impl From<VirtualBashRuntimeConfig> for verlet_vbash::harness::BashkitExecutionC
 #[async_trait::async_trait]
 impl verlet_vbash::harness::VbashOperationRegistry for KernelVbashOperationRegistry {
     async fn describe(&self, name: &str) -> Option<verlet_operations::RegisteredOperation> {
-        self.registry.registry().describe(name).await
+        self.registry
+            .registry()
+            .describe(name)
+            .await
+            .and_then(|record| self.visible_record(record))
     }
 
     async fn list(&self) -> Vec<verlet_operations::RegisteredOperation> {
-        self.registry.registry().list().await
+        self.registry
+            .registry()
+            .list()
+            .await
+            .into_iter()
+            .filter_map(|record| self.visible_record(record))
+            .collect()
     }
 
     async fn invoke_process_output(
@@ -282,6 +307,11 @@ impl verlet_vbash::harness::VbashOperationRegistry for KernelVbashOperationRegis
         operation_name: &str,
         input: Vec<u8>,
     ) -> Result<verlet_process::execution::VirtualCommandOutput, String> {
+        if self.is_hidden(registered_name, operation_name) {
+            return Err(format!(
+                "operation {registered_name:?}/{operation_name:?} is available only through its model-facing tool surface"
+            ));
+        }
         let process = self
             .registry
             .invoke_process(registered_name, operation_name, input)
@@ -295,11 +325,43 @@ impl verlet_vbash::harness::VbashOperationRegistry for KernelVbashOperationRegis
 
 struct KernelVbashOperationRegistry {
     registry: verlet_operations::operation_registry::ScopedOperationRegistry,
+    hidden_operations: std::collections::BTreeSet<(String, String)>,
 }
 
 impl KernelVbashOperationRegistry {
     fn new(registry: verlet_operations::operation_registry::ScopedOperationRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            hidden_operations: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn with_hidden_operations(
+        mut self,
+        operations: std::collections::BTreeSet<(String, String)>,
+    ) -> Self {
+        self.hidden_operations = operations;
+        self
+    }
+
+    fn visible_record(
+        &self,
+        mut record: verlet_operations::RegisteredOperation,
+    ) -> Option<verlet_operations::RegisteredOperation> {
+        let registered_name = record.name.clone();
+        record
+            .manifest
+            .operations
+            .retain(|operation| !self.is_hidden(&registered_name, &operation.name));
+        (!record.manifest.operations.is_empty()).then_some(record)
+    }
+
+    fn is_hidden(&self, registered_name: &str, operation_name: &str) -> bool {
+        self.hidden_operations
+            .iter()
+            .any(|(registered, operation)| {
+                registered == registered_name && operation == operation_name
+            })
     }
 }
 
@@ -348,7 +410,8 @@ impl crate::agent::agent_tool_router::AgentKernelToolProvider for BashToolProvid
                     std::sync::Arc::clone(registry),
                     self.config.kernel_dispatch_overlay.clone(),
                 ),
-            );
+            )
+            .with_hidden_operations(self.config.hidden_operations.clone());
             let shell_commands = verlet_vbash::harness::operation_shell_command_names(
                 &registry_adapter,
                 &reserved_commands,

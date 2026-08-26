@@ -674,6 +674,17 @@ impl OperationBindingAccumulator {
         direct_tool: Option<AgentManifestDirectToolBinding>,
         effect_class: verlet_agent::manifest_schema::EffectClass,
     ) -> crate::kernel::runtime_host::VerletResult<()> {
+        for (name, value) in &bound_parameters {
+            if let Some(existing) = self.bound_parameters.get(name)
+                && existing != value
+            {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "operation binding has conflicting values for bound parameter {name:?}"
+                    ),
+                ));
+            }
+        }
         self.attachment_config
             .allowed_secrets
             .extend(attachment_config.allowed_secrets);
@@ -685,15 +696,6 @@ impl OperationBindingAccumulator {
                 .extend(methods);
         }
         for (name, value) in bound_parameters {
-            if let Some(existing) = self.bound_parameters.get(&name)
-                && existing != &value
-            {
-                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-                    format!(
-                        "operation binding has conflicting values for bound parameter {name:?}"
-                    ),
-                ));
-            }
             self.bound_parameters.insert(name, value);
         }
         if let Some(direct_tool) = direct_tool {
@@ -2429,6 +2431,25 @@ async fn bind_operation_ref_with_attachment(
         ))
     })?;
     let verification = verify_operation_ref(tool_id, operation_ref, registry_root)?;
+    let selected_names = verification
+        .operation
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let subject = format!("tool {tool_id:?} operation_ref {operation_ref:?}");
+    let has_surface = validate_bound_parameters_for_record(
+        &subject,
+        &verification.record,
+        &selected_names,
+        &bound_parameters,
+    )?;
+    if direct_tool_name.is_none() && has_surface {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "{subject} binds a surface-declared operation as bash_tool; use direct_tool so the host can assemble bound parameters"
+            ),
+        ));
+    }
     let direct_tool_binding = direct_tool_name
         .map(|tool_name| {
             let operation = direct_tool_operation_name(
@@ -2455,8 +2476,101 @@ async fn bind_operation_ref_with_attachment(
             verification.operation,
             direct_tool_binding,
             effect_class,
-        )?;
+        )
+        .map_err(|err| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "tool {tool_id:?} operation_ref {operation_ref:?} failed to merge its attachment: {err}"
+            ))
+        })?;
     Ok(())
+}
+
+/// Revalidates both new bind inputs and event-refolded attachment values.
+pub(crate) fn validate_bound_parameters_for_record(
+    subject: &str,
+    record: &verlet_operations::operation_store::PublishedOperationRecord,
+    selected_names: &std::collections::BTreeSet<String>,
+    bound_parameters: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> crate::kernel::runtime_host::VerletResult<bool> {
+    let Some(interface) = &record.interface else {
+        if let Some(name) = bound_parameters.keys().next() {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("{subject} supplies unused bound parameter {name:?}"),
+            ));
+        }
+        return Ok(false);
+    };
+    let selected = interface
+        .operations
+        .iter()
+        .filter(|operation| selected_names.is_empty() || selected_names.contains(&operation.name));
+    let mut surface_operations = Vec::new();
+    let mut expected_names = std::collections::BTreeSet::new();
+    for operation in selected {
+        let Some(surface) = &operation.surface else {
+            continue;
+        };
+        expected_names.extend(surface.bound.iter().cloned());
+        surface_operations.push(operation);
+    }
+    for name in &expected_names {
+        if !bound_parameters.contains_key(name) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "{subject} surface requires bound parameter {name:?}, but its attachment has no value"
+                ),
+            ));
+        }
+    }
+    for name in bound_parameters.keys() {
+        if !expected_names.contains(name) {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!("{subject} supplies unused bound parameter {name:?}"),
+            ));
+        }
+    }
+    for operation in &surface_operations {
+        let surface = operation.surface.as_ref().ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                "{subject} selected operation {:?} lost its surface during validation",
+                operation.name
+            ))
+        })?;
+        let properties = operation
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} operation {:?} surface has no input_schema properties",
+                    operation.name
+                ))
+            })?;
+        for name in &surface.bound {
+            let value = bound_parameters.get(name).ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} surface requires bound parameter {name:?}, but its attachment has no value"
+                ))
+            })?;
+            let schema = properties.get(name).ok_or_else(|| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} operation {:?} surface has no schema for bound parameter {name:?}",
+                    operation.name
+                ))
+            })?;
+            verlet_runtime_contracts::schema::validate_json_value_against_schema(
+                schema,
+                value,
+                &format!("{subject} bound parameter {name:?}"),
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "{subject} bound parameter {name:?} failed schema validation: {err}"
+                ))
+            })?;
+        }
+    }
+    Ok(!surface_operations.is_empty())
 }
 
 #[derive(Clone, Debug)]

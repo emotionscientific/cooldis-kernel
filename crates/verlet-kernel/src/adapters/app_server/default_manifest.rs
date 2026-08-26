@@ -391,9 +391,9 @@ fn default_manifest_tools(
 /// operation ref and its capability-grant copy are verified against the
 /// operation registry before attachment derivation, so a corrupted record
 /// cannot silently broaden, drop, or project malformed authority.
-/// Surface-declared rows additionally bind `root` to the configured instance
-/// workspace; the value is carried by the manifest attachment, not Wasm
-/// imports.
+/// Surface-declared rows additionally bind `root` to the canonical configured
+/// instance workspace; the value is carried by the manifest attachment, not
+/// Wasm imports. The kit lane currently owns no other bound parameter.
 fn installed_kit_tools(
     operations_registry_root: Option<&std::path::Path>,
     reserved_tool_names: &std::collections::BTreeMap<String, String>,
@@ -480,7 +480,7 @@ fn installed_kit_tools(
                 crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                     &tool.required_capabilities,
                 );
-            let has_surface = verification
+            let surface = verification
                 .operation
                 .as_deref()
                 .and_then(|operation_name| {
@@ -495,15 +495,24 @@ fn installed_kit_tools(
                                 .find(|operation| operation.name == operation_name)
                         })
                 })
-                .and_then(|operation| operation.surface.as_ref())
-                .is_some();
-            let bound_parameters = if has_surface {
-                std::collections::BTreeMap::from([(
-                    "root".to_string(),
-                    serde_json::Value::String(absolute_path_string(workspace_root)?),
-                )])
-            } else {
-                std::collections::BTreeMap::new()
+                .and_then(|operation| operation.surface.as_ref());
+            let bound_parameters = match surface {
+                None => std::collections::BTreeMap::new(),
+                Some(surface) if surface.bound.is_empty() => std::collections::BTreeMap::new(),
+                Some(surface) if surface.bound.len() == 1 && surface.bound.contains("root") => {
+                    std::collections::BTreeMap::from([(
+                        "root".to_string(),
+                        serde_json::Value::String(canonical_workspace_root_string(workspace_root)?),
+                    )])
+                }
+                Some(surface) => {
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!(
+                            "default manifest installed kit {:?} tool {:?} declares bound parameters {:?}; the kit lane supports only root",
+                            record.name, tool.tool_name, surface.bound
+                        ),
+                    ));
+                }
             };
             rows.push((
                 record.name.clone(),
@@ -722,6 +731,34 @@ fn absolute_path_string(
         ));
     }
     Ok(path_string(path))
+}
+
+fn canonical_workspace_root_string(
+    path: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<String> {
+    if !path.is_absolute() {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "configured instance workspace root must be absolute: {}",
+                path.display()
+            ),
+        ));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "configured instance workspace root {} could not be resolved: {err}",
+            path.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+            format!(
+                "configured instance workspace root {} is not a directory",
+                canonical.display()
+            ),
+        ));
+    }
+    Ok(path_string(&canonical))
 }
 
 fn path_string(path: &std::path::Path) -> String {

@@ -624,6 +624,37 @@ async fn virtual_bash_projects_registry_operations_as_host_builtins() {
 }
 
 #[tokio::test]
+async fn virtual_bash_cannot_invoke_operations_hidden_by_a_model_surface() {
+    let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
+        .with_operation_registry(named_echo_operation_registry("search", "search").await)
+        .with_hidden_operations(std::collections::BTreeSet::from([(
+            "search".to_string(),
+            "search".to_string(),
+        )]));
+    let provider = crate::capabilities::execution::BashToolProvider::new(config.clone());
+    let definitions = provider.tool_definitions().await;
+    assert!(!definitions[0].description.contains("search"));
+
+    let mut harness = verlet_vbash::harness::BashkitExecutionHarness::new(config)
+        .await
+        .unwrap();
+
+    let projected = harness
+        .execute("command -v search || true; printf raw | search")
+        .await
+        .unwrap();
+    assert_ne!(projected.exit_code, 0, "{projected:?}");
+    assert!(!projected.stdout.contains("op:raw"), "{projected:?}");
+
+    let explicit = harness
+        .execute("printf raw | verlet run search search")
+        .await
+        .unwrap();
+    assert_ne!(explicit.exit_code, 0, "{explicit:?}");
+    assert!(!explicit.stdout.contains("op:raw"), "{explicit:?}");
+}
+
+#[tokio::test]
 async fn virtual_bash_operation_stdin_preserves_legacy_text_and_empty_semantics() {
     let config = crate::capabilities::execution::VirtualBashRuntimeConfig::default()
         .with_operation_registry(named_echo_operation_registry("search", "search").await);

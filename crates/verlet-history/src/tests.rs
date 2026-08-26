@@ -815,6 +815,29 @@ fn binding_attached_payload_wire_shape_is_frozen() {
 }
 
 #[test]
+fn pre_bound_parameter_attachment_payload_remains_byte_stable() {
+    let legacy = serde_json::json!({
+        "name": "search-tools",
+        "artifact_hash": "sha256:search-tools",
+        "attachment_config": {
+            "allowed_secrets": ["SEARCH_TOKEN"]
+        },
+        "requested_by": "principal:operator",
+        "decided_by": "principal:operator"
+    });
+    let decoded: crate::BindingAttachedPayload = serde_json::from_value(legacy.clone()).unwrap();
+
+    assert!(decoded.attachment_config.bound_parameters.is_empty());
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::BindingAttached.payload_schema_id(),
+            &legacy,
+        )
+        .unwrap();
+}
+
+#[test]
 fn binding_detached_payload_wire_shape_is_frozen() {
     let attach_event_id = crate::EventRecordId::from_uuid(
         uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000041").unwrap(),

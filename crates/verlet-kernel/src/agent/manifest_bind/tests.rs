@@ -661,10 +661,7 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                 attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
                     allowed_secrets: std::collections::BTreeSet::from(["SEARCH_TOKEN".to_string()]),
                     allowed_private_network: Default::default(),
-                    bound_parameters: std::collections::BTreeMap::from([(
-                        "root".to_string(),
-                        serde_json::json!("/workspace"),
-                    )]),
+                    bound_parameters: std::collections::BTreeMap::new(),
                 },
             },
         ),
@@ -683,10 +680,7 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
                         "http://127.0.0.1:*".to_string(),
                         std::collections::BTreeSet::from(["GET".to_string()]),
                     )]),
-                    bound_parameters: std::collections::BTreeMap::from([(
-                        "root".to_string(),
-                        serde_json::json!("/workspace"),
-                    )]),
+                    bound_parameters: std::collections::BTreeMap::new(),
                 },
             },
         ),
@@ -712,10 +706,7 @@ async fn manifest_operation_attachments_land_in_operation_bindings_and_merge() {
             )]),
         }
     );
-    assert_eq!(
-        bound.operation_bindings[0].bound_parameters,
-        std::collections::BTreeMap::from([("root".to_string(), serde_json::json!("/workspace"),)])
-    );
+    assert!(bound.operation_bindings[0].bound_parameters.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -735,13 +726,18 @@ fn operation_binding_rejects_conflicting_bound_parameter_values() {
         )
         .unwrap();
 
+    let before = binding.clone();
+
     let error = binding
         .merge_with_attachment(
-            verlet_wasm::WasmAttachmentConfig::default(),
-            std::collections::BTreeMap::from([(
-                "root".to_string(),
-                serde_json::json!("/workspace-b"),
-            )]),
+            verlet_wasm::WasmAttachmentConfig {
+                allowed_secrets: std::collections::BTreeSet::from(["POISON".to_string()]),
+                allowed_private_network: std::collections::BTreeMap::new(),
+            },
+            std::collections::BTreeMap::from([
+                ("before_root".to_string(), serde_json::json!(true)),
+                ("root".to_string(), serde_json::json!("/workspace-b")),
+            ]),
             Some("write".to_string()),
             None,
             verlet_agent::manifest_schema::EffectClass::Pure,
@@ -751,6 +747,74 @@ fn operation_binding_rejects_conflicting_bound_parameter_values() {
 
     assert!(error.contains("conflicting values"), "{error}");
     assert!(error.contains("root"), "{error}");
+    assert_eq!(binding.attachment_config, before.attachment_config);
+    assert_eq!(binding.bound_parameters, before.bound_parameters);
+    assert_eq!(binding.operations, before.operations);
+    assert_eq!(binding.direct_tools, before.direct_tools);
+    assert_eq!(binding.effect_class, before.effect_class);
+    assert_eq!(binding.whole_record, before.whole_record);
+}
+
+#[tokio::test]
+async fn surface_bound_parameters_fail_at_bind_when_missing_invalid_or_unused() {
+    let root = temp_dir("manifest-bind-surface-values");
+    let record = publish_surface_operation_record(&root, "pi-write", "write").await;
+    let operation_ref = format!("op://pi-write/write@sha256:{}", record.active_artifact_hash);
+    let cases = [
+        (
+            std::collections::BTreeMap::new(),
+            "requires bound parameter \"root\"",
+        ),
+        (
+            std::collections::BTreeMap::from([("root".to_string(), serde_json::json!(42))]),
+            "bound parameter \"root\" failed schema validation",
+        ),
+        (
+            std::collections::BTreeMap::from([
+                ("root".to_string(), serde_json::json!("/workspace")),
+                ("unused".to_string(), serde_json::json!(true)),
+            ]),
+            "unused bound parameter \"unused\"",
+        ),
+    ];
+
+    for (bound_parameters, expected) in cases {
+        let mut bindings = crate::agent::manifest_bind::OperationBindingMap::new();
+        let error = crate::agent::manifest_bind::bind_operation_ref_with_attachment(
+            "write",
+            &operation_ref,
+            verlet_wasm::WasmAttachmentConfig::default(),
+            bound_parameters,
+            verlet_agent::manifest_schema::EffectClass::AtMostOnce,
+            Some("write"),
+            Some(&root),
+            &mut bindings,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(bindings.is_empty());
+    }
+
+    let mut bindings = crate::agent::manifest_bind::OperationBindingMap::new();
+    let error = crate::agent::manifest_bind::bind_operation_ref_with_attachment(
+        "write-as-bash",
+        &operation_ref,
+        verlet_wasm::WasmAttachmentConfig::default(),
+        std::collections::BTreeMap::from([("root".to_string(), serde_json::json!("/workspace"))]),
+        verlet_agent::manifest_schema::EffectClass::AtMostOnce,
+        None,
+        Some(&root),
+        &mut bindings,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("bash_tool"), "{error}");
+    assert!(error.contains("surface-declared"), "{error}");
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -3676,6 +3740,83 @@ async fn publish_json_operation_record(
                     bin_path: artifact,
                 },
                 interface: None,
+                capability_grants: Default::default(),
+                metadata: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn publish_surface_operation_record(
+    root: &std::path::Path,
+    record_name: &str,
+    operation_name: &str,
+) -> verlet_operations::operation_store::PublishedOperationRecord {
+    std::fs::create_dir_all(root).unwrap();
+    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(root);
+    let wasm = wat::parse_str(json_operation_guest(operation_name)).unwrap();
+    let artifact = root.join(format!("{record_name}.wasm"));
+    std::fs::write(&artifact, wasm).unwrap();
+    let interface = verlet_operations::tool_package::ToolInterfaceContract {
+        schema_version: verlet_operations::tool_package::TOOL_PACKAGE_SCHEMA_VERSION,
+        identity: verlet_operations::tool_package::ToolPackageIdentity {
+            name: record_name.to_string(),
+            version: Some("0.1.0".to_string()),
+            description: None,
+            owner: None,
+        },
+        runtime: verlet_operations::tool_package::ToolRuntimeContract {
+            kind: "wasm32-unknown-unknown".to_string(),
+            state: Some("stateless".to_string()),
+            module_path: None,
+            bin_path: Some(artifact.clone()),
+            release: None,
+            timeout_ms: None,
+            max_input_bytes: None,
+            max_output_bytes: None,
+        },
+        operations: vec![verlet_operations::tool_package::ToolOperationInterface {
+            name: operation_name.to_string(),
+            description: None,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "root": {"type": "string"},
+                    "args": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["root", "args"],
+                "additionalProperties": false
+            }),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": true
+            }),
+            required_capabilities: std::collections::BTreeSet::new(),
+            surface: Some(verlet_operations::tool_package::ToolSurfaceContract {
+                args_field: "args".to_string(),
+                bound: std::collections::BTreeSet::from(["root".to_string()]),
+            }),
+            command: None,
+            mcp: None,
+            manual: None,
+        }],
+        fixtures: Vec::new(),
+    };
+    registry
+        .publish_artifact(
+            verlet_operations::operation_store::PublishOperationRequest {
+                name: record_name.to_string(),
+                artifact_path: artifact.clone(),
+                source: verlet_operations::operation_store::PublishedOperationSource::Wasm {
+                    bin_path: artifact,
+                },
+                interface: Some(interface),
                 capability_grants: Default::default(),
                 metadata: Default::default(),
             },

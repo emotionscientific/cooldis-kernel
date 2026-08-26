@@ -584,6 +584,53 @@ fn receipt_only_stream_with_current_empty_toolset_is_valid() {
 }
 
 #[test]
+fn binding_event_refold_preserves_bound_parameters_and_legacy_defaults() {
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant",
+        "user",
+        "bound-parameter-refold",
+    );
+    let stream_id = verlet_history::EventStreamId::for_thread(&coordinates);
+    let mut events = Vec::new();
+    for (sequence, name, attachment_config) in [
+        (
+            1,
+            "current",
+            serde_json::json!({"bound_parameters": {"root": "/workspace"}}),
+        ),
+        (2, "legacy", serde_json::json!({})),
+    ] {
+        let event = verlet_history::NewEventRecord::witnessed(
+            coordinates.clone(),
+            verlet_history::EventKind::BindingAttached,
+            serde_json::json!({
+                "name": name,
+                "artifact_hash": format!("sha256:{name}"),
+                "attachment_config": attachment_config,
+                "requested_by": "principal:operator",
+                "decided_by": "principal:operator"
+            }),
+        );
+        events.push(verlet_history::EventRecord::from_new(
+            stream_id.clone(),
+            verlet_history::EventSequence::new(sequence),
+            event,
+        ));
+    }
+
+    let bindings =
+        crate::adapters::app_server::threads::thread_operation_bindings_from_events(&events)
+            .unwrap();
+    assert_eq!(
+        bindings[0].binding.bound_parameters,
+        std::collections::BTreeMap::from([("root".to_string(), serde_json::json!("/workspace"),)])
+    );
+    assert!(bindings[1].binding.bound_parameters.is_empty());
+    assert_eq!(bindings[0].attach_event_id, Some(events[0].id));
+    assert_eq!(bindings[1].attach_event_id, Some(events[1].id));
+}
+
+#[test]
 fn malformed_bind_receipt_error_identifies_thread_and_receipt() {
     let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
         "tenant",

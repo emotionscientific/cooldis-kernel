@@ -165,11 +165,14 @@ bound = ["root"]
 
 The input schema remains the one authored ABI contract. Publish validation
 requires its top-level properties to be exactly `args_field` plus the bound
-parameters, all required. Direct model rows receive the `args_field`
-subschema; attach-time configuration supplies every bound parameter, and the
-router validates both the model arguments and the assembled envelope. CLI
-invocation keeps the full envelope because the caller is the host in that
-lane.
+parameters, all required, with `additionalProperties = false`. The
+`args_field` subschema must also be a closed object and cannot expose a bound
+parameter name. Direct model rows receive that subschema; attach-time
+configuration supplies every bound parameter, and the router validates both
+the model arguments and the assembled envelope. Bind and replay validate the
+bound values against their property schemas. Surface operations are withheld
+from the model's raw virtual-bash command projection. CLI invocation keeps the
+full envelope because the caller is the host in that lane.
 
 ## Importing An Existing REST API Instead
 
