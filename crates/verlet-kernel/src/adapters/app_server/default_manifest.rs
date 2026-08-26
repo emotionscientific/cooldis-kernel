@@ -276,34 +276,72 @@ fn default_manifest_tools(
             }
         }
     }
-    tools.extend(installed_kit_tools(bindings.registry_root.as_deref())?);
-    if bindings.global_operation_names.is_empty() && !bindings.load_all_active_when_unbound {
-        return Ok(tools);
-    }
-    let registry_root = bindings.registry_root.as_ref().ok_or_else(|| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            "default manifest operation declarations require operation binding registry_root"
-                .to_string(),
-        )
-    })?;
-    let registry = verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
     let mut records = std::collections::BTreeMap::new();
-    for operation_name in &bindings.global_operation_names {
-        let record = registry.load_record(operation_name).map_err(|err| {
-            crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-                "default manifest global operation {operation_name:?} was not found: {err}"
-            ))
+    if !bindings.global_operation_names.is_empty() || bindings.load_all_active_when_unbound {
+        let registry_root = bindings.registry_root.as_ref().ok_or_else(|| {
+            crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                "default manifest operation declarations require operation binding registry_root"
+                    .to_string(),
+            )
         })?;
-        records.insert(record.name.clone(), record);
-    }
-    if bindings.load_all_active_when_unbound {
-        for record in registry.list_records()? {
-            if record.name == crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE {
-                continue;
-            }
+        let registry =
+            verlet_operations::operation_store::LocalOperationRegistry::new(registry_root);
+        for operation_name in &bindings.global_operation_names {
+            let record = registry.load_record(operation_name).map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "default manifest global operation {operation_name:?} was not found: {err}"
+                ))
+            })?;
             records.insert(record.name.clone(), record);
         }
+        if bindings.load_all_active_when_unbound {
+            for record in registry.list_records()? {
+                if record.name == crate::operations::kernel_packages::VERLET_PROCESS_PACKAGE {
+                    continue;
+                }
+                records.insert(record.name.clone(), record);
+            }
+        }
     }
+
+    let mut reserved_tool_names = std::collections::BTreeMap::from([
+        (
+            crate::operations::kernel_packages::THREAD_SPAWN_OPERATION.to_string(),
+            "kernel thread tool".to_string(),
+        ),
+        (
+            crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION.to_string(),
+            "kernel thread tool".to_string(),
+        ),
+        (
+            crate::operations::kernel_packages::THREAD_WAIT_OPERATION.to_string(),
+            "kernel thread tool".to_string(),
+        ),
+        (
+            crate::operations::kernel_packages::THREAD_STATUS_OPERATION.to_string(),
+            "kernel thread tool".to_string(),
+        ),
+        (
+            crate::operations::kernel_packages::THREAD_CANCEL_OPERATION.to_string(),
+            "kernel thread tool".to_string(),
+        ),
+    ]);
+    for record in records.values() {
+        if record.name == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE {
+            continue;
+        }
+        for operation in &record.projections.operations {
+            let row_id = format!("{}.{}", record.name, operation.operation_name);
+            reserved_tool_names.insert(
+                operation.operation_name.clone(),
+                format!("config-driven operation row {row_id:?}"),
+            );
+        }
+    }
+    tools.extend(installed_kit_tools(
+        bindings.registry_root.as_deref(),
+        &reserved_tool_names,
+    )?);
 
     for record in records.into_values() {
         if record.name == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE {
@@ -346,11 +384,14 @@ fn default_manifest_tools(
 /// its kebab-case string, and attachment derived from
 /// `required_capabilities` through
 /// `attachment_config_from_capability_grants`. An unreadable record or a
-/// `tool_name` duplicated across installed kits is a hard error naming the
-/// kit(s): the default manifest must not silently drop or shadow a
-/// declared tool.
+/// `tool_name` duplicated across installed kits or colliding with another
+/// synthesized surface is a hard error naming both sources. Each pinned
+/// operation ref and its capability-grant copy are verified against the
+/// operation registry before attachment derivation, so a corrupted record
+/// cannot silently broaden, drop, or project malformed authority.
 fn installed_kit_tools(
     operations_registry_root: Option<&std::path::Path>,
+    reserved_tool_names: &std::collections::BTreeMap<String, String>,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
 {
     let Some(operations_registry_root) = operations_registry_root else {
@@ -366,22 +407,15 @@ fn installed_kit_tools(
             kits_root.display()
         ))
     })?;
-    let kernel_tool_names = [
-        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
-        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
-        crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
-        crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
-        crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
-    ];
     let mut tool_owners = std::collections::BTreeMap::new();
     let mut rows = Vec::new();
     for record in records {
         for tool in record.tools {
-            if kernel_tool_names.contains(&tool.tool_name.as_str()) {
+            if let Some(source) = reserved_tool_names.get(&tool.tool_name) {
                 return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
                     format!(
-                        "default manifest installed kit {:?} tools.tool_name {:?} collides with a kernel thread tool",
-                        record.name, tool.tool_name
+                        "default manifest installed kit {:?} tools.tool_name {:?} collides with {source}",
+                        record.name, tool.tool_name,
                     ),
                 ));
             }
@@ -407,6 +441,35 @@ fn installed_kit_tools(
                     ));
                 }
             };
+            let tool_id = format!("kit.{}.{}", record.name, tool.tool_name);
+            let verification = crate::agent::manifest_bind::verify_operation_ref(
+                &tool_id,
+                &tool.operation_ref,
+                operations_registry_root,
+            )
+            .map_err(|err| {
+                crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                    "default manifest installed kit {:?} tool {:?} failed to verify its pinned operation_ref: {err}",
+                    record.name, tool.tool_name
+                ))
+            })?;
+            if tool.required_capabilities != verification.record.capability_grants {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "default manifest installed kit {:?} tools.required_capabilities for tool_name {:?} do not match pinned operation_ref {:?}: record has {:?}, installed-kit record has {:?}",
+                        record.name,
+                        tool.tool_name,
+                        tool.operation_ref,
+                        verification.record.capability_grants,
+                        tool.required_capabilities,
+                    ),
+                ));
+            }
+            validate_installed_kit_attachment_capabilities(
+                &record.name,
+                &tool.tool_name,
+                &tool.required_capabilities,
+            )?;
             let attachment_config =
                 crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
                     &tool.required_capabilities,
@@ -416,7 +479,7 @@ fn installed_kit_tools(
                 tool.tool_name.clone(),
                 verlet_agent::manifest_schema::AgentManifestTool::Direct(
                     verlet_agent::manifest_schema::AgentManifestDirectTool {
-                        id: format!("kit.{}.{}", record.name, tool.tool_name),
+                        id: tool_id,
                         tool_name: tool.tool_name,
                         operation_ref: tool.operation_ref,
                         effect_class,
@@ -431,6 +494,55 @@ fn installed_kit_tools(
     }
     rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     Ok(rows.into_iter().map(|(_, _, tool)| tool).collect())
+}
+
+fn validate_installed_kit_attachment_capabilities(
+    kit_name: &str,
+    tool_name: &str,
+    grants: &std::collections::BTreeSet<String>,
+) -> crate::kernel::runtime_host::VerletResult<()> {
+    for grant in grants {
+        if let Some(secret_name) = grant.strip_prefix("secret:") {
+            let validated =
+                verlet_metadata::secret_store::validate_secret_name(secret_name).map_err(
+                    |err| {
+                        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+                            "default manifest installed kit {kit_name:?} tools.required_capabilities grant {grant:?} for tool_name {tool_name:?} has an invalid secret name: {err}"
+                        ))
+                    },
+                )?;
+            if validated != secret_name {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "default manifest installed kit {kit_name:?} tools.required_capabilities grant {grant:?} for tool_name {tool_name:?} must not contain surrounding whitespace"
+                    ),
+                ));
+            }
+            continue;
+        }
+        if grant == "net.http.private" {
+            continue;
+        }
+        let Some(rule) = grant.strip_prefix("net.http.private:") else {
+            continue;
+        };
+        let malformed = rule.is_empty()
+            || rule.strip_prefix("*:").is_some_and(str::is_empty)
+            || rule.split_once(':').is_some_and(|(method, origin)| {
+                method.is_empty()
+                    || (origin.is_empty()
+                        && !matches!(method, "http" | "https")
+                        && !method.contains('*'))
+            });
+        if malformed {
+            return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                format!(
+                    "default manifest installed kit {kit_name:?} tools.required_capabilities grant {grant:?} for tool_name {tool_name:?} has an empty private-network method or origin"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn default_manifest_publish_plan(
