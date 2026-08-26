@@ -201,7 +201,7 @@ description = "Read and write files through explicit VFS capabilities."
 tool_name = "file_read"
 package = "file-read"
 operation = "file_read"
-effect_class = "pure"
+effect_class = "idempotent"
 
 [[tools]]
 tool_name = "file_write"
