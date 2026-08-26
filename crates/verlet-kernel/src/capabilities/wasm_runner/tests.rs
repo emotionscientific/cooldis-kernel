@@ -663,8 +663,18 @@ fn pi_tool_input(args: serde_json::Value) -> Vec<u8> {
     .unwrap()
 }
 
-fn tool_success_envelope(output: impl serde::Serialize) -> serde_json::Value {
-    serde_json::json!({"ok": output})
+fn tool_envelope(value: serde_json::Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&value).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
+fn tool_success_envelope(output: impl serde::Serialize) -> Vec<u8> {
+    tool_envelope(serde_json::json!({"ok": output}))
+}
+
+fn tool_error_envelope(error: impl Into<String>) -> Vec<u8> {
+    tool_envelope(serde_json::json!({"error": error.into()}))
 }
 
 fn tool_output(output: &verlet_process::process::WasmOperationOutput) -> serde_json::Value {
@@ -1484,7 +1494,7 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_missing_file() {
         .await
         .unwrap();
 
-    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(output.output, tool_success_envelope(native_output));
     assert_eq!(output.operation.name, "read");
 
     let native_error = verlet_tool_read::run(
@@ -1504,8 +1514,8 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_missing_file() {
         .await
         .unwrap();
     assert_eq!(
-        tool_output(&missing),
-        serde_json::json!({"error": native_error.to_string()})
+        missing.output,
+        tool_error_envelope(native_error.to_string())
     );
 }
 
@@ -1542,7 +1552,7 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
         )
         .await
         .unwrap();
-    assert_eq!(tool_output(&find), tool_success_envelope(native_find));
+    assert_eq!(find.output, tool_success_envelope(native_find));
 
     let native_find_error = verlet_tool_glob::run(
         verlet_tool_glob::GlobArgs {
@@ -1558,8 +1568,8 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
         .await
         .unwrap();
     assert_eq!(
-        tool_output(&find_error),
-        serde_json::json!({"error": native_find_error.to_string()})
+        find_error.output,
+        tool_error_envelope(native_find_error.to_string())
     );
 
     let native_grep = verlet_tool_grep::run(
@@ -1586,7 +1596,7 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
         )
         .await
         .unwrap();
-    assert_eq!(tool_output(&grep), tool_success_envelope(native_grep));
+    assert_eq!(grep.output, tool_success_envelope(native_grep));
 
     let native_grep_error = verlet_tool_grep::run(
         verlet_tool_grep::GrepArgs {
@@ -1606,8 +1616,8 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
         .await
         .unwrap();
     assert_eq!(
-        tool_output(&grep_error),
-        serde_json::json!({"error": native_grep_error.to_string()})
+        grep_error.output,
+        tool_error_envelope(native_grep_error.to_string())
     );
 }
 
@@ -1646,7 +1656,7 @@ async fn wasm_pi_write_matches_native_mutation_and_maps_io_into_envelope() {
         .await
         .unwrap();
 
-    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(output.output, tool_success_envelope(native_output));
     assert_eq!(
         tool_output(&output)["ok"]["text"],
         "Successfully wrote 3 bytes to nested/unicode.txt"
@@ -1682,8 +1692,8 @@ async fn wasm_pi_write_matches_native_mutation_and_maps_io_into_envelope() {
         .await
         .unwrap();
     assert_eq!(
-        tool_output(&malformed_output),
-        serde_json::json!({"error": format!("invalid input JSON: {native_error}")})
+        malformed_output.output,
+        tool_error_envelope(format!("invalid input JSON: {native_error}"))
     );
 }
 
@@ -1713,7 +1723,7 @@ async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
         .await
         .unwrap();
 
-    assert_eq!(tool_output(&output), tool_success_envelope(native_output));
+    assert_eq!(output.output, tool_success_envelope(native_output));
     assert_eq!(
         vfs.read_file(std::path::Path::new("/workspace/project/input.txt"))
             .await
@@ -1727,10 +1737,7 @@ async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
         .invoke_operation_bytes("edit", pi_tool_input(invalid_args))
         .await
         .unwrap();
-    assert_eq!(
-        tool_output(&validation),
-        serde_json::json!({"error": native_error})
-    );
+    assert_eq!(validation.output, tool_error_envelope(native_error));
 }
 
 #[tokio::test]

@@ -122,9 +122,13 @@ fn write_envelope(
 ) -> Result<(), verlet_guest_sdk::StatusCode> {
     let mut envelope = serde_json::Map::new();
     envelope.insert(key.to_owned(), value);
-    let bytes = serde_json::to_vec(&serde_json::Value::Object(envelope))
+    let mut bytes = serde_json::to_vec(&serde_json::Value::Object(envelope))
         .map_err(|_| verlet_guest_sdk::StatusCode::TransportError)?;
-    verlet_guest_sdk::write_sink(sink, &bytes)?;
+    bytes.push(b'\n');
+    let written = verlet_guest_sdk::write_sink(sink, &bytes)?;
+    if written != bytes.len() {
+        return Err(verlet_guest_sdk::StatusCode::TransportError);
+    }
     Ok(())
 }
 
@@ -167,7 +171,10 @@ impl verlet_tool_core::ToolFs for AbiFs {
         let resolved = path_str(path, &resolved)?;
         let handle = verlet_guest_sdk::open_file_write(resolved)
             .map_err(|status| map_status(path, status))?;
-        verlet_guest_sdk::write_file(handle, content).map_err(|status| map_status(path, status))?;
+        if let Err(status) = verlet_guest_sdk::write_file(handle, content) {
+            let _ = verlet_guest_sdk::close_file(handle);
+            return Err(map_status(path, status));
+        }
         verlet_guest_sdk::close_file(handle).map_err(|status| map_status(path, status))
     }
 
