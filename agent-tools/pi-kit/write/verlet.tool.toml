@@ -1,0 +1,35 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "pi-write"
+version = "0.1.0"
+description = "Pi-parity file write (unconditional overwrite, creates parents)."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "../../wasm/write"
+state = "stateless"
+max_input_bytes = 1048576
+max_output_bytes = 262144
+
+[[operations]]
+name = "write"
+description = "Write file content with Pi receipt semantics (UTF-16 units in text, UTF-8 bytes in receipt)."
+input_schema = "schemas/write.input.json"
+output_schema = "schemas/write.output.json"
+required_capabilities = ["fs.write"]
+
+[operations.command]
+name = "pi write"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "write"
+
+[[fixtures]]
+name = "write_creates_parents"
+operation = "write"
+input = "fixtures/write_creates_parents.input.json"
+expect = "fixtures/write_creates_parents.expect.json"

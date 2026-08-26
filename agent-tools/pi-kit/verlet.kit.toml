@@ -1,0 +1,38 @@
+kind = "verlet.kit"
+schema_version = 0
+packages = ["read", "write", "edit", "search"]
+
+[identity]
+name = "pi"
+version = "0.1.0"
+description = "Pi-parity file tools: read, write, edit, find, grep."
+
+[[tools]]
+tool_name = "read"
+package = "pi-read"
+operation = "read"
+effect_class = "idempotent"
+
+[[tools]]
+tool_name = "write"
+package = "pi-write"
+operation = "write"
+effect_class = "at-most-once"
+
+[[tools]]
+tool_name = "edit"
+package = "pi-edit"
+operation = "edit"
+effect_class = "at-most-once"
+
+[[tools]]
+tool_name = "find"
+package = "pi-search"
+operation = "find"
+effect_class = "idempotent"
+
+[[tools]]
+tool_name = "grep"
+package = "pi-search"
+operation = "grep"
+effect_class = "idempotent"

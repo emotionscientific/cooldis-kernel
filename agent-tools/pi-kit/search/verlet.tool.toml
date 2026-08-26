@@ -1,0 +1,56 @@
+kind = "cooldis.tool"
+schema_version = 0
+
+[identity]
+name = "pi-search"
+version = "0.1.0"
+description = "Pi-parity find (glob) and grep over one shared deterministic walk."
+
+[runtime]
+kind = "wasm32-unknown-unknown"
+module_path = "../../wasm/search"
+state = "stateless"
+max_input_bytes = 65536
+max_output_bytes = 262144
+
+[[operations]]
+name = "find"
+description = "Glob for files with Pi sorting, ignore rules, and truncation."
+input_schema = "schemas/find.input.json"
+output_schema = "schemas/find.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "pi find"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "find"
+
+[[operations]]
+name = "grep"
+description = "Regex search with Pi context rendering, clipping, and truncation."
+input_schema = "schemas/grep.input.json"
+output_schema = "schemas/grep.output.json"
+required_capabilities = []
+
+[operations.command]
+name = "pi grep"
+stdin = "json"
+stdout = "json"
+
+[operations.mcp]
+tool_name = "grep"
+
+[[fixtures]]
+name = "find_sorted_matches"
+operation = "find"
+input = "fixtures/find_sorted_matches.input.json"
+expect = "fixtures/find_sorted_matches.expect.json"
+
+[[fixtures]]
+name = "grep_context_blocks"
+operation = "grep"
+input = "fixtures/grep_context_blocks.input.json"
+expect = "fixtures/grep_context_blocks.expect.json"
