@@ -232,6 +232,15 @@ installed-kit record. The record is written only after all members publish.
 If a later member fails, earlier content-addressed publishes remain harmless
 and unreferenced. Reinstall overwrites the installed-kit record.
 
+Operation records are keyed by member package `identity.name` across the whole
+registry, not per kit. If two kits each ship a member named `file-read`, the
+second install moves that record's active pointer to its own artifact. Both
+kits stay bindable because their installed-kit records pin exact
+`@sha256` artifact hashes, which resolve against the record's version history
+rather than the active pointer. The visible effect is only on unpinned lookups
+of the shared name. Give member packages distinct `identity.name` values when
+publishing kits for others to install.
+
 Installed records are JSON files at `.verlet/kits/<kit-name>.json` by default.
 `verlet kit list` reads those records, and `verlet kit remove <kit-name>`
 deletes only the selected record. Published operations remain in the registry.
