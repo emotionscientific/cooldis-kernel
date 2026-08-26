@@ -1985,7 +1985,9 @@ fn vfs_error_status(err: bashkit::Error) -> i32 {
         | bashkit::Error::CommandFailure(_)
         | bashkit::Error::Network(_)
         | bashkit::Error::Regex(_)
-        | bashkit::Error::Internal(_) => STATUS_TRANSPORT_ERROR,
+        | bashkit::Error::Internal(_)
+        | bashkit::Error::SnapshotTooNew { .. }
+        | bashkit::Error::SnapshotCapabilityMismatch(_) => STATUS_TRANSPORT_ERROR,
     }
 }
 

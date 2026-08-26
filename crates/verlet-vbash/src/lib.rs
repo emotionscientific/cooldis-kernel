@@ -319,12 +319,16 @@ pub fn deny_output(label: &str) -> verlet_process::execution::VirtualCommandOutp
 pub fn virtual_command_output_from_exec_result(
     result: bashkit::ExecResult,
 ) -> verlet_process::execution::VirtualCommandOutput {
+    let (stdout, stdout_text_truncated) =
+        bytes_to_capped_text(result.stdout.as_bytes(), SPILL_RETENTION_MAX_BYTES);
+    let (stderr, stderr_text_truncated) =
+        bytes_to_capped_text(result.stderr.as_bytes(), SPILL_RETENTION_MAX_BYTES);
     verlet_process::execution::VirtualCommandOutput {
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout,
+        stderr,
         exit_code: result.exit_code,
-        stdout_truncated: result.stdout_truncated,
-        stderr_truncated: result.stderr_truncated,
+        stdout_truncated: result.stdout_truncated || stdout_text_truncated,
+        stderr_truncated: result.stderr_truncated || stderr_text_truncated,
     }
 }
 
@@ -332,8 +336,8 @@ pub fn exec_result_from_virtual_output(
     output: verlet_process::execution::VirtualCommandOutput,
 ) -> bashkit::ExecResult {
     bashkit::ExecResult {
-        stdout: output.stdout,
-        stderr: output.stderr,
+        stdout: output.stdout.into(),
+        stderr: output.stderr.into(),
         exit_code: output.exit_code,
         stdout_truncated: output.stdout_truncated,
         stderr_truncated: output.stderr_truncated,
@@ -480,13 +484,43 @@ fn is_utf8_continuation(byte: u8) -> bool {
 }
 
 pub fn bytes_to_capped_text(bytes: &[u8], max_output_bytes: usize) -> (String, bool) {
-    if bytes.len() <= max_output_bytes {
-        return (String::from_utf8_lossy(bytes).to_string(), false);
+    let mut text = String::with_capacity(bytes.len().min(max_output_bytes).min(8192));
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                let available = max_output_bytes.saturating_sub(text.len());
+                let mut end = valid.len().min(available);
+                while !valid.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.push_str(&valid[..end]);
+                return (text, end != valid.len());
+            }
+            Err(err) => {
+                let valid_end = err.valid_up_to();
+                let valid = std::str::from_utf8(&remaining[..valid_end])
+                    .expect("Utf8Error::valid_up_to must delimit valid UTF-8");
+                let available = max_output_bytes.saturating_sub(text.len());
+                let mut end = valid.len().min(available);
+                while !valid.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.push_str(&valid[..end]);
+                if end != valid.len()
+                    || text.len().saturating_add('\u{fffd}'.len_utf8()) > max_output_bytes
+                {
+                    return (text, true);
+                }
+                text.push('\u{fffd}');
+                let Some(invalid_bytes) = err.error_len() else {
+                    return (text, false);
+                };
+                remaining = &remaining[valid_end + invalid_bytes..];
+            }
+        }
     }
-    (
-        String::from_utf8_lossy(&bytes[..max_output_bytes]).to_string(),
-        true,
-    )
+    (text, false)
 }
 
 pub fn verlet_usage() -> String {
@@ -508,7 +542,11 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "bash",
         "bc",
         "break",
+        "bunzip2",
+        "bzcat",
+        "bzip2",
         "caller",
+        "case",
         "cat",
         "cd",
         "checkpoint",
@@ -520,6 +558,7 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "comm",
         "compgen",
         "continue",
+        "coproc",
         "verlet",
         "cp",
         "csv",
@@ -531,21 +570,31 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "diff",
         "dirname",
         "dirs",
+        "do",
+        "done",
         "dotenv",
         "du",
         "echo",
+        "elif",
+        "else",
         "env",
         "envsubst",
+        "esac",
         "eval",
         "exec",
         "exit",
         "expand",
+        "export",
         "expr",
         "false",
         "fc",
+        "fi",
         "file",
         "find",
         "fold",
+        "for",
+        "function",
+        "getopts",
         "git",
         "glob",
         "grep",
@@ -560,6 +609,8 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "http",
         "iconv",
         "id",
+        "if",
+        "in",
         "join",
         "jq",
         "json",
@@ -603,6 +654,7 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "rmdir",
         "scp",
         "sed",
+        "select",
         "semver",
         "seq",
         "set",
@@ -628,6 +680,8 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "tee",
         "template",
         "test",
+        "then",
+        "time",
         "times",
         "timeout",
         "tomlq",
@@ -646,6 +700,7 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "unexpand",
         "uniq",
         "unset",
+        "until",
         "unzip",
         "verify",
         "wait",
@@ -653,10 +708,10 @@ pub fn reserved_operation_shell_commands() -> std::collections::BTreeSet<String>
         "wc",
         "wget",
         "which",
+        "while",
         "whoami",
         "xargs",
         "xxd",
-        "yaml",
         "yes",
         "zip",
     ]
@@ -877,6 +932,30 @@ mod tests {
     }
 
     #[test]
+    fn stream_data_text_boundary_is_lossy_bounded_and_tracks_truncation() {
+        let legacy = b"before\xffafter";
+        let result = bashkit::ExecResult {
+            stdout: legacy.as_slice().into(),
+            stderr: b"warning\xfe".as_slice().into(),
+            stdout_truncated: false,
+            stderr_truncated: true,
+            ..Default::default()
+        };
+
+        let output = crate::virtual_command_output_from_exec_result(result);
+
+        assert_eq!(output.stdout, String::from_utf8_lossy(legacy));
+        assert_eq!(output.stderr, String::from_utf8_lossy(b"warning\xfe"));
+        assert!(!output.stdout_truncated);
+        assert!(output.stderr_truncated);
+
+        let invalid = vec![0xff; 4];
+        let (bounded, truncated) = crate::bytes_to_capped_text(&invalid, 4);
+        assert_eq!(bounded, "\u{fffd}");
+        assert!(truncated);
+    }
+
+    #[test]
     fn overflow_plan_preserves_inline_bytes_and_spills_with_utf8_safe_preview() {
         let inline =
             crate::plan_output_overflow(b"exact output\n", 13, false, "/spill/call.stdout.txt");
@@ -969,5 +1048,14 @@ mod tests {
         assert!(reserved.contains("verlet"));
         assert!(reserved.contains("apply_patch"));
         assert!(reserved.contains("cargo"));
+        for keyword in [
+            "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if",
+            "in", "select", "then", "time", "until", "while",
+        ] {
+            assert!(
+                reserved.contains(keyword),
+                "missing shell keyword {keyword}"
+            );
+        }
     }
 }

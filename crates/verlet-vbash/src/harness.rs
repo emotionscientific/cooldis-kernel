@@ -198,6 +198,34 @@ pub struct BashkitExecutionHarness {
     external_executor:
         Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
     max_output_bytes: usize,
+    output_truncation: std::sync::Arc<OutputTruncationTracker>,
+}
+
+#[derive(Default)]
+struct OutputTruncationTracker {
+    stdout: std::sync::atomic::AtomicBool,
+    stderr: std::sync::atomic::AtomicBool,
+}
+
+impl OutputTruncationTracker {
+    fn reset(&self) {
+        self.stdout
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.stderr
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn record(&self, output: &verlet_process::execution::VirtualCommandOutput) {
+        self.stdout
+            .fetch_or(output.stdout_truncated, std::sync::atomic::Ordering::SeqCst);
+        self.stderr
+            .fetch_or(output.stderr_truncated, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn apply(&self, output: &mut verlet_process::execution::VirtualCommandOutput) {
+        output.stdout_truncated |= self.stdout.load(std::sync::atomic::Ordering::SeqCst);
+        output.stderr_truncated |= self.stderr.load(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -326,12 +354,14 @@ impl BashkitExecutionHarness {
         let execution_policy = config.execution_policy.clone();
         let external_executor = config.external_executor.clone();
         let max_output_bytes = config.max_output_bytes;
+        let output_truncation = std::sync::Arc::new(OutputTruncationTracker::default());
         let reserved_shell_commands = crate::operation_shell_reserved_commands(&execution_policy);
         let mut operation_shell_commands = operation_registry.as_ref().map(|registry| {
             OperationShellCommandRegistry::new(
                 std::sync::Arc::clone(registry),
                 capability_grants.clone(),
                 reserved_shell_commands,
+                std::sync::Arc::clone(&output_truncation),
             )
         });
         if let Some(shell_commands) = operation_shell_commands.as_mut() {
@@ -347,6 +377,7 @@ impl BashkitExecutionHarness {
                 Box::new(VerletBuiltin {
                     registry: operation_registry.clone(),
                     capability_grants: capability_grants.clone(),
+                    output_truncation: std::sync::Arc::clone(&output_truncation),
                 }),
             )
             .builtin(
@@ -368,6 +399,7 @@ impl BashkitExecutionHarness {
                     command: command.clone(),
                     route: *route,
                     executor: external_executor.clone(),
+                    output_truncation: std::sync::Arc::clone(&output_truncation),
                 }),
             );
         }
@@ -417,6 +449,7 @@ impl BashkitExecutionHarness {
             execution_policy,
             external_executor,
             max_output_bytes,
+            output_truncation,
         })
     }
 
@@ -493,6 +526,7 @@ impl BashkitExecutionHarness {
             verlet_process::execution::ExecutionDeadline::from_now(self.execution_timeout);
         match self.execution_policy.routing.default_route {
             crate::CommandRoute::VirtualBash => {
+                self.output_truncation.reset();
                 if let Some(shell_commands) = self.operation_shell_commands.as_mut() {
                     shell_commands.sync().await;
                 }
@@ -500,12 +534,13 @@ impl BashkitExecutionHarness {
                 if let Some(cancellation) = cancellation.clone() {
                     extensions = extensions.with(cancellation);
                 }
-                let output = self
+                let mut output = self
                     .shell
                     .exec_with_extensions(script, extensions)
                     .await
                     .map(crate::virtual_command_output_from_exec_result)
                     .map_err(execution_error)?;
+                self.output_truncation.apply(&mut output);
                 self.vfs.flush().await.map_err(execution_error)?;
                 Ok(
                     verlet_process::process::VerletProcessHandle::from_virtual_command(
@@ -646,6 +681,7 @@ struct OperationShellCommandRegistry {
     capability_grants: std::collections::BTreeSet<String>,
     reserved_commands: std::collections::BTreeSet<String>,
     active_commands: std::collections::BTreeSet<String>,
+    output_truncation: std::sync::Arc<OutputTruncationTracker>,
 }
 
 impl OperationShellCommandRegistry {
@@ -653,6 +689,7 @@ impl OperationShellCommandRegistry {
         operation_registry: std::sync::Arc<dyn VbashOperationRegistry>,
         capability_grants: std::collections::BTreeSet<String>,
         reserved_commands: std::collections::BTreeSet<String>,
+        output_truncation: std::sync::Arc<OutputTruncationTracker>,
     ) -> Self {
         Self {
             operation_registry,
@@ -660,6 +697,7 @@ impl OperationShellCommandRegistry {
             capability_grants,
             reserved_commands,
             active_commands: std::collections::BTreeSet::new(),
+            output_truncation,
         }
     }
 
@@ -680,6 +718,7 @@ impl OperationShellCommandRegistry {
                     command: command.clone(),
                     registry: std::sync::Arc::clone(&self.operation_registry),
                     capability_grants: self.capability_grants.clone(),
+                    output_truncation: std::sync::Arc::clone(&self.output_truncation),
                 }),
             );
         }
@@ -694,6 +733,7 @@ struct OperationShellCommandBuiltin {
     command: String,
     registry: std::sync::Arc<dyn VbashOperationRegistry>,
     capability_grants: std::collections::BTreeSet<String>,
+    output_truncation: std::sync::Arc<OutputTruncationTracker>,
 }
 
 #[async_trait::async_trait]
@@ -709,7 +749,11 @@ impl bashkit::Builtin for OperationShellCommandBuiltin {
                 Ok(projection) => projection,
                 Err(err) => return Ok(bashkit::ExecResult::err(format!("verlet: {err}\n"), 127)),
             };
-        let input = match crate::operation_shell_input(&projection, ctx.args, ctx.stdin) {
+        let input = match crate::operation_shell_input(
+            &projection,
+            ctx.args,
+            ctx.stdin.map(|stdin| &**stdin),
+        ) {
             Ok(input) => input,
             Err(err) => return Ok(bashkit::ExecResult::err(format!("verlet: {err}\n"), 2)),
         };
@@ -718,6 +762,7 @@ impl bashkit::Builtin for OperationShellCommandBuiltin {
             &self.capability_grants,
             &projection,
             input,
+            self.output_truncation.as_ref(),
         )
         .await)
     }
@@ -726,6 +771,7 @@ impl bashkit::Builtin for OperationShellCommandBuiltin {
 struct VerletBuiltin {
     registry: Option<std::sync::Arc<dyn VbashOperationRegistry>>,
     capability_grants: std::collections::BTreeSet<String>,
+    output_truncation: std::sync::Arc<OutputTruncationTracker>,
 }
 
 #[async_trait::async_trait]
@@ -750,7 +796,9 @@ impl bashkit::Builtin for VerletBuiltin {
                 }
                 let registered_name = ctx.args[1].clone();
                 let operation_name = ctx.args[2].clone();
-                let stdin = ctx.stdin.unwrap_or_default().as_bytes().to_vec();
+                let stdin = ctx
+                    .stdin
+                    .map_or_else(Vec::new, |stdin| stdin.as_bytes().to_vec());
                 let Some(record) = registry.describe(&registered_name).await else {
                     return Ok(bashkit::ExecResult::err(
                         format!("verlet: registered operation {registered_name:?} was not found\n"),
@@ -779,6 +827,7 @@ impl bashkit::Builtin for VerletBuiltin {
             &self.capability_grants,
             &projection,
             input,
+            self.output_truncation.as_ref(),
         )
         .await)
     }
@@ -823,6 +872,7 @@ struct ExternalCommandProxyBuiltin {
     command: String,
     route: crate::CommandRoute,
     executor: Option<std::sync::Arc<dyn verlet_process::execution::ExternalCommandExecutor>>,
+    output_truncation: std::sync::Arc<OutputTruncationTracker>,
 }
 
 #[async_trait::async_trait]
@@ -857,7 +907,7 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
         };
         let deadline = ctx
             .execution_extension::<verlet_process::execution::ExecutionDeadline>()
-            .cloned()
+            .and_then(|deadline| deadline.try_with(Clone::clone).ok())
             .unwrap_or_else(|| {
                 verlet_process::execution::ExecutionDeadline::from_now(std::time::Duration::ZERO)
             });
@@ -875,7 +925,7 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
 
         let execution = match ctx
             .execution_extension::<tokio_util::sync::CancellationToken>()
-            .cloned()
+            .and_then(|cancellation| cancellation.try_with(Clone::clone).ok())
         {
             Some(cancellation) => executor.exec_cancellable(request, cancellation).await,
             None => executor.exec(request).await,
@@ -887,9 +937,9 @@ impl bashkit::Builtin for ExternalCommandProxyBuiltin {
         if let Err(err) = crate::apply_external_file_writes(ctx.fs.as_ref(), &result).await {
             return Ok(bashkit::ExecResult::err(format!("verlet: {err}\n"), 1));
         }
-        Ok(crate::exec_result_from_virtual_output(
-            crate::enforce_output_limit(result.output, crate::SPILL_RETENTION_MAX_BYTES),
-        ))
+        let output = crate::enforce_output_limit(result.output, crate::SPILL_RETENTION_MAX_BYTES);
+        self.output_truncation.record(&output);
+        Ok(crate::exec_result_from_virtual_output(output))
     }
 }
 
@@ -949,6 +999,7 @@ async fn invoke_operation_projection(
     capability_grants: &std::collections::BTreeSet<String>,
     projection: &verlet_operations::OperationProjection,
     input: Vec<u8>,
+    output_truncation: &OutputTruncationTracker,
 ) -> bashkit::ExecResult {
     let registered_name = &projection.registered_name;
     let operation_name = &projection.operation_name;
@@ -975,7 +1026,10 @@ async fn invoke_operation_projection(
         .invoke_process_output(registered_name, operation_name, input)
         .await
     {
-        Ok(output) => crate::exec_result_from_virtual_output(output),
+        Ok(output) => {
+            output_truncation.record(&output);
+            crate::exec_result_from_virtual_output(output)
+        }
         Err(err) => bashkit::ExecResult::err(format!("verlet: {err}\n"), 1),
     }
 }
@@ -1118,6 +1172,35 @@ mod tests {
 
         assert_eq!(limits.max_stdout_bytes, crate::SPILL_RETENTION_MAX_BYTES);
         assert_eq!(limits.max_stderr_bytes, crate::SPILL_RETENTION_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn reserved_operation_shell_commands_cover_every_production_harness_builtin() {
+        let execution_policy =
+            crate::BashExecutionPolicy::selective([("cargo", crate::CommandRoute::RemoteLinux)]);
+        let harness = crate::harness::BashkitExecutionHarness::new(
+            crate::harness::BashkitExecutionConfig::default()
+                .with_execution_policy(execution_policy.clone()),
+        )
+        .await
+        .unwrap();
+        let reserved = crate::operation_shell_reserved_commands(&execution_policy);
+        let missing = harness
+            .shell
+            .builtin_names()
+            .into_iter()
+            .filter(|name| !reserved.contains(name))
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing_lines = missing
+            .iter()
+            .map(|name| format!("        \"{name}\","))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            missing.is_empty(),
+            "reserved_operation_shell_commands is missing:\n{missing_lines}"
+        );
     }
 
     #[tokio::test]
