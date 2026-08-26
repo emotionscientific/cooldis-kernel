@@ -6808,6 +6808,20 @@ struct PendingToolCall {
     arguments: String,
 }
 
+fn tool_call_id_aliases(id: &str) -> Vec<&str> {
+    let mut aliases = vec![id];
+    // The canonical OpenAI Responses id packs call_id and item_id with the
+    // first separator. Treat the remainder as one opaque item id.
+    if let Some((call_id, item_id)) = id.split_once('|') {
+        for component in [call_id, item_id] {
+            if !component.is_empty() && !aliases.contains(&component) {
+                aliases.push(component);
+            }
+        }
+    }
+    aliases
+}
+
 fn response_from_stream_events(
     coordinates: &verlet_runtime_contracts::ThreadCoordinates,
     stream_events: Vec<verlet_provider::ProviderStreamEvent>,
@@ -6820,6 +6834,18 @@ fn response_from_stream_events(
     let mut saw_done = false;
     let mut tool_order = Vec::new();
     let mut tool_calls = std::collections::BTreeMap::<String, PendingToolCall>::new();
+    let mut completed_tool_call_ids = std::collections::BTreeSet::new();
+    let mut completed_tool_call_aliases = std::collections::BTreeSet::new();
+    for event in &stream_events {
+        if let verlet_provider::ProviderStreamEvent::Content {
+            content: verlet_history::CanonicalContent::ToolCall { id, .. },
+        } = event
+        {
+            completed_tool_call_ids.insert(id.clone());
+            completed_tool_call_aliases
+                .extend(tool_call_id_aliases(id).into_iter().map(str::to_string));
+        }
+    }
 
     for event in stream_events {
         match event {
@@ -6852,6 +6878,15 @@ fn response_from_stream_events(
                 name,
                 arguments_delta,
             } => {
+                // Completed content is authoritative. Exact-id deltas are the
+                // same call even when named; component aliases are merged only
+                // while nameless so a distinct named call is not erased by an
+                // accidental id collision.
+                if completed_tool_call_ids.contains(&id)
+                    || (name.is_none() && completed_tool_call_aliases.contains(&id))
+                {
+                    continue;
+                }
                 if !tool_calls.contains_key(&id) {
                     tool_order.push(id.clone());
                 }
@@ -6898,12 +6933,8 @@ fn response_from_stream_events(
                     arguments,
                 } = &incoming
                 {
-                    for completed_id in std::iter::once(id.as_str()).chain(id.split('|')) {
-                        tool_calls.remove(completed_id);
-                    }
-                    tool_order.retain(|candidate| {
-                        candidate != id && !id.split('|').any(|component| candidate == component)
-                    });
+                    tool_calls.remove(id);
+                    tool_order.retain(|candidate| candidate != id);
                     crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
