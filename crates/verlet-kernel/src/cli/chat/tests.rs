@@ -1492,3 +1492,31 @@ async fn kit_actions_on_attached_sessions_explain_instead_of_installing() {
     client.close().await.unwrap();
     server.await.unwrap();
 }
+
+#[test]
+fn pi_kit_recommendation_probe_prefers_dist_then_checked_in_source() {
+    let root = std::env::temp_dir().join(format!("verlet-chat-kit-probe-{}", uuid::Uuid::now_v7()));
+    let dist = root.join("dist/pi-kit");
+    let checked_in = root.join("agent-tools/pi-kit");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::create_dir_all(&checked_in).unwrap();
+    for directory in [&dist, &checked_in] {
+        std::fs::write(
+            directory.join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME),
+            "",
+        )
+        .unwrap();
+    }
+
+    let rows = crate::cli::chat::recommended_kit_rows(&root);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "pi");
+    assert_eq!(rows[0].source.as_deref(), Some("dist/pi-kit"));
+
+    std::fs::remove_file(dist.join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME))
+        .unwrap();
+    let rows = crate::cli::chat::recommended_kit_rows(&root);
+    assert_eq!(rows[0].source.as_deref(), Some("agent-tools/pi-kit"));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}

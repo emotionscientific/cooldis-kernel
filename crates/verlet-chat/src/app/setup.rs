@@ -40,6 +40,13 @@ pub(crate) enum CustomBusy {
     SavingKey,
 }
 
+/// Where Esc or Back from the kit step returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KitOrigin {
+    Home,
+    FirstRunOffer,
+}
+
 /// The custom-provider form's fields, in focus order.
 pub(crate) const CUSTOM_FIELDS: usize = 8;
 
@@ -256,8 +263,8 @@ pub(crate) enum SetupStep {
     /// (EMO-611). Opened from the Home "Install tools" row or by the
     /// first-run offer after the first model lands.
     Kits {
-        /// Catalog rows for the Esc return to Home; empty when the step was
-        /// opened by the first-run offer (Esc then closes the window).
+        origin: KitOrigin,
+        /// Catalog rows used when returning to Home.
         rows: Vec<crate::CatalogProviderRow>,
         installed: Vec<crate::InstalledKitRow>,
         recommended: Vec<crate::RecommendedKitRow>,
@@ -555,7 +562,9 @@ impl crate::app::App {
     /// First-run gate: no configured providers, open the catalog picker.
     pub(crate) fn apply_no_configured_providers(&mut self) {
         self.needs_provider = true;
-        self.kit_offer_pending = true;
+        if !self.kit_offer_spent {
+            self.kit_offer_pending = true;
+        }
         if self.setup.is_none() && self.picker.is_none() {
             self.setup = Some(SetupStep::AwaitCatalog {
                 intent: CatalogIntent::Catalog,
@@ -704,6 +713,7 @@ impl crate::app::App {
                 })
             }
             Some(SetupStep::Kits {
+                origin,
                 installed,
                 recommended,
                 state,
@@ -713,6 +723,7 @@ impl crate::app::App {
                 ..
             }) => {
                 self.setup = Some(SetupStep::Kits {
+                    origin,
                     rows,
                     installed,
                     recommended,
@@ -848,6 +859,7 @@ impl crate::app::App {
                 error,
             } => self.handle_custom_form(event, rows, form, editing, busy, error),
             SetupStep::Kits {
+                origin,
                 rows,
                 installed,
                 recommended,
@@ -857,6 +869,7 @@ impl crate::app::App {
                 notice,
             } => self.handle_kits(
                 event,
+                origin,
                 rows,
                 installed,
                 recommended,
@@ -1940,6 +1953,7 @@ impl crate::app::App {
 
     fn open_kits(
         &mut self,
+        origin: KitOrigin,
         rows: Vec<crate::CatalogProviderRow>,
         installed: Vec<crate::InstalledKitRow>,
         recommended: Vec<crate::RecommendedKitRow>,
@@ -1948,11 +1962,12 @@ impl crate::app::App {
         let mut state = tuika::components::SelectState::new();
         state.select(Some(0));
         self.setup = Some(SetupStep::Kits {
+            origin,
             rows,
             installed,
             recommended,
             state,
-            busy: false,
+            busy: self.kit_install_running,
             error: None,
             notice: None,
         });
@@ -1969,19 +1984,21 @@ impl crate::app::App {
             // The step is open (install-result refresh): swap the lists in
             // place, keeping the busy flag and status lines.
             Some(SetupStep::Kits {
+                origin,
                 rows,
-                state,
-                busy,
+                mut state,
                 error,
                 notice,
                 ..
             }) => {
+                state.clamp(kit_step_options(&installed, &recommended).len() + 1);
                 self.setup = Some(SetupStep::Kits {
+                    origin,
                     rows,
                     installed,
                     recommended,
                     state,
-                    busy,
+                    busy: self.kit_install_running,
                     error,
                     notice,
                 })
@@ -1990,23 +2007,25 @@ impl crate::app::App {
             // while the window shows Home: open over the Home rows. The
             // offer only opens when a recommended kit is actually missing.
             Some(SetupStep::Home { rows, state }) => {
-                if intent == crate::KitStatusIntent::Open
-                    || any_recommended_missing(&installed, &recommended)
-                {
-                    self.open_kits(rows, installed, recommended);
+                let open = match intent {
+                    crate::KitStatusIntent::Open => true,
+                    crate::KitStatusIntent::Refresh => false,
+                    crate::KitStatusIntent::OfferIfMissing => {
+                        any_recommended_missing(&installed, &recommended)
+                    }
+                };
+                if open {
+                    self.open_kits(KitOrigin::Home, rows, installed, recommended);
                 } else {
                     self.setup = Some(SetupStep::Home { rows, state });
                 }
             }
             None => {
-                let open = match intent {
-                    crate::KitStatusIntent::Open => true,
-                    crate::KitStatusIntent::OfferIfMissing => {
-                        any_recommended_missing(&installed, &recommended) && self.picker.is_none()
-                    }
-                };
-                if open {
-                    self.open_kits(Vec::new(), installed, recommended);
+                if intent == crate::KitStatusIntent::OfferIfMissing
+                    && any_recommended_missing(&installed, &recommended)
+                    && self.picker.is_none()
+                {
+                    self.open_kits(KitOrigin::FirstRunOffer, Vec::new(), installed, recommended);
                 }
             }
             // Stale: the user moved into another step while the fetch was
@@ -2023,6 +2042,7 @@ impl crate::app::App {
         error: Option<String>,
         receipt: Vec<String>,
     ) {
+        self.kit_install_running = false;
         match &error {
             Some(message) => self.notice(
                 crate::cells::Tone::Error,
@@ -2035,37 +2055,41 @@ impl crate::app::App {
                 receipt,
             ),
         }
-        if let Some(SetupStep::Kits {
-            rows,
-            installed,
-            recommended,
-            state,
-            notice,
-            ..
-        }) = self.setup.take()
-        {
-            let succeeded = error.is_none();
-            self.setup = Some(SetupStep::Kits {
+        match self.setup.take() {
+            Some(SetupStep::Kits {
+                origin,
                 rows,
                 installed,
                 recommended,
                 state,
-                busy: false,
-                error,
-                notice: if succeeded {
-                    Some(format!(
-                        "installed {name}; tools load at the next daemon startup"
-                    ))
-                } else {
-                    notice
-                },
-            });
-            if succeeded {
-                // Refresh so the installed list reflects the new record.
-                self.actions.push(crate::Action::FetchKitStatus {
-                    intent: crate::KitStatusIntent::Open,
+                notice,
+                ..
+            }) => {
+                let succeeded = error.is_none();
+                self.setup = Some(SetupStep::Kits {
+                    origin,
+                    rows,
+                    installed,
+                    recommended,
+                    state,
+                    busy: false,
+                    error,
+                    notice: if succeeded {
+                        Some(format!(
+                            "installed {name}; tools load at the next daemon startup"
+                        ))
+                    } else {
+                        notice
+                    },
                 });
+                if succeeded {
+                    // Refresh so the installed list reflects the new record.
+                    self.actions.push(crate::Action::FetchKitStatus {
+                        intent: crate::KitStatusIntent::Refresh,
+                    });
+                }
             }
+            step => self.setup = step,
         }
     }
 
@@ -2073,6 +2097,7 @@ impl crate::app::App {
     fn handle_kits(
         &mut self,
         event: &tuika::event::Event,
+        origin: KitOrigin,
         rows: Vec<crate::CatalogProviderRow>,
         installed: Vec<crate::InstalledKitRow>,
         recommended: Vec<crate::RecommendedKitRow>,
@@ -2086,9 +2111,10 @@ impl crate::app::App {
         if busy {
             if matches!(event, tuika::event::Event::Key(key) if key.plain() && key.code == tuika::event::KeyCode::Esc)
             {
-                self.leave_kits(rows);
+                self.leave_kits(origin, rows);
             } else {
                 self.setup = Some(SetupStep::Kits {
+                    origin,
                     rows,
                     installed,
                     recommended,
@@ -2111,6 +2137,7 @@ impl crate::app::App {
                             // Unreachable by construction (options require a
                             // source); keep the step unchanged if it happens.
                             self.setup = Some(SetupStep::Kits {
+                                origin,
                                 rows,
                                 installed,
                                 recommended,
@@ -2125,7 +2152,9 @@ impl crate::app::App {
                             name: kit.name.clone(),
                             source,
                         });
+                        self.kit_install_running = true;
                         self.setup = Some(SetupStep::Kits {
+                            origin,
                             rows,
                             installed,
                             recommended,
@@ -2136,12 +2165,13 @@ impl crate::app::App {
                         });
                     }
                     // The trailing Back row (or no selection).
-                    _ => self.leave_kits(rows),
+                    _ => self.leave_kits(origin, rows),
                 }
             }
-            tuika::event::InputOutcome::Cancelled => self.leave_kits(rows),
+            tuika::event::InputOutcome::Cancelled => self.leave_kits(origin, rows),
             _ => {
                 self.setup = Some(SetupStep::Kits {
+                    origin,
                     rows,
                     installed,
                     recommended,
@@ -2156,11 +2186,10 @@ impl crate::app::App {
 
     /// Esc/Back from the kit step: Home when it was entered from Home,
     /// closed when the first-run offer opened it directly.
-    fn leave_kits(&mut self, rows: Vec<crate::CatalogProviderRow>) {
-        if rows.is_empty() {
-            self.setup = None;
-        } else {
-            self.open_home(rows);
+    fn leave_kits(&mut self, origin: KitOrigin, rows: Vec<crate::CatalogProviderRow>) {
+        match origin {
+            KitOrigin::Home => self.open_home(rows),
+            KitOrigin::FirstRunOffer => self.setup = None,
         }
     }
 }

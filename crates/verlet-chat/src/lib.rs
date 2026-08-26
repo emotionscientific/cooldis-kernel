@@ -126,12 +126,14 @@ pub struct CatalogProviderRow {
 }
 
 /// Why kit status was fetched, so [`ChatEvent::KitStatus`] knows whether to
-/// open the setup window's kit step unconditionally or only when the
-/// recommended kit is missing (the first-run offer).
+/// open the setup window's kit step, refresh it in place, or offer it only
+/// when the recommended kit is missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KitStatusIntent {
-    /// Open (or refresh) the kit step.
+    /// Open the kit step after the user selects the Home action.
     Open,
+    /// Refresh an already-open kit step without reopening it from Home.
+    Refresh,
     /// First-run offer: open only if a recommended kit is not installed.
     OfferIfMissing,
 }

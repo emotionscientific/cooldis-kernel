@@ -291,6 +291,8 @@ fn modal(
                         error.as_deref(),
                         notice.as_deref(),
                         theme,
+                        content_w,
+                        area.height.saturating_sub(5),
                     );
                     (
                         "Tool kits".to_string(),
@@ -476,6 +478,8 @@ fn setup_kits(
     error: Option<&str>,
     notice: Option<&str>,
     theme: &tuika::style::Theme,
+    width: u16,
+    available_height: u16,
 ) -> (tuika::view::Element, u16) {
     let mut info: Vec<ratatui::text::Line<'static>> = Vec::new();
     if installed.is_empty() {
@@ -490,50 +494,103 @@ fn setup_kits(
             .as_deref()
             .map(|version| format!(" {version}"))
             .unwrap_or_default();
+        let label = format!("{}{version}", kit.name);
+        let label_w = width.saturating_sub(2) / 2;
+        let label = fit_columns(&label, label_w);
+        let label_pad = label_w.saturating_sub(tuika::width::str_cols(&label));
+        let tools = fit_columns(
+            &kit.tools.join(" "),
+            width.saturating_sub(label_w).saturating_sub(2),
+        );
         info.push(ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
-                format!("{}{version}  ", kit.name),
+                format!("{label}{:width$}  ", "", width = usize::from(label_pad)),
                 ratatui::style::Style::default().fg(theme.text),
             ),
-            ratatui::text::Span::styled(kit.tools.join(" "), theme.muted_style()),
+            ratatui::text::Span::styled(tools, theme.muted_style()),
         ]));
     }
     for kit in recommended {
         if kit.source.is_none() && !installed.iter().any(|record| record.name == kit.name) {
             info.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!(
-                    "{} kit source not found here; run: verlet kit install <kit-dir>",
-                    kit.name
+                fit_columns(
+                    &format!(
+                        "{} kit source not found here; run: verlet kit install <kit-dir>",
+                        kit.name
+                    ),
+                    width,
                 ),
                 theme.muted_style(),
             )));
         }
     }
     let options = crate::app::setup::kit_step_options(installed, recommended);
+    let count = options.len() + 1;
+    let scrollbar_w = u16::from(count > MAX_MODAL_ROWS);
+    let usable = width
+        .saturating_sub(SELECT_MARKER_W)
+        .saturating_sub(scrollbar_w);
+    let label_w = options
+        .iter()
+        .map(|option| {
+            let crate::app::setup::KitOption::Install { index } = option;
+            tuika::width::str_cols(&format!("Install the {} kit", recommended[*index].name))
+        })
+        .chain(std::iter::once(tuika::width::str_cols("Back")))
+        .max()
+        .unwrap_or(0)
+        .min(usable.saturating_sub(2) / 2);
     let mut lines: Vec<ratatui::text::Line<'static>> = options
         .iter()
         .map(|option| {
             let crate::app::setup::KitOption::Install { index } = option;
             let kit = &recommended[*index];
+            let label = fit_columns(&format!("Install the {} kit", kit.name), label_w);
+            let label_pad = label_w.saturating_sub(tuika::width::str_cols(&label));
             ratatui::text::Line::from(vec![
                 ratatui::text::Span::styled(
-                    format!("Install the {} kit  ", kit.name),
+                    format!("{label}{:width$}  ", "", width = usize::from(label_pad)),
                     ratatui::style::Style::default().fg(theme.accent_alt),
                 ),
-                ratatui::text::Span::styled(kit.blurb.clone(), theme.muted_style()),
+                ratatui::text::Span::styled(
+                    fit_columns(&kit.blurb, usable.saturating_sub(label_w).saturating_sub(2)),
+                    theme.muted_style(),
+                ),
             ])
         })
         .collect();
+    let back = fit_columns("Back", label_w);
+    let back_pad = label_w.saturating_sub(tuika::width::str_cols(&back));
     lines.push(ratatui::text::Line::from(vec![
         ratatui::text::Span::styled(
-            "Back  ",
+            format!("{back}{:width$}  ", "", width = usize::from(back_pad)),
             ratatui::style::Style::default().fg(theme.accent_alt),
         ),
-        ratatui::text::Span::styled("leave tools".to_string(), theme.muted_style()),
+        ratatui::text::Span::styled(
+            fit_columns(
+                "leave tools",
+                usable.saturating_sub(label_w).saturating_sub(2),
+            ),
+            theme.muted_style(),
+        ),
     ]));
-    let info_h = info.len() as u16;
     let count = lines.len() as u16;
-    let list = tuika::components::SelectList::new(lines, state).viewport(MAX_MODAL_ROWS as u16);
+    let has_status = busy || error.is_some() || notice.is_some();
+    let capacity = available_height.min(MAX_MODAL_ROWS as u16 + u16::from(has_status));
+    let list_h = count.min(capacity);
+    let status_h = u16::from(has_status).min(capacity.saturating_sub(list_h));
+    let info_h = (info.len() as u16).min(capacity.saturating_sub(list_h).saturating_sub(status_h));
+    let hidden_info_rows = info.len().saturating_sub(usize::from(info_h));
+    info.truncate(usize::from(info_h));
+    if hidden_info_rows > 0
+        && let Some(last) = info.last_mut()
+    {
+        *last = ratatui::text::Line::from(ratatui::text::Span::styled(
+            format!("… {} more kit rows", hidden_info_rows + 1),
+            theme.muted_style(),
+        ));
+    }
+    let list = tuika::components::SelectList::new(lines, state).viewport(list_h);
     let mut column = tuika::components::Flex::column();
     if info_h > 0 {
         column = column.fixed(
@@ -541,28 +598,35 @@ fn setup_kits(
             tuika::view::element(tuika::components::Text::new(info)),
         );
     }
-    column = column.grow(1, tuika::view::element(list));
-    let mut height = info_h + count;
-    if busy {
+    column = column.fixed(list_h, tuika::view::element(list));
+    let mut height = info_h + list_h;
+    if status_h > 0 && busy {
         column = column.fixed(
             1,
             tuika::view::element(tuika::components::Text::new(vec![
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    "installing… builds and proves each tool, this can take a while",
+                    fit_columns(
+                        "installing… builds and proves each tool, this can take a while",
+                        width,
+                    ),
                     theme.muted_style(),
                 )),
             ])),
         );
         height += 1;
-    } else if let Some(message) = error {
+    } else if status_h > 0
+        && let Some(message) = error
+    {
         column = column.fixed(1, modal_error(message, theme));
         height += 1;
-    } else if let Some(message) = notice {
+    } else if status_h > 0
+        && let Some(message) = notice
+    {
         column = column.fixed(
             1,
             tuika::view::element(tuika::components::Text::new(vec![
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    message.to_string(),
+                    fit_columns(message, width),
                     ratatui::style::Style::default().fg(theme.accent),
                 )),
             ])),

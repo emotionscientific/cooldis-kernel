@@ -509,21 +509,21 @@ impl ChatDriver {
                         });
                     }
                 } else {
-                    match kit_status_rows() {
-                        Ok((installed, recommended)) => {
-                            let _ = events.send(verlet_chat::ChatEvent::KitStatus {
+                    let task_events = events.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let event = match kit_status_rows() {
+                            Ok((installed, recommended)) => verlet_chat::ChatEvent::KitStatus {
                                 intent,
                                 installed,
                                 recommended,
-                            });
-                        }
-                        Err(message) => {
-                            let _ = events.send(verlet_chat::ChatEvent::Error {
+                            },
+                            Err(message) => verlet_chat::ChatEvent::Error {
                                 title: "could not read installed kits".to_string(),
                                 body: vec![message],
-                            });
-                        }
-                    }
+                            },
+                        };
+                        let _ = task_events.send(event);
+                    });
                 }
             }
             verlet_chat::Action::InstallKit { name, source } => {
@@ -917,7 +917,12 @@ fn kit_status_rows() -> Result<
                 .collect(),
         })
         .collect();
-    let recommended = RECOMMENDED_KITS
+    let recommended = recommended_kit_rows(std::path::Path::new("."));
+    Ok((installed, recommended))
+}
+
+fn recommended_kit_rows(project_root: &std::path::Path) -> Vec<verlet_chat::RecommendedKitRow> {
+    RECOMMENDED_KITS
         .iter()
         .map(|(name, blurb, candidates)| verlet_chat::RecommendedKitRow {
             name: (*name).to_string(),
@@ -925,14 +930,14 @@ fn kit_status_rows() -> Result<
             source: candidates
                 .iter()
                 .find(|candidate| {
-                    std::path::Path::new(candidate)
+                    project_root
+                        .join(candidate)
                         .join(verlet_operations::kit_package::KIT_MANIFEST_FILE_NAME)
                         .is_file()
                 })
                 .map(|candidate| (*candidate).to_string()),
         })
-        .collect();
-    Ok((installed, recommended))
+        .collect()
 }
 
 /// The spawned kit install: the same pipeline as `verlet kit install
