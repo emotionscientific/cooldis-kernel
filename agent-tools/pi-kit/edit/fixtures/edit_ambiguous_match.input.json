@@ -1,0 +1,9 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "path": "ambiguous.txt",
+    "edits": [
+      { "oldText": "same", "newText": "different" }
+    ]
+  }
+}

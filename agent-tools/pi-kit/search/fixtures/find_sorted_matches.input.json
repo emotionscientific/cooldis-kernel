@@ -1,0 +1,7 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "pattern": "*.txt",
+    "path": "corpus"
+  }
+}

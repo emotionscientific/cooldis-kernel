@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "root": { "type": "string" },
+    "args": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "offset": { "type": "integer" },
+        "limit": { "type": "integer" }
+      },
+      "required": ["path"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["root", "args"],
+  "additionalProperties": false
+}

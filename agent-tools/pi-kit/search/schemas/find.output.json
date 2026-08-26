@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "limit_reached": { "type": "boolean" },
+        "truncated": { "type": "boolean" }
+      },
+      "required": ["text", "paths", "limit_reached", "truncated"],
+      "additionalProperties": false
+    },
+    "error": { "type": "string" }
+  },
+  "additionalProperties": false
+}

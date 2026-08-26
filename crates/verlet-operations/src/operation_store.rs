@@ -166,19 +166,18 @@ impl LocalOperationRegistry {
             capability_grants: request.capability_grants.clone(),
             metadata: request.metadata.clone(),
         };
+        let projections = registered
+            .projections()
+            .with_tool_interface(request.interface.as_ref());
         if let Some(interface) = &request.interface {
-            interface.validate_against_operation_record(
-                &name,
-                &validation,
-                &registered.projections(),
-            )?;
+            interface.validate_against_operation_record(&name, &validation, &projections)?;
         }
         let record = PublishedOperationRecord {
             schema_version: RECORD_SCHEMA_VERSION,
             name,
             active_artifact_hash: hash,
             manifest: validation,
-            projections: registered.projections(),
+            projections,
             interface: request.interface,
             capability_grants: request.capability_grants,
             metadata: request.metadata,
@@ -214,17 +213,16 @@ impl LocalOperationRegistry {
             capability_grants: request.capability_grants.clone(),
             metadata: request.metadata.clone(),
         };
-        interface.validate_against_operation_record(
-            &name,
-            &request.manifest,
-            &registered.projections(),
-        )?;
+        let projections = registered
+            .projections()
+            .with_tool_interface(Some(&interface));
+        interface.validate_against_operation_record(&name, &request.manifest, &projections)?;
         let record = PublishedOperationRecord {
             schema_version: RECORD_SCHEMA_VERSION,
             name,
             active_artifact_hash: hash,
             manifest: request.manifest,
-            projections: registered.projections(),
+            projections,
             interface: Some(interface),
             capability_grants: request.capability_grants,
             metadata: request.metadata,
@@ -806,7 +804,9 @@ impl PublishedOperationRecord {
             capability_grants: self.capability_grants.clone(),
             metadata: self.metadata.clone(),
         };
-        let expected = registered.projections();
+        let expected = registered
+            .projections()
+            .with_tool_interface(self.interface.as_ref());
         if self.projections != expected {
             return Err(crate::VerletOperationsError::RuntimeFactory(format!(
                 "operation record {:?} projections are stale",

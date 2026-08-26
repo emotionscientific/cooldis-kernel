@@ -251,6 +251,50 @@ the daemon again and the removed kit's tools are gone from the default
 manifest. Tool rows are sorted by kit name and tool name, and duplicate model
 tool names across kits fail daemon startup instead of shadowing one another.
 
+### Pi File Tools Kit
+
+`agent-tools/pi-kit/` is the first checked-in kit. It packages the four Wasm
+modules under `agent-tools/wasm/` as five model tools:
+
+| Tool | Package | Operation | Effect class | Capability |
+| --- | --- | --- | --- | --- |
+| `read` | `pi-read` | `read` | `idempotent` | none |
+| `write` | `pi-write` | `write` | `at-most-once` | `fs.write` |
+| `edit` | `pi-edit` | `edit` | `at-most-once` | `fs.write` |
+| `find` | `pi-search` | `find` | `idempotent` | none |
+| `grep` | `pi-search` | `grep` | `idempotent` | none |
+
+Install the source kit from the repository with:
+
+```bash
+verlet kit install agent-tools/pi-kit
+```
+
+Every operation has a package fixture. Read also has a missing-file fixture,
+and edit has an ambiguous-match fixture. Package fixture data is mounted at
+`/fixtures` read-only. The write fixture mutates the fresh in-memory VFS. The
+successful edit fixture can prove its unique match only up to the read-only
+write boundary, where it expects `access denied`; the CLI integration test then
+invokes the installed pinned `pi-edit` artifact against a writable mount and
+proves the actual replacement.
+
+Build a standalone copy with prebuilt Wasm blobs when the installer must not
+have a Rust toolchain:
+
+```bash
+scripts/build-pi-kit-dist.sh
+verlet kit install dist/pi-kit
+```
+
+The script builds all four modules through the managed Cargo lane, copies the
+kit to `dist/pi-kit/`, and rewrites each member runtime from `module_path` to a
+member-local `bin_path`. The `dist/` tree is gitignored. The publication home
+for this distributable remains an anchor decision outside this repository.
+
+Package-declared MCP names are stored in the published operation projections.
+This lets the Pi package records retain registry-wide identities such as
+`pi-read` while projecting the fixed MCP name `read`.
+
 ## Agent Skill Shape
 
 The agent-facing skill should teach a model how to author a narrow deterministic

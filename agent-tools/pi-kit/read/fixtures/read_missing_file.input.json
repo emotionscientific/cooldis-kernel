@@ -1,0 +1,6 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "path": "missing.txt"
+  }
+}

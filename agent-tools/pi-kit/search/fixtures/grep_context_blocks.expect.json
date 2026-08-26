@@ -1,0 +1,9 @@
+{
+  "ok": {
+    "text": "a.txt-1- before\na.txt:2: hit one\na.txt-3- after",
+    "match_count": 1,
+    "limit_reached": false,
+    "truncated": false,
+    "lines_truncated": false
+  }
+}

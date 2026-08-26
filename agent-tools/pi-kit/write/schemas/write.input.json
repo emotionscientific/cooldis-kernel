@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "root": { "type": "string" },
+    "args": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["path", "content"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["root", "args"],
+  "additionalProperties": false
+}

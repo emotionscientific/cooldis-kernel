@@ -1,0 +1,7 @@
+{
+  "root": "/workspace",
+  "args": {
+    "path": "nested/deeper/file.txt",
+    "content": "exact content"
+  }
+}

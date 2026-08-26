@@ -1,0 +1,8 @@
+{
+  "ok": {
+    "text": "two\nthree\n\n[2 more lines in file. Use offset=4 to continue.]",
+    "start_line": 2,
+    "end_line": 3,
+    "total_lines": 5
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "root": { "type": "string" },
+    "args": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "oldText": { "type": "string" },
+              "newText": { "type": "string" }
+            },
+            "required": ["oldText", "newText"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["path", "edits"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["root", "args"],
+  "additionalProperties": false
+}

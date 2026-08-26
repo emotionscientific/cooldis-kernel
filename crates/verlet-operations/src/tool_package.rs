@@ -217,7 +217,7 @@ impl ToolInterfaceContract {
                     operation.name
                 ))
             })?;
-            let projection = projections
+            projections
                 .operations
                 .iter()
                 .find(|projection| projection.operation_name == operation.name)
@@ -227,14 +227,6 @@ impl ToolInterfaceContract {
                         operation.name
                     ))
                 })?;
-            if let Some(mcp) = &operation.mcp {
-                if mcp.tool_name != projection.mcp.tool_name {
-                    return Err(crate::VerletOperationsError::RuntimeFactory(format!(
-                        "tool package operation {:?} declares MCP tool {:?}, but generated projection is {:?}",
-                        operation.name, mcp.tool_name, projection.mcp.tool_name
-                    )));
-                }
-            }
             let mut missing_manifest_capabilities = Vec::new();
             for capability in &wasm_operation.required_capabilities {
                 if !operation.required_capabilities.contains(capability) {
@@ -348,7 +340,7 @@ impl ToolInterfaceContract {
                     })?;
                 if projection.mcp.tool_name != mcp.tool_name {
                     return Err(crate::VerletOperationsError::RuntimeFactory(format!(
-                        "tool interface operation {:?} MCP tool {:?} does not match generated projection {:?}",
+                        "tool interface operation {:?} MCP tool {:?} does not match stored projection {:?}",
                         operation.name, mcp.tool_name, projection.mcp.tool_name
                     )));
                 }

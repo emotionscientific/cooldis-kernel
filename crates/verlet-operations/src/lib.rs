@@ -61,6 +61,28 @@ impl OperationProjectionSet {
                 .collect(),
         }
     }
+
+    pub fn with_tool_interface(
+        mut self,
+        interface: Option<&crate::tool_package::ToolInterfaceContract>,
+    ) -> Self {
+        let Some(interface) = interface else {
+            return self;
+        };
+        for operation in &interface.operations {
+            let Some(mcp) = &operation.mcp else {
+                continue;
+            };
+            if let Some(projection) = self
+                .operations
+                .iter_mut()
+                .find(|projection| projection.operation_name == operation.name)
+            {
+                projection.mcp.tool_name = mcp.tool_name.clone();
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -1,0 +1,9 @@
+{
+  "root": "/fixtures",
+  "args": {
+    "path": "editable.txt",
+    "edits": [
+      { "oldText": "needle beta", "newText": "needle delta" }
+    ]
+  }
+}

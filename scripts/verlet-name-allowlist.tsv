@@ -28,6 +28,10 @@
 .github/ISSUE_TEMPLATE/config.yml	Repository remote site or external workflow identity is out of scope for EMO-520.
 CHANGELOG.md	Rename and deprecation-window receipt for v0.3.0.
 RELEASE.md	Repository remote site or external workflow identity is out of scope for EMO-520.
+agent-tools/pi-kit/edit/verlet.tool.toml	Frozen tool-package format ID required by the fixed Pi kit manifest.
+agent-tools/pi-kit/read/verlet.tool.toml	Frozen tool-package format ID required by the fixed Pi kit manifest.
+agent-tools/pi-kit/search/verlet.tool.toml	Frozen tool-package format ID required by the fixed Pi kit manifest.
+agent-tools/pi-kit/write/verlet.tool.toml	Frozen tool-package format ID required by the fixed Pi kit manifest.
 agent-tools/wasm/abi-fs/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
 agent-tools/wasm/edit/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.
 agent-tools/wasm/read/src/lib.rs	Stable Wasm host import module remains unchanged for compatibility.

@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "bytes_written": { "type": "integer" },
+        "replaced": { "type": "boolean" }
+      },
+      "required": ["text", "bytes_written", "replaced"],
+      "additionalProperties": false
+    },
+    "error": { "type": "string" }
+  },
+  "additionalProperties": false
+}
