@@ -3090,6 +3090,100 @@ async fn stream_assembly_requires_terminal_done() {
     }));
 }
 
+#[test]
+fn stream_assembly_merges_item_id_deltas_into_combined_completed_tool_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, mut runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let response = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "{\"path\":\"notes.txt\",".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "\"content\":\"hello\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Content {
+                content: verlet_history::CanonicalContent::tool_call(
+                    "call_1|fc_1",
+                    "write",
+                    serde_json::json!({"path": "notes.txt", "content": "hello"}),
+                ),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap();
+
+    assert_eq!(
+        response.content,
+        vec![verlet_history::CanonicalContent::tool_call(
+            "call_1|fc_1",
+            "write",
+            serde_json::json!({"path": "notes.txt", "content": "hello"}),
+        )]
+    );
+    let started = std::iter::from_fn(|| runtime_events.try_recv().ok())
+        .filter_map(|event| {
+            match event {
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime { event, .. } => {
+                match event.kind {
+                    crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
+                        call_id,
+                        name,
+                        ..
+                    } => Some((call_id, name)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        started,
+        vec![("call_1|fc_1".to_string(), "write".to_string())]
+    );
+}
+
+#[test]
+fn stream_assembly_rejects_nameless_pending_tool_call() {
+    let coordinates =
+        verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1");
+    let (events, _runtime_events) = tokio::sync::broadcast::channel(8);
+
+    let error = super::response_from_stream_events(
+        &coordinates,
+        vec![
+            verlet_provider::ProviderStreamEvent::ToolCallDelta {
+                id: "fc_1".to_string(),
+                name: None,
+                arguments_delta: "{\"path\":\"notes.txt\"}".to_string(),
+            },
+            verlet_provider::ProviderStreamEvent::Done {
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            },
+        ],
+        &events,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.class,
+        verlet_runtime_contracts::RuntimeModelRequestErrorClass::StreamAssembly
+    );
+    assert_eq!(error.message, "streamed tool call fc_1 is missing a name");
+}
+
 #[tokio::test]
 async fn stream_and_complete_preserve_equivalent_final_history() {
     let complete_client =

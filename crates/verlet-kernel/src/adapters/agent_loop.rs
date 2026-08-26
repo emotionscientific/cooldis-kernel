@@ -6854,21 +6854,33 @@ fn response_from_stream_events(
             } => {
                 if !tool_calls.contains_key(&id) {
                     tool_order.push(id.clone());
+                }
+                let started_name = if tool_calls
+                    .get(&id)
+                    .and_then(|pending| pending.name.as_ref())
+                    .is_none()
+                {
+                    name.clone()
+                } else {
+                    None
+                };
+                let call_id = id.clone();
+                let pending = tool_calls.entry(id).or_default();
+                if let Some(name) = &name {
+                    pending.name = Some(name.clone());
+                }
+                pending.arguments.push_str(&arguments_delta);
+                if let Some(name) = started_name {
                     crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
                         crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ToolCallStarted {
-                            call_id: id.clone(),
-                            name: name.clone().unwrap_or_default(),
+                            call_id,
+                            name,
                             input: serde_json::json!({}),
                         },
                     );
                 }
-                let pending = tool_calls.entry(id).or_default();
-                if name.is_some() {
-                    pending.name = name;
-                }
-                pending.arguments.push_str(&arguments_delta);
             }
             verlet_provider::ProviderStreamEvent::Content { content: incoming } => {
                 if let verlet_history::CanonicalContent::Text {
@@ -6886,8 +6898,12 @@ fn response_from_stream_events(
                     arguments,
                 } = &incoming
                 {
-                    tool_calls.remove(id);
-                    tool_order.retain(|candidate| candidate != id);
+                    for completed_id in std::iter::once(id.as_str()).chain(id.split('|')) {
+                        tool_calls.remove(completed_id);
+                    }
+                    tool_order.retain(|candidate| {
+                        candidate != id && !id.split('|').any(|component| candidate == component)
+                    });
                     crate::kernel::runtime_host::runtime_events::emit_runtime_event(
                         events,
                         coordinates,
@@ -6943,6 +6959,11 @@ fn response_from_stream_events(
         let Some(pending) = tool_calls.remove(&id) else {
             continue;
         };
+        let Some(name) = pending.name else {
+            return Err(stream_assembly_error(format!(
+                "streamed tool call {id} is missing a name"
+            )));
+        };
         let arguments = if pending.arguments.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -6951,9 +6972,7 @@ fn response_from_stream_events(
             })?
         };
         content.push(verlet_history::CanonicalContent::tool_call(
-            id,
-            pending.name.unwrap_or_default(),
-            arguments,
+            id, name, arguments,
         ));
     }
 
