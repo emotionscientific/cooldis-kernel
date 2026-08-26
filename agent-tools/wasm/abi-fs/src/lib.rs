@@ -172,7 +172,11 @@ impl verlet_tool_core::ToolFs for AbiFs {
         let handle = verlet_guest_sdk::open_file_write(resolved)
             .map_err(|status| map_status(path, status))?;
         if let Err(status) = verlet_guest_sdk::write_file(handle, content) {
-            let _ = verlet_guest_sdk::close_file(handle);
+            // Deliberately NOT closed: `close_file` on a write handle is the
+            // commit point, and `write_file` is all-or-nothing, so closing
+            // here would commit an empty buffer (truncating the target as a
+            // side effect of a failed write). A write handle dropped without
+            // close is discarded by the host, leaving the file untouched.
             return Err(map_status(path, status));
         }
         verlet_guest_sdk::close_file(handle).map_err(|status| map_status(path, status))

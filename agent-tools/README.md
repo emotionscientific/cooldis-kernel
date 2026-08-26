@@ -52,6 +52,11 @@ the caller receives the Pi-compatible error text. Only source and sink
 transport failures use a non-OK ABI status. Read, find, and grep need only an
 attached VFS. Write and edit also declare and require the `fs.write` grant.
 
+Known wasm-lane divergence: the guest ABI reports symlinks as kind `Other`
+(neither file nor directory), so the walker skips symlinked entries that the
+native `StdFs` lane would follow. The ABI exposes no follow-symlink
+distinction; resolving this needs a host-side change, tracked separately.
+
 Each module directory is a standalone Cargo workspace with its own lockfile,
 a `cdylib` library target, and `panic = "abort"` in the release profile. This
 is the crate layout accepted by `verlet tool build`. Point a tool package's
