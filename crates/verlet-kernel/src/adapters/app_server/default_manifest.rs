@@ -353,9 +353,84 @@ fn installed_kit_tools(
     operations_registry_root: Option<&std::path::Path>,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
 {
-    // EMO-608 implements this; empty until then so the seam is live.
-    let _ = operations_registry_root;
-    Ok(Vec::new())
+    let Some(operations_registry_root) = operations_registry_root else {
+        return Ok(Vec::new());
+    };
+    let kits_root = verlet_operations::kit_package::kits_root_for_operations_registry_root(
+        operations_registry_root,
+    );
+    let store = verlet_operations::kit_package::InstalledKitStore::new(&kits_root);
+    let records = store.list().map_err(|err| {
+        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
+            "default manifest failed to read installed-kit records from {}: {err}",
+            kits_root.display()
+        ))
+    })?;
+    let kernel_tool_names = [
+        crate::operations::kernel_packages::THREAD_SPAWN_OPERATION,
+        crate::operations::kernel_packages::THREAD_SUBMIT_OPERATION,
+        crate::operations::kernel_packages::THREAD_WAIT_OPERATION,
+        crate::operations::kernel_packages::THREAD_STATUS_OPERATION,
+        crate::operations::kernel_packages::THREAD_CANCEL_OPERATION,
+    ];
+    let mut tool_owners = std::collections::BTreeMap::new();
+    let mut rows = Vec::new();
+    for record in records {
+        for tool in record.tools {
+            if kernel_tool_names.contains(&tool.tool_name.as_str()) {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "default manifest installed kit {:?} tools.tool_name {:?} collides with a kernel thread tool",
+                        record.name, tool.tool_name
+                    ),
+                ));
+            }
+            if let Some(first_kit) = tool_owners.insert(tool.tool_name.clone(), record.name.clone())
+            {
+                return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                    format!(
+                        "default manifest installed kit tool_name {:?} is duplicated across kits {:?} and {:?}",
+                        tool.tool_name, first_kit, record.name
+                    ),
+                ));
+            }
+            let effect_class = match tool.effect_class.as_str() {
+                "pure" => verlet_agent::manifest_schema::EffectClass::Pure,
+                "idempotent" => verlet_agent::manifest_schema::EffectClass::Idempotent,
+                "at-most-once" => verlet_agent::manifest_schema::EffectClass::AtMostOnce,
+                _ => {
+                    return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
+                        format!(
+                            "default manifest installed kit {:?} tools.effect_class {:?} for tool_name {:?} must be one of pure, idempotent, at-most-once",
+                            record.name, tool.effect_class, tool.tool_name
+                        ),
+                    ));
+                }
+            };
+            let attachment_config =
+                crate::capabilities::wasm_runner::attachment_config_from_capability_grants(
+                    &tool.required_capabilities,
+                );
+            rows.push((
+                record.name.clone(),
+                tool.tool_name.clone(),
+                verlet_agent::manifest_schema::AgentManifestTool::Direct(
+                    verlet_agent::manifest_schema::AgentManifestDirectTool {
+                        id: format!("kit.{}.{}", record.name, tool.tool_name),
+                        tool_name: tool.tool_name,
+                        operation_ref: tool.operation_ref,
+                        effect_class,
+                        attachment: verlet_agent::manifest_schema::AgentManifestAttachment {
+                            allowed_secrets: attachment_config.allowed_secrets,
+                            allowed_private_network: attachment_config.allowed_private_network,
+                        },
+                    },
+                ),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    Ok(rows.into_iter().map(|(_, _, tool)| tool).collect())
 }
 
 fn default_manifest_publish_plan(
@@ -405,6 +480,7 @@ fn default_manifest_source(
                         command: Some(&tool.command),
                         tool_name: None,
                         operation_ref: &tool.operation_ref,
+                        effect_class: tool.effect_class,
                         attachment: &tool.attachment,
                     }
                 }
@@ -415,6 +491,7 @@ fn default_manifest_source(
                         command: None,
                         tool_name: Some(&tool.tool_name),
                         operation_ref: &tool.operation_ref,
+                        effect_class: tool.effect_class,
                         attachment: &tool.attachment,
                     }
                 }
@@ -546,6 +623,8 @@ struct DefaultManifestToolToml<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<&'a str>,
     operation_ref: &'a str,
+    #[serde(skip_serializing_if = "verlet_agent::manifest_schema::EffectClass::is_at_most_once")]
+    effect_class: verlet_agent::manifest_schema::EffectClass,
     #[serde(
         skip_serializing_if = "verlet_agent::manifest_schema::AgentManifestAttachment::is_empty"
     )]

@@ -271,6 +271,12 @@ kernel-synthesized default manifest for bare `thread/start` calls. Set
 set `load_all_active_when_unbound = true` to load every active record from the
 effective operation registry root when no thread-specific binding is present.
 
+Installed kits use the `kits` directory beside the effective operation
+registry root. The daemon reads their installed records at startup and adds
+their tools to the default manifest as pinned direct-tool rows. Restart the
+daemon after `verlet kit install` to make the tools available. Restart it after
+`verlet kit remove` to remove those tools from the default manifest.
+
 For an OpenAI Chat Completions-compatible gateway, use the Chat Completions
 provider with explicit `base_url`, key, and model settings:
 
