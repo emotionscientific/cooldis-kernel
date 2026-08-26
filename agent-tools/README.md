@@ -48,7 +48,9 @@ CLI harness:
 
 The Pi package manifests are surface-declared: direct model tool rows derive
 their input schema from the nested `args` schema, while the host binds `root`
-to the canonical instance workspace at attach time. Those schemas reject
+to the guest `/workspace` path at attach time. The default manifest declares
+that read-write mount without a host path; the app-server bind layer supplies
+its configured cwd as the witnessed host directory. Those schemas reject
 unknown model arguments, and the same operations are withheld from raw
 virtual-bash operation commands. CLI and fixture calls remain envelope-shaped
 because those callers act as the host.

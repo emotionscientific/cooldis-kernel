@@ -696,6 +696,11 @@ impl crate::adapters::app_server::VerletAppServer {
         let provider_surface = self.agent_manifest_provider_surface().await?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
+        let default_workspace = app_server_default_workspace_for_record(
+            &record,
+            self.inner.default_workspace.as_ref(),
+            &self.inner.cwd,
+        );
         crate::agent::manifest_bind::bind_published_agent_record_with_placement(
             &record,
             alias,
@@ -709,7 +714,7 @@ impl crate::adapters::app_server::VerletAppServer {
             overrides,
             Some(&self.inner.default_placement),
             placement_override,
-            self.inner.default_workspace.as_ref(),
+            default_workspace.as_ref(),
             workspace_override,
             self.remote_event_store_served(),
         )
@@ -2597,6 +2602,11 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
         let (record, alias) = registry.load_ref_with_alias_receipt(agent_ref)?;
         let mcp_server_refs = self.configured_mcp_server_refs().await?;
         let tool_universe_discoverer = self.tool_universe_discoverer().await?;
+        let default_workspace = app_server_default_workspace_for_record(
+            &record,
+            self.default_workspace.as_ref(),
+            &self.cwd,
+        );
         let bound = crate::agent::manifest_bind::bind_published_agent_record_with_placement(
             &record,
             alias,
@@ -2612,7 +2622,7 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
             &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
             Some(&self.default_placement),
             self.placement_override.as_ref(),
-            self.default_workspace.as_ref(),
+            default_workspace.as_ref(),
             self.workspace_override.as_ref(),
             self.remote_event_store_served
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -2628,6 +2638,33 @@ impl crate::agent::agent_process::KernelThreadSpawnAgentResolver
                 .unwrap_or_else(|| caller.coordinates.user_id.clone()),
         )
     }
+}
+
+/// The ordinary configured default remains authoritative. When none exists,
+/// only the synthesized default manifest may derive one from the app-server
+/// cwd, and only when that manifest declares a workspace requirement. The
+/// manifest contributes the guest path; this binding contributes the host
+/// directory and is canonicalized and witnessed by manifest bind.
+fn app_server_default_workspace_for_record(
+    record: &crate::agent::manifest::PublishedAgentRecord,
+    configured: Option<&crate::agent::manifest_bind::AgentManifestWorkspaceBinding>,
+    cwd: &std::path::Path,
+) -> Option<crate::agent::manifest_bind::AgentManifestWorkspaceBinding> {
+    configured.cloned().or_else(|| {
+        (record.name == crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAME
+            && record.namespace.as_deref()
+                == Some(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_NAMESPACE)
+            && record
+                .resolved_manifest
+                .get("workspace")
+                .is_some_and(|workspace| !workspace.is_null()))
+        .then(
+            || crate::agent::manifest_bind::AgentManifestWorkspaceBinding {
+                host_path: cwd.to_path_buf(),
+                mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            },
+        )
+    })
 }
 
 impl AppServerThreadSpawnAgentResolver {

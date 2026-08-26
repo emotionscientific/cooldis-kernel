@@ -107,8 +107,9 @@ The V1 work is focused on runtime primitives:
 - local tool-kit installation that lowers member packages into ordinary
   content-addressed operation publishes plus one removable installed-kit record;
 - a checked-in Pi file-tools kit with source and prebuilt-distributable lanes,
-  closed derived model-facing schemas, host-bound workspace roots, and no raw
-  virtual-bash operation alias around the bound envelope;
+  closed derived model-facing schemas, a guest `/workspace` root backed by the
+  instance's witnessed host workspace mount, and no raw virtual-bash operation
+  alias around the bound envelope;
 - blob resource publication and folder-first prompt lowering;
 - skill-package publication with floating author refs pinned in bind receipts,
   static indexes, and read-only VFS bodies;

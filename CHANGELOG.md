@@ -6,11 +6,12 @@
 
 - Kit tools can declare a derived model-facing input surface over their
   authored ABI envelope. The Pi tools now expose only their nested argument
-  schema to models, while `root` is bound by the host to the instance
-  workspace and witnessed on the attachment. Surface schemas are closed JSON
-  objects, bound values are validated when bindings are created or replayed,
-  and surface operations are not also exposed through raw virtual-bash
-  operation commands.
+  schema to models, while `root` is bound to the guest `/workspace` path. The
+  default manifest declares that read-write mount and the app-server binds its
+  configured cwd as the witnessed host directory. Surface schemas are closed
+  JSON objects, bound values are validated when bindings are created or
+  replayed, and surface operations are not also exposed through raw
+  virtual-bash operation commands.
 
 ## v0.5.1 (2026-08-26)
 

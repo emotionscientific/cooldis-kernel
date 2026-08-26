@@ -138,6 +138,7 @@ fn installed_kits_synthesize_sorted_direct_rows_with_pinned_refs_and_attachments
     .unwrap();
     let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
         serde_json::from_value(plan.resolved_manifest).unwrap();
+    assert!(manifest.workspace.is_none());
     let rows = manifest
         .tools
         .iter()
@@ -199,7 +200,7 @@ fn installed_kits_synthesize_sorted_direct_rows_with_pinned_refs_and_attachments
 }
 
 #[test]
-fn installed_kit_surface_rows_bind_the_instance_workspace_root() {
+fn installed_kit_surface_rows_bind_the_guest_workspace_root() {
     let root = default_manifest_kit_test_root("bound-root");
     let config = default_manifest_kit_test_config(&root);
     default_manifest_kit_store(&config)
@@ -238,13 +239,17 @@ fn installed_kit_surface_rows_bind_the_instance_workspace_root() {
         row.attachment.bound_parameters,
         std::collections::BTreeMap::from([(
             "root".to_string(),
-            serde_json::Value::String(
-                std::fs::canonicalize(&config.cwd)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            serde_json::Value::String("/workspace".to_string()),
         )])
+    );
+    assert_eq!(
+        manifest.workspace,
+        Some(
+            verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement {
+                guest_path: "/workspace".to_string(),
+                min_mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+            }
+        )
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -281,16 +286,10 @@ fn installed_kit_surface_rows_reject_unsupported_bound_parameters() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[cfg(unix)]
 #[test]
-fn installed_kit_surface_rows_canonicalize_the_instance_workspace_root() {
-    let root = default_manifest_kit_test_root("canonical-bound-root");
-    let workspace = root.join("workspace");
-    let workspace_alias = root.join("workspace-alias");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::os::unix::fs::symlink(&workspace, &workspace_alias).unwrap();
-    let mut config = default_manifest_kit_test_config(&root);
-    config.cwd = workspace_alias;
+fn installed_kit_surface_workspace_declaration_is_host_path_free() {
+    let root = default_manifest_kit_test_root("host-path-free-workspace");
+    let config = default_manifest_kit_test_config(&root);
     default_manifest_kit_store(&config)
         .save(&installed_kit_record(
             "pi",
@@ -308,30 +307,13 @@ fn installed_kit_surface_rows_canonicalize_the_instance_workspace_root() {
         &config, false, "1.0.0",
     )
     .unwrap();
-    let manifest: verlet_agent::manifest_schema::AgentManifestSchema =
-        serde_json::from_value(plan.resolved_manifest).unwrap();
-    let row = manifest
-        .tools
-        .iter()
-        .find_map(|tool| match tool {
-            verlet_agent::manifest_schema::AgentManifestTool::Direct(tool)
-                if tool.tool_name == "write" =>
-            {
-                Some(tool)
-            }
-            _ => None,
-        })
-        .unwrap();
-
-    assert_eq!(
-        row.attachment.bound_parameters.get("root"),
-        Some(&serde_json::Value::String(
-            std::fs::canonicalize(workspace)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        ))
+    assert!(
+        plan.authored_source
+            .contains("[workspace]\nguest_path = \"/workspace\"\nmin_mode = \"rw\""),
+        "{}",
+        plan.authored_source
     );
+    assert!(!plan.authored_source.contains("host_path"));
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -3,8 +3,9 @@
 //! Every thread binds a manifest; a `thread/start` that names none binds the
 //! default manifest — the daemon's configured envelope, synthesized here and
 //! published into the agent registry at startup like any other manifest.
-//! Nothing about it is special at bind time: it flows through the normal
-//! plan → publish → bind pipeline with full receipts.
+//! It flows through the normal plan → publish → bind pipeline with full
+//! receipts. When it declares the kit workspace, the app-server supplies its
+//! configured cwd through the ordinary machine-local workspace binding.
 
 /// Name of the synthesized default agent record (D1).
 pub(crate) const DEFAULT_AGENT_NAME: &str = "default";
@@ -12,6 +13,8 @@ pub(crate) const DEFAULT_AGENT_NAME: &str = "default";
 pub(crate) const DEFAULT_AGENT_NAMESPACE: &str = "verlet";
 /// The ref a ref-less `thread/start` binds (alias resolution via `@latest`).
 pub(crate) const DEFAULT_AGENT_REF: &str = "agent://verlet/default@latest";
+/// Guest VFS mount named by surface-declared tools in the default manifest.
+pub(crate) const DEFAULT_KIT_WORKSPACE_GUEST_PATH: &str = "/workspace";
 const DEFAULT_MANIFEST_LOCK_ATTEMPTS: usize = 250;
 const DEFAULT_MANIFEST_LOCK_SLEEP: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -179,7 +182,8 @@ impl Drop for DefaultManifestPublishLock {
 /// Synthesizes the typed default manifest from the daemon's configured
 /// envelope (D2): one model profile from the configured provider/model,
 /// config-declared operation bindings lowered to pinned `bash_tool` rows, no
-/// resources, kernel-default context pipeline, runtime defaults taking
+/// resources, kernel-default context pipeline, and a host-path-free workspace
+/// requirement when an installed kit exposes a surface. Runtime defaults take
 /// `default_cwd` from the daemon cwd (absolute) and `streaming` from the
 /// provider surface, with override allowlist `[default_cwd]`.
 fn synthesize_default_manifest_with_version(
@@ -188,6 +192,12 @@ fn synthesize_default_manifest_with_version(
     version: &str,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_agent::manifest_schema::AgentManifestSchema> {
     let tools = default_manifest_tools(config)?;
+    let workspace = tools.requires_workspace.then(|| {
+        verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement {
+            guest_path: DEFAULT_KIT_WORKSPACE_GUEST_PATH.to_string(),
+            min_mode: verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite,
+        }
+    });
     let manifest = verlet_agent::manifest_schema::AgentManifestSchema {
         identity: verlet_agent::manifest_schema::AgentManifestIdentity {
             name: DEFAULT_AGENT_NAME.to_string(),
@@ -209,9 +219,9 @@ fn synthesize_default_manifest_with_version(
             retry: None,
             fallbacks: Vec::new(),
         }],
-        tools,
+        tools: tools.tools,
         resources: Vec::new(),
-        workspace: None,
+        workspace,
         skills: Default::default(),
         context: None,
         couplings: Vec::new(),
@@ -237,10 +247,14 @@ fn synthesize_default_manifest_with_version(
 /// Lowers daemon-configured operation bindings into declared default-manifest
 /// tools. The active registry records are resolved at synthesis time, so the
 /// bind receipt shows pinned `op://...@sha256` rows instead of ambient loading.
+struct DefaultManifestTools {
+    tools: Vec<verlet_agent::manifest_schema::AgentManifestTool>,
+    requires_workspace: bool,
+}
+
 fn default_manifest_tools(
     config: &crate::adapters::app_server::VerletAppServerConfig,
-) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
-{
+) -> crate::kernel::runtime_host::VerletResult<DefaultManifestTools> {
     // lexicon-allow: capsule - current config field name
     let bindings = &config.capsule_bindings;
     let mut tools = Vec::new();
@@ -338,11 +352,9 @@ fn default_manifest_tools(
             );
         }
     }
-    tools.extend(installed_kit_tools(
-        bindings.registry_root.as_deref(),
-        &reserved_tool_names,
-        &config.cwd,
-    )?);
+    let installed = installed_kit_tools(bindings.registry_root.as_deref(), &reserved_tool_names)?;
+    let requires_workspace = installed.requires_workspace;
+    tools.extend(installed.tools);
 
     for record in records.into_values() {
         if record.name == crate::operations::kernel_packages::VERLET_THREADS_PACKAGE {
@@ -372,7 +384,10 @@ fn default_manifest_tools(
             ));
         }
     }
-    Ok(tools)
+    Ok(DefaultManifestTools {
+        tools,
+        requires_workspace,
+    })
 }
 
 /// Direct-tool rows for every installed kit.
@@ -391,17 +406,21 @@ fn default_manifest_tools(
 /// operation ref and its capability-grant copy are verified against the
 /// operation registry before attachment derivation, so a corrupted record
 /// cannot silently broaden, drop, or project malformed authority.
-/// Surface-declared rows additionally bind `root` to the canonical configured
-/// instance workspace; the value is carried by the manifest attachment, not
-/// Wasm imports. The kit lane currently owns no other bound parameter.
+/// A surface-declared row makes the default manifest require the guest
+/// `/workspace` mount and binds `root` to that guest path. The manifest never
+/// names a host directory: the app-server bind layer supplies its configured
+/// cwd as the machine-local workspace binding, `AbiFs` resolves `root` in the
+/// guest VFS namespace, and the mount is the confinement boundary. The kit
+/// lane currently owns no other bound parameter.
 fn installed_kit_tools(
     operations_registry_root: Option<&std::path::Path>,
     reserved_tool_names: &std::collections::BTreeMap<String, String>,
-    workspace_root: &std::path::Path,
-) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_agent::manifest_schema::AgentManifestTool>>
-{
+) -> crate::kernel::runtime_host::VerletResult<DefaultManifestTools> {
     let Some(operations_registry_root) = operations_registry_root else {
-        return Ok(Vec::new());
+        return Ok(DefaultManifestTools {
+            tools: Vec::new(),
+            requires_workspace: false,
+        });
     };
     let kits_root = verlet_operations::kit_package::kits_root_for_operations_registry_root(
         operations_registry_root,
@@ -415,6 +434,7 @@ fn installed_kit_tools(
     })?;
     let mut tool_owners = std::collections::BTreeMap::new();
     let mut rows = Vec::new();
+    let mut requires_workspace = false;
     for record in records {
         for tool in record.tools {
             if let Some(source) = reserved_tool_names.get(&tool.tool_name) {
@@ -496,13 +516,14 @@ fn installed_kit_tools(
                         })
                 })
                 .and_then(|operation| operation.surface.as_ref());
+            requires_workspace |= surface.is_some();
             let bound_parameters = match surface {
                 None => std::collections::BTreeMap::new(),
                 Some(surface) if surface.bound.is_empty() => std::collections::BTreeMap::new(),
                 Some(surface) if surface.bound.len() == 1 && surface.bound.contains("root") => {
                     std::collections::BTreeMap::from([(
                         "root".to_string(),
-                        serde_json::Value::String(canonical_workspace_root_string(workspace_root)?),
+                        serde_json::Value::String(DEFAULT_KIT_WORKSPACE_GUEST_PATH.to_string()),
                     )])
                 }
                 Some(surface) => {
@@ -534,7 +555,10 @@ fn installed_kit_tools(
         }
     }
     rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-    Ok(rows.into_iter().map(|(_, _, tool)| tool).collect())
+    Ok(DefaultManifestTools {
+        tools: rows.into_iter().map(|(_, _, tool)| tool).collect(),
+        requires_workspace,
+    })
 }
 
 fn validate_installed_kit_attachment_capabilities(
@@ -653,6 +677,7 @@ fn default_manifest_source(
                 }
             })
             .collect(),
+        workspace: manifest.workspace.as_ref(),
         policies: DefaultManifestPoliciesToml {
             allow_child_agents: manifest.policies.allow_child_agents,
         },
@@ -733,34 +758,6 @@ fn absolute_path_string(
     Ok(path_string(path))
 }
 
-fn canonical_workspace_root_string(
-    path: &std::path::Path,
-) -> crate::kernel::runtime_host::VerletResult<String> {
-    if !path.is_absolute() {
-        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!(
-                "configured instance workspace root must be absolute: {}",
-                path.display()
-            ),
-        ));
-    }
-    let canonical = std::fs::canonicalize(path).map_err(|err| {
-        crate::kernel::runtime_host::VerletError::RuntimeFactory(format!(
-            "configured instance workspace root {} could not be resolved: {err}",
-            path.display()
-        ))
-    })?;
-    if !canonical.is_dir() {
-        return Err(crate::kernel::runtime_host::VerletError::RuntimeFactory(
-            format!(
-                "configured instance workspace root {} is not a directory",
-                canonical.display()
-            ),
-        ));
-    }
-    Ok(path_string(&canonical))
-}
-
 fn path_string(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -771,6 +768,8 @@ struct DefaultManifestToml<'a> {
     model_profiles: Vec<DefaultManifestModelProfileToml<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<DefaultManifestToolToml<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<&'a verlet_agent::manifest_schema::AgentManifestWorkspaceRequirement>,
     policies: DefaultManifestPoliciesToml,
     runtime: DefaultManifestRuntimeToml<'a>,
 }

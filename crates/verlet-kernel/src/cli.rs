@@ -10,7 +10,7 @@ mod debug_rpc;
 mod host;
 mod identity;
 mod import;
-mod kit;
+pub(crate) mod kit;
 mod rpc;
 mod secret;
 mod serve;

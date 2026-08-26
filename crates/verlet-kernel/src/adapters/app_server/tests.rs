@@ -15020,6 +15020,95 @@ async fn model_provider_capabilities_read_reports_bedrock_streaming() {
 }
 
 #[tokio::test]
+async fn default_manifest_pi_tools_mount_instance_workspace_for_direct_write_and_read() {
+    let root = unique_test_root("default-manifest-pi-workspace");
+    let workspace = root.join("workspace");
+    let operation_registry_root = root.join("operations");
+    let kits_root = verlet_operations::kit_package::kits_root_for_operations_registry_root(
+        &operation_registry_root,
+    );
+    std::fs::create_dir_all(&workspace).unwrap();
+    let kit_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../agent-tools/pi-kit");
+    crate::cli::kit::install_kit_from(&kit_root, &operation_registry_root, &kits_root)
+        .await
+        .unwrap();
+
+    let client = std::sync::Arc::new(PiKitWorkspaceClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let binding_config = crate::adapters::app_server::CapsuleBindingsConfig::default()
+        .with_registry_root(&operation_registry_root);
+    let app = test_app_with_provider_root(&root, &workspace, provider_client, binding_config).await;
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+
+    let default_record = app
+        .inner
+        .agent_registry()
+        .load_ref(crate::adapters::app_server::default_manifest::DEFAULT_AGENT_REF)
+        .unwrap();
+    let missing_workspace =
+        crate::agent::manifest_bind::bind_published_agent_record_with_placement(
+            &default_record,
+            None,
+            &crate::agent::manifest_bind::AgentManifestProviderSurface::single(
+                crate::adapters::app_server::APP_SERVER_LOCAL_PROVIDER,
+                crate::adapters::app_server::APP_SERVER_LOCAL_MODEL,
+            )
+            .with_supports_streaming(false),
+            Some(&operation_registry_root),
+            None,
+            None,
+            &std::collections::BTreeSet::new(),
+            None,
+            &crate::agent::manifest_bind::AgentManifestModelProfileSelection::default(),
+            &crate::agent::manifest_bind::AgentManifestBindOverrides::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing_workspace.contains("requires a workspace binding"),
+        "{missing_workspace}"
+    );
+
+    let thread = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = thread["thread"]["id"].as_str().unwrap().to_string();
+    let handle = app.handle_for_thread(&thread_id).await.unwrap();
+    let mounted =
+        crate::adapters::app_server::threads::thread_manifest_workspace_mount(handle.context())
+            .unwrap()
+            .expect("default Pi manifest must mount the instance workspace");
+    assert_eq!(mounted.guest_path, std::path::PathBuf::from("/workspace"));
+    assert_eq!(
+        mounted.host_path,
+        std::fs::canonicalize(&workspace).unwrap()
+    );
+    assert_eq!(
+        mounted.mode,
+        verlet_agent::manifest_schema::AgentManifestWorkspaceMode::ReadWrite
+    );
+
+    let turn_id = start_text_turn(&app, &connection, &thread_id, "write then read").await;
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("nested/note.txt")).unwrap(),
+        "workspace disposition"
+    );
+    assert_eq!(client.requests().len(), 3);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn app_server_manifest_bindings_expose_tools_and_replay_across_lifecycle() {
     let registry_root = unique_test_root("capsule-global-registry");
     let record = publish_echo_operation(&registry_root, "search", "search", "search").await;
@@ -15691,6 +15780,7 @@ async fn app_server_capsule_binding_methods_do_not_reload_as_manifest_runtime_sc
         second_client.clone();
     let restarted = test_app_with_provider_and_capsule_bindings(
         provider_client,
+        // lexicon-allow: capsule - existing operation binding test config
         crate::adapters::app_server::CapsuleBindingsConfig::default()
             .with_registry_root(&registry_root),
     )
@@ -22476,6 +22566,79 @@ struct DirectOperationCallingClient {
     requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
     tool_name: String,
     expected_output: String,
+}
+
+#[derive(Default)]
+struct PiKitWorkspaceClient {
+    requests: std::sync::Mutex<Vec<verlet_provider::ProviderRequest>>,
+}
+
+impl PiKitWorkspaceClient {
+    fn requests(&self) -> Vec<verlet_provider::ProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl verlet_provider::ProviderClient for PiKitWorkspaceClient {
+    async fn complete(
+        &self,
+        request: &verlet_provider::ProviderRequest,
+    ) -> verlet_provider::ProviderResult<verlet_provider::ProviderResponse> {
+        self.requests.lock().unwrap().push(request.clone());
+        let tool_result_count = request
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message, verlet_history::CanonicalMessage::ToolResult { .. })
+            })
+            .count();
+        match tool_result_count {
+            0 => {
+                assert!(tool_names(request).contains(&"write".to_string()));
+                assert!(tool_names(request).contains(&"read".to_string()));
+                let write = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "write")
+                    .expect("write tool definition");
+                assert!(write.input_schema["properties"].get("root").is_none());
+                Ok(verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::tool_call(
+                        "call_pi_write",
+                        "write",
+                        serde_json::json!({
+                            "path": "nested/note.txt",
+                            "content": "workspace disposition"
+                        }),
+                    )],
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+                })
+            }
+            1 => Ok(verlet_provider::ProviderResponse {
+                content: vec![verlet_history::CanonicalContent::tool_call(
+                    "call_pi_read",
+                    "read",
+                    serde_json::json!({"path": "nested/note.txt"}),
+                )],
+                usage: verlet_history::CanonicalUsage::default(),
+                stop_reason: verlet_history::CanonicalStopReason::ToolUse,
+            }),
+            2 => {
+                let text = text_from_canonical_messages(&request.messages);
+                assert!(text.contains("workspace disposition"), "{text}");
+                Ok(verlet_provider::ProviderResponse {
+                    content: vec![verlet_history::CanonicalContent::text(
+                        "Pi workspace write and read completed",
+                    )],
+                    usage: verlet_history::CanonicalUsage::default(),
+                    stop_reason: verlet_history::CanonicalStopReason::EndTurn,
+                })
+            }
+            count => panic!("unexpected Pi tool result count {count}"),
+        }
+    }
 }
 
 impl DirectOperationCallingClient {
