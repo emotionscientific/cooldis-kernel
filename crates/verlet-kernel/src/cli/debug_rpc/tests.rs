@@ -122,7 +122,7 @@ fn resolve_debug_rpc_endpoint_explicit_flags_precede_discovery() {
 }
 
 #[test]
-fn resolve_debug_rpc_endpoint_falls_back_when_record_is_absent() {
+fn resolve_debug_rpc_endpoint_falls_back_without_materializing_project_state() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -143,6 +143,30 @@ fn resolve_debug_rpc_endpoint_falls_back_when_record_is_absent() {
         )
     );
     assert_eq!(resolved.record_path, None);
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+    assert!(!project.join(".verlet").exists());
+}
+
+#[test]
+fn resolve_debug_rpc_endpoint_rejects_non_websocket_urls() {
+    let root = tempfile::tempdir().unwrap();
+
+    for url in ["http://127.0.0.1:49200/rpc", "127.0.0.1:49200"] {
+        let error = crate::cli::debug_rpc::resolve_debug_rpc_endpoint_from(
+            &crate::cli::debug_rpc::DebugRpcEndpointArgs {
+                url: Some(url.to_string()),
+                config: None,
+            },
+            root.path(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("Verlet RPC URL must start with ws://"),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(unix)]

@@ -516,6 +516,11 @@ fn debug_rpc_transport_from_url(
         }
         return Ok(DebugRpcTransport::Unix(std::path::PathBuf::from(path)));
     }
+    if !url.starts_with("ws://") {
+        return Err(debug_rpc_usage_error(format!(
+            "Verlet RPC URL must start with ws://: {url:?}"
+        )));
+    }
     Ok(DebugRpcTransport::WebSocket(url.to_string()))
 }
 
