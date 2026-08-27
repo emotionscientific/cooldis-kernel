@@ -255,6 +255,7 @@ pub struct WalkFile {
     pub relative_path: String,
     pub is_dir: bool,
     pub size: u64,
+    skip_read_errors: bool,
 }
 
 /// Walk a file or directory using only [`ToolFs`].
@@ -278,6 +279,7 @@ pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFil
             relative_path,
             is_dir: false,
             size: stat.size,
+            skip_read_errors: false,
         }]);
     }
     if !stat.is_dir {
@@ -331,6 +333,7 @@ fn walk_directory(
                 relative_path: format!("{}/", relative_path_string(&relative)),
                 is_dir: true,
                 size: 0,
+                skip_read_errors: true,
             });
             let matcher_count = ignore_matchers.len();
             add_ignore_file(fs, &path, &path.join(".gitignore"), ignore_matchers)?;
@@ -348,11 +351,43 @@ fn walk_directory(
                     relative_path: relative_path_string(&relative),
                     is_dir: false,
                     size: stat.size,
+                    skip_read_errors: true,
                 });
             }
         }
     }
     Ok(())
+}
+
+/// Read a file selected by [`walk_files`] without letting one stale or
+/// unreadable directory entry abort the rest of a walk.
+///
+/// Files named directly as the walk root still surface read errors. Directory
+/// entries that fail after a successful stat are skipped, as are entries that
+/// exceed `max_bytes` either at stat time or while being read.
+pub fn read_walk_file_bounded(
+    file: &WalkFile,
+    fs: &dyn ToolFs,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, ToolError> {
+    if file.is_dir || file.size > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+        return Ok(None);
+    }
+    read_walk_entry_bounded(fs, &file.path, max_bytes, file.skip_read_errors)
+}
+
+fn read_walk_entry_bounded(
+    fs: &dyn ToolFs,
+    path: &std::path::Path,
+    max_bytes: usize,
+    skip_read_errors: bool,
+) -> Result<Option<Vec<u8>>, ToolError> {
+    match fs.read_file_bounded(path, max_bytes) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(ToolFsError::FileTooLarge { .. }) => Ok(None),
+        Err(_) if skip_read_errors => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn add_ignore_file(
@@ -370,10 +405,9 @@ fn add_ignore_file(
         return Ok(());
     }
 
-    let bytes = match fs.read_file_bounded(ignore_path, MAX_FILE_BYTES) {
-        Ok(bytes) => bytes,
-        Err(ToolFsError::FileTooLarge { .. }) => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let bytes = match read_walk_entry_bounded(fs, ignore_path, MAX_FILE_BYTES, true)? {
+        Some(bytes) => bytes,
+        None => return Ok(()),
     };
     let content = String::from_utf8_lossy(&bytes);
     let mut builder = ignore::gitignore::GitignoreBuilder::new(match_root);
@@ -947,6 +981,26 @@ mod tests {
             root.path().join("broken-link"),
         )
         .unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["real.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_a_unix_socket_and_returns_regular_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("real.txt"), "real").unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(root.path().join("live.sock")).unwrap();
         let fs = crate::StdFs::new(root.path()).unwrap();
 
         let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();

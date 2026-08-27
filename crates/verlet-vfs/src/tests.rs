@@ -99,6 +99,20 @@ async fn host_filesystem_rw_is_rooted_and_rejects_symlink_escape() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn host_filesystem_reports_a_unix_socket_as_a_non_file_kind() {
+    let fixture = unique_host_fs_root("socket-kind");
+    let socket_path = fixture.join("live.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    let fs = crate::HostFileSystem::read_only(&fixture).unwrap();
+
+    let metadata = fs.stat(std::path::Path::new("/live.sock")).await.unwrap();
+
+    assert_eq!(metadata.file_type, bashkit::FileType::Fifo);
+    let _ = std::fs::remove_dir_all(fixture);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn host_filesystem_rw_rejects_mutating_a_preexisting_external_hard_link() {
     let fixture = unique_host_fs_root("hard-link");
     let root = fixture.join("root");

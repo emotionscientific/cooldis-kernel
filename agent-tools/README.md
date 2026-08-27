@@ -64,9 +64,11 @@ attached VFS. Write and edit also declare and require the `fs.write` grant.
 Known wasm-lane divergence: the guest ABI reports symlinks as kind `Other`
 (neither file nor directory), so the walker skips symlinked file entries that
 the native `StdFs` lane includes. Both walkers skip symlinked directories.
-Direct read rejects symlink paths that the native lane follows when the target
-remains inside its root. The ABI exposes no follow-symlink distinction;
-resolving this needs a host-side change, tracked separately.
+Unix sockets, FIFOs, block devices, and character devices are also reported as
+`Other` by host-backed VFS mounts and skipped by both walkers. Direct read
+rejects symlink paths that the native lane follows when the target remains
+inside its root. The ABI exposes no follow-symlink distinction; resolving this
+needs a host-side change, tracked separately.
 
 Each module directory is a standalone Cargo workspace with its own lockfile,
 a `cdylib` library target, and `panic = "abort"` in the release profile. This
@@ -100,14 +102,17 @@ cargo build --manifest-path agent-tools/wasm/read/Cargo.toml \
   the kernel invocation layer and is deferred until the wasm integration
   stage.
 - **Bounded text scanning.** Grep skips files that are not valid UTF-8 text,
-  contain NUL, or exceed the shared 8 MiB per-file read limit. Read returns a
-  structured error for files over that limit; offset/limit cannot bypass the
+  contain NUL, exceed the shared 8 MiB per-file read limit, have a non-regular
+  stat kind, or fail when read after a directory walk selected them. The last
+  case covers races and backend kinds that cannot be classified before open.
+  A directly named single-file grep still returns its read error. Read returns
+  a structured error for files over the limit; offset/limit cannot bypass the
   ceiling because the current ABI has no seek or ranged-read operation. Find
-  skips ignore-rule files over the ceiling. Edit preserves whole-file atomicity
-  under the same ceiling and returns a structured error without changing or
-  silently skipping an oversized target. Pi delegates grep to `rg` without this
-  size ceiling and its read and grep context paths can load whole files. The
-  Wasm fuel budget is a runaway guard, sized from the measured guest cost of
-  about 154 fuel per file byte so an 8 MiB read fits several times over and
-  multi-file grep walks across tens of MiB complete while runaway guests remain
-  bounded to seconds of CPU.
+  skips special entries and ignore-rule files that are oversized or fail while
+  being read. Edit preserves whole-file atomicity under the same ceiling and
+  returns a structured error without changing or silently skipping an
+  oversized target. Pi delegates grep to `rg` without this size ceiling and its
+  read and grep context paths can load whole files. The Wasm fuel budget is a
+  runaway guard, sized from the measured guest cost of about 154 fuel per file
+  byte so an 8 MiB read fits several times over and multi-file grep walks across
+  tens of MiB complete while runaway guests remain bounded to seconds of CPU.

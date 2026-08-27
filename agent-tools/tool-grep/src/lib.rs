@@ -131,13 +131,13 @@ pub fn run(
             continue;
         }
 
-        if file.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
-            continue;
-        }
-        let bytes = match fs.read_file_bounded(&file.path, verlet_tool_core::MAX_FILE_BYTES) {
-            Ok(bytes) => bytes,
-            Err(verlet_tool_core::ToolFsError::FileTooLarge { .. }) => continue,
-            Err(error) => return Err(error.into()),
+        let bytes = match verlet_tool_core::read_walk_file_bounded(
+            &file,
+            fs,
+            verlet_tool_core::MAX_FILE_BYTES,
+        )? {
+            Some(bytes) => bytes,
+            None => continue,
         };
         if std::str::from_utf8(&bytes).is_err() || bytes.contains(&0) {
             continue;
@@ -498,6 +498,7 @@ mod tests {
             inner: fs(root.path()),
             reads: std::cell::RefCell::new(Vec::new()),
             replacement_on_bounded_read: std::cell::RefCell::new(None),
+            failing_bounded_read: None,
         };
         let mut search = args("hit");
         search.limit = Some(1);
@@ -567,6 +568,7 @@ mod tests {
             inner: fs(root.path()),
             reads: std::cell::RefCell::new(Vec::new()),
             replacement_on_bounded_read: std::cell::RefCell::new(None),
+            failing_bounded_read: None,
         };
 
         let output = crate::run(args("hit"), &recording).unwrap();
@@ -591,6 +593,7 @@ mod tests {
                 verlet_tool_core::MAX_FILE_BYTES
                     .saturating_add(1)
             ])),
+            failing_bounded_read: None,
         };
 
         let output = crate::run(args("hit"), &recording).unwrap();
@@ -627,6 +630,42 @@ mod tests {
         let output = crate::run(search, &fs(root.path())).unwrap();
 
         assert_eq!(output.text, "one.txt:1: hit");
+    }
+
+    #[test]
+    fn a_directory_search_skips_a_file_that_fails_during_read() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a-unreadable.txt"), "hit\n").unwrap();
+        std::fs::write(root.path().join("visible.txt"), "hit\n").unwrap();
+        let recording = RecordingFs {
+            inner: fs(root.path()),
+            reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
+            failing_bounded_read: Some(std::path::PathBuf::from("./a-unreadable.txt")),
+        };
+
+        let output = crate::run(args("hit"), &recording).unwrap();
+
+        assert_eq!(output.text, "visible.txt:1: hit");
+        assert_eq!(output.match_count, 1);
+    }
+
+    #[test]
+    fn a_direct_file_search_surfaces_a_read_failure() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("unreadable.txt"), "hit\n").unwrap();
+        let recording = RecordingFs {
+            inner: fs(root.path()),
+            reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
+            failing_bounded_read: Some(std::path::PathBuf::from("unreadable.txt")),
+        };
+        let mut search = args("hit");
+        search.path = Some(std::path::PathBuf::from("unreadable.txt"));
+
+        let error = crate::run(search, &recording).unwrap_err();
+
+        assert_eq!(error.to_string(), "fixture read failure: unreadable.txt");
     }
 
     #[test]
@@ -771,6 +810,7 @@ mod tests {
         inner: verlet_tool_core::StdFs,
         reads: std::cell::RefCell<Vec<std::path::PathBuf>>,
         replacement_on_bounded_read: std::cell::RefCell<Option<Vec<u8>>>,
+        failing_bounded_read: Option<std::path::PathBuf>,
     }
 
     impl verlet_tool_core::ToolFs for RecordingFs {
@@ -788,6 +828,12 @@ mod tests {
             max_bytes: usize,
         ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
             self.reads.borrow_mut().push(path.to_path_buf());
+            if self.failing_bounded_read.as_deref() == Some(path) {
+                return Err(verlet_tool_core::ToolFsError::Io(format!(
+                    "fixture read failure: {}",
+                    path.display()
+                )));
+            }
             if let Some(replacement) = self.replacement_on_bounded_read.borrow_mut().take() {
                 std::fs::write(self.inner.root.join(path), replacement).unwrap();
             }

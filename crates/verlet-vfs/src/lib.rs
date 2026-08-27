@@ -612,7 +612,24 @@ impl bashkit::FileSystem for HostFileSystem {
 
     async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         let _guard = self.operation_lock.lock().await;
-        self.inner.stat(path).await
+        let mut metadata = self.inner.stat(path).await?;
+        #[cfg(unix)]
+        if metadata.file_type == bashkit::FileType::File && metadata.size == 0 {
+            use std::os::unix::fs::FileTypeExt as _;
+
+            let normalized = normalize_vfs_path(path);
+            let relative = normalized.strip_prefix("/").unwrap_or(normalized.as_path());
+            let host_file_type = std::fs::symlink_metadata(self.root.join(relative))?.file_type();
+            if host_file_type.is_socket()
+                || host_file_type.is_fifo()
+                || host_file_type.is_block_device()
+                || host_file_type.is_char_device()
+            {
+                metadata.file_type = bashkit::FileType::Fifo;
+                metadata.size = 0;
+            }
+        }
+        Ok(metadata)
     }
 
     async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {

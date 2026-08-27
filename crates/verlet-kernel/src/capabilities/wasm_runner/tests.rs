@@ -1817,6 +1817,100 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
+    let native = tempfile::tempdir().unwrap();
+    let project = native.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("input.txt"), "hello from text\n").unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(project.join("verlet.sock")).unwrap();
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let native_output = verlet_tool_grep::run(
+        verlet_tool_grep::GrepArgs {
+            pattern: "hello".to_owned(),
+            path: Some(std::path::PathBuf::from("project")),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    assert_eq!(native_output.text, "input.txt:1: hello from text");
+    let native_direct_error = verlet_tool_grep::run(
+        verlet_tool_grep::GrepArgs {
+            pattern: "hello".to_owned(),
+            path: Some(std::path::PathBuf::from("project/verlet.sock")),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let native_find = verlet_tool_glob::run(
+        verlet_tool_glob::GlobArgs {
+            pattern: "**".to_owned(),
+            path: Some(std::path::PathBuf::from("project")),
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    assert_eq!(native_find.paths, vec!["input.txt"]);
+
+    let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
+        bashkit::InMemoryFs::new(),
+    )));
+    let host = verlet_vfs::HostFileSystem::read_only(native.path()).unwrap();
+    vfs.mount("/workspace", std::sync::Arc::new(host)).unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_search_tool_guest(),
+        ))
+        .with_vfs(vfs),
+    )
+    .unwrap();
+
+    let walked = factory
+        .invoke_operation_bytes(
+            "grep",
+            pi_tool_input(serde_json::json!({"pattern": "hello", "path": "project"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(walked.output, tool_success_envelope(native_output));
+
+    let find = factory
+        .invoke_operation_bytes(
+            "find",
+            pi_tool_input(serde_json::json!({"pattern": "**", "path": "project"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(find.output, tool_success_envelope(native_find));
+
+    let direct = factory
+        .invoke_operation_bytes(
+            "grep",
+            pi_tool_input(serde_json::json!({
+                "pattern": "hello",
+                "path": "project/verlet.sock",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        direct.output,
+        tool_error_envelope(native_direct_error.to_string())
+    );
+}
+
 #[tokio::test]
 async fn wasm_pi_write_matches_native_mutation_and_maps_io_into_envelope() {
     let vfs = writable_vfs().await;
