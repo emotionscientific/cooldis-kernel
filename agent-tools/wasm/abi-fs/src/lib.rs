@@ -17,6 +17,8 @@ pub struct AbiFs {
     root: std::path::PathBuf,
 }
 
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+
 impl AbiFs {
     /// `root` is the VFS directory that relative tool paths resolve
     /// against. The embedder passes it in the operation input; the runtime
@@ -144,11 +146,45 @@ impl verlet_tool_core::ToolFs for AbiFs {
         let handle = verlet_guest_sdk::open_file_read(resolved)
             .map_err(|status| map_status(path, status))?;
         let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 1024];
+        let mut buffer = [0_u8; READ_CHUNK_BYTES];
         loop {
             match verlet_guest_sdk::read_file(handle, &mut buffer) {
                 Ok(0) => break,
                 Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                Err(status) => {
+                    let _ = verlet_guest_sdk::close_file(handle);
+                    return Err(map_status(path, status));
+                }
+            }
+        }
+        verlet_guest_sdk::close_file(handle).map_err(|status| map_status(path, status))?;
+        Ok(bytes)
+    }
+
+    fn read_file_bounded(
+        &self,
+        path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
+        let resolved = self.resolve(path);
+        let resolved = path_str(path, &resolved)?;
+        let handle = verlet_guest_sdk::open_file_read(resolved)
+            .map_err(|status| map_status(path, status))?;
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+        let mut buffer = [0_u8; READ_CHUNK_BYTES];
+        loop {
+            match verlet_guest_sdk::read_file(handle, &mut buffer) {
+                Ok(0) => break,
+                Ok(read) if read <= max_bytes.saturating_sub(bytes.len()) => {
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                Ok(_) => {
+                    let _ = verlet_guest_sdk::close_file(handle);
+                    return Err(verlet_tool_core::ToolFsError::FileTooLarge {
+                        path: path.to_path_buf(),
+                        max_bytes,
+                    });
+                }
                 Err(status) => {
                     let _ = verlet_guest_sdk::close_file(handle);
                     return Err(map_status(path, status));

@@ -19,13 +19,12 @@
 //! - `limit` (default 100) caps match count; search stops early when
 //!   reached and emits Pi's actionable notice.
 //! - Final text is complete-line head-truncated at 50 KiB.
-//! - Binary files (NUL in first 8KB) are skipped.
+//! - Non-UTF-8 files, files containing NUL, and files over 8 MiB are skipped.
 //! - Deterministic file order (same as glob's sort), so identical state
 //!   yields identical output on every backend.
 
 pub const DEFAULT_LIMIT: i64 = 100;
 pub const MAX_LINE_CHARS: usize = 500;
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct GrepArgs {
@@ -132,8 +131,15 @@ pub fn run(
             continue;
         }
 
-        let bytes = fs.read_file(&file.path)?;
-        if bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0) {
+        if file.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
+            continue;
+        }
+        let bytes = match fs.read_file_bounded(&file.path, verlet_tool_core::MAX_FILE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(verlet_tool_core::ToolFsError::FileTooLarge { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if std::str::from_utf8(&bytes).is_err() || bytes.contains(&0) {
             continue;
         }
 
@@ -144,7 +150,9 @@ pub fn run(
             .bom_sniffing(false)
             .max_matches(Some(remaining));
         let mut searcher = searcher_builder.build();
-        let mut sink = MatchLineSink { lines: Vec::new() };
+        let mut sink = MatchLineSink {
+            matches: Vec::new(),
+        };
         searcher
             .search_slice(&matcher, &bytes, &mut sink)
             .map_err(|error| {
@@ -155,22 +163,21 @@ pub fn run(
             })?;
 
         match_count =
-            match_count.saturating_add(u64::try_from(sink.lines.len()).unwrap_or(u64::MAX));
-        let lines = file_lines(&bytes);
+            match_count.saturating_add(u64::try_from(sink.matches.len()).unwrap_or(u64::MAX));
         if context == 0 {
-            for line_number in sink.lines {
+            for matched in sink.matches {
                 let (row, truncated) = render_line(
                     &file.relative_path,
-                    line_number,
+                    matched.line_number,
                     true,
-                    line_at(&lines, line_number),
+                    &matched.bytes,
                 );
                 rows.push(row);
                 lines_truncated |= truncated;
             }
         } else {
             let (file_blocks, truncated) =
-                render_context_blocks(&file.relative_path, &lines, &sink.lines, context);
+                render_context_blocks(&file.relative_path, &bytes, &sink.matches, context);
             blocks.extend(file_blocks);
             lines_truncated |= truncated;
         }
@@ -241,7 +248,12 @@ pub fn run(
 }
 
 struct MatchLineSink {
-    lines: Vec<u64>,
+    matches: Vec<MatchLine>,
+}
+
+struct MatchLine {
+    line_number: u64,
+    bytes: Vec<u8>,
 }
 
 impl grep_searcher::Sink for MatchLineSink {
@@ -253,7 +265,12 @@ impl grep_searcher::Sink for MatchLineSink {
         matched: &grep_searcher::SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
         if let Some(line_number) = matched.line_number() {
-            self.lines.push(line_number);
+            let bytes = matched
+                .bytes()
+                .strip_suffix(b"\n")
+                .unwrap_or_else(|| matched.bytes())
+                .to_vec();
+            self.matches.push(MatchLine { line_number, bytes });
         }
         Ok(true)
     }
@@ -261,18 +278,19 @@ impl grep_searcher::Sink for MatchLineSink {
 
 fn render_context_blocks(
     path: &str,
-    lines: &[&[u8]],
-    matches: &[u64],
+    bytes: &[u8],
+    matches: &[MatchLine],
     context: usize,
 ) -> (Vec<Vec<String>>, bool) {
     if matches.is_empty() {
         return (Vec::new(), false);
     }
-    let line_count = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+    let line_count = file_line_count(bytes);
     let context = u64::try_from(context).unwrap_or(u64::MAX);
     let mut blocks = Vec::new();
     let mut any_truncated = false;
-    for &line_number in matches {
+    for matched in matches {
+        let line_number = matched.line_number;
         let start = line_number.saturating_sub(context).max(1);
         let end = line_number.saturating_add(context).min(line_count);
         let mut block = Vec::new();
@@ -281,7 +299,7 @@ fn render_context_blocks(
                 path,
                 current,
                 current == line_number,
-                line_at(lines, current),
+                line_at(bytes, current),
             );
             block.push(row);
             any_truncated |= truncated;
@@ -306,17 +324,21 @@ fn render_line(path: &str, line_number: u64, is_match: bool, bytes: &[u8]) -> (S
     (row, was_truncated)
 }
 
-fn line_at<'a>(lines: &'a [&'a [u8]], line_number: u64) -> &'a [u8] {
+fn line_at(bytes: &[u8], line_number: u64) -> &[u8] {
     let index = usize::try_from(line_number.saturating_sub(1)).unwrap_or(usize::MAX);
-    lines.get(index).copied().unwrap_or_default()
+    bytes
+        .split(|byte| *byte == b'\n')
+        .nth(index)
+        .unwrap_or_default()
 }
 
-fn file_lines(bytes: &[u8]) -> Vec<&[u8]> {
-    let mut lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-    if bytes.ends_with(b"\n") {
-        lines.pop();
-    }
-    lines
+fn file_line_count(bytes: &[u8]) -> u64 {
+    let count = bytes
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        .saturating_add(usize::from(!bytes.ends_with(b"\n")));
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -475,6 +497,7 @@ mod tests {
         let recording = RecordingFs {
             inner: fs(root.path()),
             reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
         };
         let mut search = args("hit");
         search.limit = Some(1);
@@ -495,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_binary_files_with_a_nul_in_the_first_eight_kibibytes() {
+    fn skips_binary_files_containing_nul() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("binary.dat"), b"hit\0more").unwrap();
         std::fs::write(root.path().join("text.txt"), b"hit\n").unwrap();
@@ -507,42 +530,77 @@ mod tests {
     }
 
     #[test]
-    fn a_nul_after_the_binary_sniff_window_does_not_skip_the_file() {
+    fn skips_nul_anywhere_in_a_file() {
         let root = tempfile::tempdir().unwrap();
         let mut content = vec![b'x'; 8 * 1024];
         content.extend_from_slice(b"\0hit\n");
         std::fs::write(root.path().join("late-nul.dat"), content).unwrap();
+        std::fs::write(root.path().join("text.txt"), b"hit\n").unwrap();
 
         let output = crate::run(args("hit"), &fs(root.path())).unwrap();
 
-        assert_eq!(
-            output.text,
-            "late-nul.dat:1: ".to_owned()
-                + &"x".repeat(500)
-                + "... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]"
-        );
+        assert_eq!(output.text, "text.txt:1: hit");
         assert_eq!(output.match_count, 1);
     }
 
     #[test]
-    fn renders_non_utf8_match_lines_lossily_without_confusing_char_and_byte_caps() {
+    fn skips_non_utf8_files() {
         let root = tempfile::tempdir().unwrap();
-        let mut content = "🙂".repeat(crate::MAX_LINE_CHARS).into_bytes();
-        content.extend_from_slice(&[0xff]);
-        content.extend_from_slice(b"hit\n");
-        std::fs::write(root.path().join("invalid.txt"), content).unwrap();
+        let mut invalid = vec![b'x'; 4 * 1024];
+        invalid.extend_from_slice(b"\xffhit\n");
+        std::fs::write(root.path().join("invalid.txt"), invalid).unwrap();
+        std::fs::write(root.path().join("text.txt"), b"hit\n").unwrap();
 
         let output = crate::run(args("hit"), &fs(root.path())).unwrap();
 
+        assert_eq!(output.text, "text.txt:1: hit");
+        assert_eq!(output.match_count, 1);
+    }
+
+    #[test]
+    fn skips_oversized_files_without_reading_them() {
+        let root = tempfile::tempdir().unwrap();
+        let oversized = vec![b'x'; verlet_tool_core::MAX_FILE_BYTES.saturating_add(1)];
+        std::fs::write(root.path().join("oversized.txt"), oversized).unwrap();
+        std::fs::write(root.path().join("text.txt"), b"hit\n").unwrap();
+        let recording = RecordingFs {
+            inner: fs(root.path()),
+            reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
+        };
+
+        let output = crate::run(args("hit"), &recording).unwrap();
+
+        assert_eq!(output.text, "text.txt:1: hit");
+        assert!(!recording
+            .reads
+            .borrow()
+            .iter()
+            .any(|path| path.ends_with("oversized.txt")));
+    }
+
+    #[test]
+    fn a_file_that_grows_after_stat_is_skipped_without_searching_a_partial_buffer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("changing.txt"), b"hit\n").unwrap();
+        let recording = RecordingFs {
+            inner: fs(root.path()),
+            reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(Some(vec![
+                b'x';
+                verlet_tool_core::MAX_FILE_BYTES
+                    .saturating_add(1)
+            ])),
+        };
+
+        let output = crate::run(args("hit"), &recording).unwrap();
+
+        assert_eq!(output.text, "No matches found");
+        assert_eq!(output.match_count, 0);
         assert_eq!(
-            output.text,
-            format!(
-                "invalid.txt:1: {}... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
-                "🙂".repeat(crate::MAX_LINE_CHARS / 2)
-            )
+            recording.reads.borrow().as_slice(),
+            &[std::path::PathBuf::from("./changing.txt")]
         );
-        assert!(output.text.len() > crate::MAX_LINE_CHARS);
-        assert!(output.text.len() < verlet_tool_core::MAX_RESULT_BYTES);
     }
 
     #[test]
@@ -712,6 +770,7 @@ mod tests {
     struct RecordingFs {
         inner: verlet_tool_core::StdFs,
         reads: std::cell::RefCell<Vec<std::path::PathBuf>>,
+        replacement_on_bounded_read: std::cell::RefCell<Option<Vec<u8>>>,
     }
 
     impl verlet_tool_core::ToolFs for RecordingFs {
@@ -721,6 +780,18 @@ mod tests {
         ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
             self.reads.borrow_mut().push(path.to_path_buf());
             verlet_tool_core::ToolFs::read_file(&self.inner, path)
+        }
+
+        fn read_file_bounded(
+            &self,
+            path: &std::path::Path,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
+            self.reads.borrow_mut().push(path.to_path_buf());
+            if let Some(replacement) = self.replacement_on_bounded_read.borrow_mut().take() {
+                std::fs::write(self.inner.root.join(path), replacement).unwrap();
+            }
+            verlet_tool_core::ToolFs::read_file_bounded(&self.inner, path, max_bytes)
         }
 
         fn write_file(

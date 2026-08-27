@@ -5,7 +5,7 @@ pub const DEFAULT_OPERATION_NAME: &str = "handle_turn";
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 64 * 1_048_576;
-pub const DEFAULT_FUEL: u64 = 10_000_000;
+pub const DEFAULT_FUEL: u64 = 10_000_000_000;
 pub const DEFAULT_FUEL_YIELD_INTERVAL: u64 = 10_000;
 
 pub type VerletWasmResult<T> = Result<T, VerletWasmError>;

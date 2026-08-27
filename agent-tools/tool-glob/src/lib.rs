@@ -17,6 +17,7 @@
 //!   `/`-separated, and sorted
 //!   lexicographically (Pi preserves backend process order; we pin deterministic
 //!   order instead — recorded deviation).
+//! - Ignore-rule files over the shared 8 MiB file limit are skipped.
 //! - `limit` (default 1000) and the 50 KiB complete-line head limit emit Pi's
 //!   actionable notices.
 
@@ -84,6 +85,18 @@ pub fn run(
         .compile_matcher();
     let input_root = args.path.unwrap_or_else(|| std::path::PathBuf::from("."));
     let root = verlet_tool_core::normalize_tool_path(&input_root);
+    let root_stat = fs.stat(&root).map_err(|error| match error {
+        verlet_tool_core::ToolFsError::NotFound(_) => {
+            verlet_tool_core::ToolError::Failed(format!("Path not found: {}", root.display()))
+        }
+        error => error.into(),
+    })?;
+    if !root_stat.is_dir {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "Not a directory: {}",
+            root.display()
+        )));
+    }
     let files = verlet_tool_core::walk_files(&root, fs).map_err(|error| match error {
         verlet_tool_core::ToolError::Fs(verlet_tool_core::ToolFsError::NotFound(_)) => {
             verlet_tool_core::ToolError::Failed(format!("Path not found: {}", root.display()))
@@ -207,6 +220,18 @@ mod tests {
     fn model_facing_contract_is_named_find() {
         // Pi behavior sheet item 34; source: core/tools/find.ts:123-133.
         assert_eq!(crate::contract().name, "find");
+    }
+
+    #[test]
+    fn a_file_search_root_is_a_structured_error() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), "content").unwrap();
+        let mut search = args("**", None);
+        search.path = Some(std::path::PathBuf::from("file.txt"));
+
+        let error = crate::run(search, &fs(root.path())).unwrap_err();
+
+        assert_eq!(error.to_string(), "Not a directory: file.txt");
     }
 
     #[test]
@@ -405,6 +430,14 @@ mod tests {
             path: &std::path::Path,
         ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
             verlet_tool_core::ToolFs::read_file(&self.inner, path)
+        }
+
+        fn read_file_bounded(
+            &self,
+            path: &std::path::Path,
+            max_bytes: usize,
+        ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
+            verlet_tool_core::ToolFs::read_file_bounded(&self.inner, path, max_bytes)
         }
 
         fn write_file(
