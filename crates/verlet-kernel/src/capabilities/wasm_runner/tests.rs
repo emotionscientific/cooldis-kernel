@@ -1940,7 +1940,11 @@ async fn wasm_pi_special_files_match_native_skip_and_error_envelopes() {
         .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
     )
     .unwrap();
-    let direct_operation_timeout = std::time::Duration::from_secs(30);
+    // Hang detector for a FIFO open waiting on a peer, not a perf bound: under
+    // the parallel libtest harness on a 4-vCPU CI runner, concurrent debug
+    // Cranelift compiles of multi-MB guest modules can stall a wrapped call
+    // past 30s (observed twice on x86_64 CI), so this carries 10x headroom.
+    let direct_operation_timeout = std::time::Duration::from_secs(300);
 
     let stat = tokio::time::timeout(
         direct_operation_timeout,
