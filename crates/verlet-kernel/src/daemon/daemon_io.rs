@@ -6126,24 +6126,53 @@ impl VerletDaemonQueueWorker {
     }
 
     pub async fn run(self) {
+        let mut retry_state = crate::daemon::retry::RetryState::new(self.poll_interval);
         loop {
             match self.drain_once_inner().await {
                 Ok(QueueDrainOutcome { count: 0, .. }) => {
-                    tokio::time::sleep(self.poll_interval).await
+                    let decision = retry_state.on_success(self.poll_interval);
+                    if let Some(log) = decision.log {
+                        eprintln!(
+                            "{}",
+                            log.message("verlet daemon ingress worker", decision.delay)
+                        );
+                    }
+                    tokio::time::sleep(decision.delay).await
                 }
                 Ok(QueueDrainOutcome {
                     held_until_ms: Some(held_until_ms),
                     ..
                 }) => {
+                    let decision = retry_state.on_success(self.poll_interval);
+                    if let Some(log) = decision.log {
+                        eprintln!(
+                            "{}",
+                            log.message("verlet daemon ingress worker", decision.delay)
+                        );
+                    }
                     let delay_ms = held_until_ms.saturating_sub(now_ms());
                     if delay_ms > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    let decision = retry_state.on_success(self.poll_interval);
+                    if let Some(log) = decision.log {
+                        eprintln!(
+                            "{}",
+                            log.message("verlet daemon ingress worker", decision.delay)
+                        );
+                    }
+                }
                 Err(err) => {
-                    eprintln!("verlet daemon ingress worker failed: {err}");
-                    tokio::time::sleep(self.poll_interval).await;
+                    let decision = retry_state.on_failure(&err.to_string(), self.poll_interval);
+                    if let Some(log) = decision.log {
+                        eprintln!(
+                            "{}",
+                            log.message("verlet daemon ingress worker", decision.delay)
+                        );
+                    }
+                    tokio::time::sleep(decision.delay).await;
                 }
             }
         }
