@@ -26,6 +26,10 @@
 use verlet_history::EventStore as _;
 use verlet_history::SessionStore as _;
 
+const INGRESS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const INGRESS_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+const INGRESS_DEGRADED_THRESHOLD: u64 = 5;
+
 /// Durable ingress source for terminal outcomes of thread handles.
 ///
 /// Recovery is scan-based: no live subscription or durable cursor is part of
@@ -67,7 +71,7 @@ impl ThreadHandleIngressAdapter {
             sink,
             tenant_id: tenant_id.into(),
             user_id: user_id.into(),
-            poll_interval: std::time::Duration::from_millis(250),
+            poll_interval: INGRESS_POLL_INTERVAL,
             acknowledged_dispatches: tokio::sync::Mutex::new(std::collections::BTreeSet::new()),
         }
     }
@@ -178,11 +182,153 @@ impl ThreadHandleIngressAdapter {
     }
 
     pub(crate) async fn run(self) {
+        let mut retry_state = IngressRetryState::new(self.poll_interval);
         loop {
-            if let Err(err) = self.enqueue_ready_once().await {
-                eprintln!("verlet thread handle ingress adapter failed: {err}");
+            let decision = match self.enqueue_ready_once().await {
+                Ok(_) => retry_state.on_success(self.poll_interval),
+                Err(err) => retry_state.on_failure(&err.to_string(), self.poll_interval),
+            };
+            if let Some(log) = decision.log {
+                eprintln!("{}", log.message(decision.delay));
             }
-            tokio::time::sleep(self.poll_interval).await;
+            tokio::time::sleep(decision.delay).await;
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IngressRetryDecision {
+    delay: std::time::Duration,
+    log: Option<IngressRetryLog>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum IngressRetryLog {
+    Failed {
+        error: String,
+    },
+    BackoffIncreased {
+        consecutive_failures: u64,
+        delay: std::time::Duration,
+    },
+    ErrorChanged {
+        consecutive_failures: u64,
+        delay: std::time::Duration,
+        error: String,
+    },
+    Degraded {
+        consecutive_failures: u64,
+        delay: std::time::Duration,
+        error: String,
+    },
+    Recovered {
+        failed_polls: u64,
+    },
+}
+
+impl IngressRetryLog {
+    fn message(&self, retry_delay: std::time::Duration) -> String {
+        match self {
+            Self::Failed { error } => format!(
+                "verlet thread handle ingress adapter failed: {error}; retrying in {retry_delay:?}"
+            ),
+            Self::BackoffIncreased {
+                consecutive_failures,
+                delay,
+            } => format!(
+                "verlet thread handle ingress adapter still failing after {consecutive_failures} consecutive polls; retrying in {delay:?}"
+            ),
+            Self::ErrorChanged {
+                consecutive_failures,
+                delay,
+                error,
+            } => format!(
+                "verlet thread handle ingress adapter failure changed after {consecutive_failures} consecutive failed polls: {error}; retrying in {delay:?}"
+            ),
+            Self::Degraded {
+                consecutive_failures,
+                delay,
+                error,
+            } => format!(
+                "verlet thread handle ingress adapter degraded after {consecutive_failures} consecutive failed polls: {error}; will keep retrying at capped interval {delay:?}"
+            ),
+            Self::Recovered { failed_polls } => format!(
+                "verlet thread handle ingress adapter recovered after {failed_polls} failed polls"
+            ),
+        }
+    }
+}
+
+struct IngressRetryState {
+    consecutive_failures: u64,
+    current_delay: std::time::Duration,
+    last_error: Option<String>,
+}
+
+impl IngressRetryState {
+    fn new(poll_interval: std::time::Duration) -> Self {
+        Self {
+            consecutive_failures: 0,
+            current_delay: poll_interval,
+            last_error: None,
+        }
+    }
+
+    fn on_failure(
+        &mut self,
+        error: &str,
+        poll_interval: std::time::Duration,
+    ) -> IngressRetryDecision {
+        let same_error = self.last_error.as_deref() == Some(error);
+        let previous_delay = self.current_delay;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.current_delay = if self.consecutive_failures >= INGRESS_DEGRADED_THRESHOLD {
+            INGRESS_RETRY_CAP
+        } else if self.consecutive_failures == 1 {
+            poll_interval.min(INGRESS_RETRY_CAP)
+        } else {
+            self.current_delay.saturating_mul(2).min(INGRESS_RETRY_CAP)
+        };
+        self.last_error = Some(error.to_string());
+
+        let log = if self.consecutive_failures == 1 {
+            Some(IngressRetryLog::Failed {
+                error: error.to_string(),
+            })
+        } else if self.consecutive_failures == INGRESS_DEGRADED_THRESHOLD {
+            Some(IngressRetryLog::Degraded {
+                consecutive_failures: self.consecutive_failures,
+                delay: self.current_delay,
+                error: error.to_string(),
+            })
+        } else if !same_error {
+            Some(IngressRetryLog::ErrorChanged {
+                consecutive_failures: self.consecutive_failures,
+                delay: self.current_delay,
+                error: error.to_string(),
+            })
+        } else if self.current_delay > previous_delay {
+            Some(IngressRetryLog::BackoffIncreased {
+                consecutive_failures: self.consecutive_failures,
+                delay: self.current_delay,
+            })
+        } else {
+            None
+        };
+        IngressRetryDecision {
+            delay: self.current_delay,
+            log,
+        }
+    }
+
+    fn on_success(&mut self, poll_interval: std::time::Duration) -> IngressRetryDecision {
+        let failed_polls = self.consecutive_failures;
+        self.consecutive_failures = 0;
+        self.current_delay = poll_interval;
+        self.last_error = None;
+        IngressRetryDecision {
+            delay: self.current_delay,
+            log: (failed_polls > 0).then_some(IngressRetryLog::Recovered { failed_polls }),
         }
     }
 }
@@ -443,6 +589,120 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ingress_retry_state_grows_until_degraded_cap() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::handle_ingress::IngressRetryState::new(poll_interval);
+
+        let first = state.on_failure("history store failed", poll_interval);
+        assert_eq!(first.delay, poll_interval);
+        assert_eq!(
+            first.log,
+            Some(crate::daemon::handle_ingress::IngressRetryLog::Failed {
+                error: "history store failed".to_string(),
+            })
+        );
+
+        for (count, delay) in [
+            (2, std::time::Duration::from_millis(500)),
+            (3, std::time::Duration::from_secs(1)),
+            (4, std::time::Duration::from_secs(2)),
+        ] {
+            let decision = state.on_failure("history store failed", poll_interval);
+            assert_eq!(decision.delay, delay);
+            assert_eq!(
+                decision.log,
+                Some(
+                    crate::daemon::handle_ingress::IngressRetryLog::BackoffIncreased {
+                        consecutive_failures: count,
+                        delay,
+                    }
+                )
+            );
+        }
+
+        let degraded = state.on_failure("history store failed", poll_interval);
+        assert_eq!(
+            degraded.delay,
+            crate::daemon::handle_ingress::INGRESS_RETRY_CAP
+        );
+        assert_eq!(
+            degraded.log,
+            Some(crate::daemon::handle_ingress::IngressRetryLog::Degraded {
+                consecutive_failures: 5,
+                delay: crate::daemon::handle_ingress::INGRESS_RETRY_CAP,
+                error: "history store failed".to_string(),
+            })
+        );
+        assert!(
+            degraded
+                .log
+                .as_ref()
+                .unwrap()
+                .message(degraded.delay)
+                .contains("adapter degraded after 5 consecutive failed polls")
+        );
+
+        let capped = state.on_failure("history store failed", poll_interval);
+        assert_eq!(
+            capped.delay,
+            crate::daemon::handle_ingress::INGRESS_RETRY_CAP
+        );
+        assert_eq!(capped.log, None);
+
+        let changed = state.on_failure("replacement failure", poll_interval);
+        assert_eq!(
+            changed.log,
+            Some(
+                crate::daemon::handle_ingress::IngressRetryLog::ErrorChanged {
+                    consecutive_failures: 7,
+                    delay: crate::daemon::handle_ingress::INGRESS_RETRY_CAP,
+                    error: "replacement failure".to_string(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn ingress_retry_state_logs_changed_error_and_resets_on_success() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::handle_ingress::IngressRetryState::new(poll_interval);
+
+        state.on_failure("first error", poll_interval);
+        let changed = state.on_failure("second error", poll_interval);
+        assert_eq!(changed.delay, std::time::Duration::from_millis(500));
+        assert_eq!(
+            changed.log,
+            Some(
+                crate::daemon::handle_ingress::IngressRetryLog::ErrorChanged {
+                    consecutive_failures: 2,
+                    delay: std::time::Duration::from_millis(500),
+                    error: "second error".to_string(),
+                }
+            )
+        );
+
+        let recovered = state.on_success(poll_interval);
+        assert_eq!(recovered.delay, poll_interval);
+        assert_eq!(
+            recovered.log,
+            Some(crate::daemon::handle_ingress::IngressRetryLog::Recovered { failed_polls: 2 })
+        );
+
+        let healthy = state.on_success(poll_interval);
+        assert_eq!(healthy.delay, poll_interval);
+        assert_eq!(healthy.log, None);
+
+        let failed_again = state.on_failure("first after recovery", poll_interval);
+        assert_eq!(failed_again.delay, poll_interval);
+        assert_eq!(
+            failed_again.log,
+            Some(crate::daemon::handle_ingress::IngressRetryLog::Failed {
+                error: "first after recovery".to_string(),
+            })
+        );
+    }
 
     #[test]
     fn rc5_spawned_and_oldest_joined_payloads_decode_as_a_settlement() {

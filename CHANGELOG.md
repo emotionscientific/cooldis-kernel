@@ -22,6 +22,12 @@
   replayed, and surface operations are not also exposed through raw
   virtual-bash operation commands.
 
+### Fixes
+
+- The serve thread-handle ingress adapter now backs off persistent history-store
+  failures to a 60 second retry interval, logs only retry state transitions,
+  reports degradation, and reports recovery without exiting the serve process.
+
 ## v0.5.1 (2026-08-26)
 
 ### Tool kits
