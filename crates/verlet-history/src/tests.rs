@@ -1600,7 +1600,7 @@ fn turn_failed_routes_as_model_trace_without_analytics_aggregation() {
                 crate::TurnFailureErrorClass::Runner,
                 None,
                 None,
-                "runner failed",
+                "x".repeat(crate::TURN_FAILED_MESSAGE_MAX_BYTES + 100),
                 0,
             ))
             .unwrap(),
@@ -1618,9 +1618,26 @@ fn turn_failed_routes_as_model_trace_without_analytics_aggregation() {
             .contains(&crate::StreamRouteProfile::ModelTrace)
     );
     assert!(
+        decision
+            .routes
+            .contains(&crate::StreamRouteProfile::BrowserSafeProjection)
+    );
+    assert!(
         !decision
             .routes
             .contains(&crate::StreamRouteProfile::AnalyticsAggregate)
+    );
+    let envelope = record.to_stream_record_v1();
+    let projected: crate::TurnFailedPayload =
+        serde_json::from_value(envelope.payload.clone()).unwrap();
+    assert_eq!(
+        projected.message.len(),
+        crate::TURN_FAILED_MESSAGE_MAX_BYTES
+    );
+    assert_eq!(
+        envelope.payload,
+        serde_json::to_value(projected).unwrap(),
+        "browser-safe and model-trace routing must carry only the bounded journal payload"
     );
 }
 

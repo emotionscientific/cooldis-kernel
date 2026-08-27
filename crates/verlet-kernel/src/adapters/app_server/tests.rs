@@ -11472,6 +11472,70 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
         waiting["data"][0]["approvalId"].as_str(),
         Some("approval-1")
     );
+    session_store
+        .append_events(
+            &control_stream_id,
+            vec![verlet_history::NewEventRecord::discharged(
+                lifecycle.coordinates.clone(),
+                verlet_history::EventKind::TurnWaiting,
+                serde_json::json!({
+                    "schema": verlet_history::EventKind::TurnWaiting.payload_schema_id(),
+                    "turn_id": "turn-failed",
+                    "subject": { "turn_id": "turn-failed", "call_id": "call-failed" },
+                    "snapshot_id": "snapshot-failed",
+                    "waiting_on_event_id": suspended_event_id.to_string(),
+                    "reason": "synthetic failed wait",
+                    "continuation": "tool.call",
+                }),
+                verlet_history::EventProvenance {
+                    source_streams: vec![thread_stream_id.clone()],
+                    source_event_ids: vec![suspended_event_id],
+                    discharged_by: Some("scheduler:test-failed-wait".to_string()),
+                    function: Some("tool_wait/v1".to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    session_store
+        .append_events(
+            &thread_stream_id,
+            vec![verlet_history::NewEventRecord::discharged(
+                lifecycle.coordinates.clone(),
+                verlet_history::EventKind::TurnFailed,
+                serde_json::to_value(verlet_history::TurnFailedPayload::new(
+                    "turn-failed",
+                    verlet_history::TurnFailureErrorClass::Runner,
+                    None,
+                    None,
+                    "runner failed",
+                    0,
+                ))
+                .unwrap(),
+                verlet_history::EventProvenance {
+                    source_streams: vec![thread_stream_id.clone()],
+                    discharged_by: Some("propagator:test-failed-turn".to_string()),
+                    function: Some("turn_fail/v1".to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    let waiting_after_failure = app
+        .dispatch_request(
+            &connection,
+            "thread/waiting/list",
+            Some(serde_json::json!({ "threadId": thread_id })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waiting_after_failure["data"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        waiting_after_failure["data"][0]["turnId"].as_str(),
+        Some("turn-pending")
+    );
     let resolved = app
         .dispatch_request(
             &connection,

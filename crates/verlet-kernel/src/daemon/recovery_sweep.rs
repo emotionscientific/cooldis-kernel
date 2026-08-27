@@ -333,6 +333,10 @@ pub(crate) fn project_child_terminal_record(
             verlet_history::ThreadTerminalState::Failed,
             Some("child thread failed"),
         ),
+        verlet_history::EventKind::TurnFailed => (
+            verlet_history::ThreadTerminalState::Failed,
+            Some("child turn failed"),
+        ),
         _ => return None,
     };
     Some(ChildTerminalTruth {
@@ -1188,6 +1192,34 @@ mod tests {
         )
         .await;
 
+        let failed_parent = coordinates("tenant", "user", "failed-parent");
+        let failed_child = coordinates("tenant", "user", "failed-child");
+        seed_thread_binding(&store, &failed_parent, &failed_child, "failed-dispatch").await;
+        store
+            .append_events(
+                &verlet_history::EventStreamId::for_thread(&failed_child),
+                vec![verlet_history::NewEventRecord::discharged(
+                    failed_child.clone(),
+                    verlet_history::EventKind::TurnFailed,
+                    serde_json::to_value(verlet_history::TurnFailedPayload::new(
+                        "thread-spawn-failed-dispatch",
+                        verlet_history::TurnFailureErrorClass::ProviderHttp,
+                        Some("openai".to_string()),
+                        Some(503),
+                        "provider HTTP status 503",
+                        2,
+                    ))
+                    .unwrap(),
+                    verlet_history::EventProvenance {
+                        discharged_by: Some("runtime:test-child".to_string()),
+                        function: Some("turn_fail/v1".to_string()),
+                        ..verlet_history::EventProvenance::default()
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+
         let dead_parent = coordinates("tenant", "user", "dead-parent");
         let dead_child = coordinates("tenant", "user", "dead-child");
         seed_thread_binding(&store, &dead_parent, &dead_child, "dead-dispatch").await;
@@ -1210,7 +1242,7 @@ mod tests {
         assert_eq!(
             sweep.run_once().await.unwrap(),
             crate::daemon::recovery_sweep::StartupRecoveryReceipt {
-                thread_joins: 2,
+                thread_joins: 3,
                 process_outcomes: 0,
             }
         );
@@ -1237,6 +1269,16 @@ mod tests {
                 .result_digest
                 .as_deref()
                 .is_some_and(|reason| reason.contains("runtime death"))
+        );
+        let durable_failure = joined_payloads(&store, &failed_parent).await;
+        assert_eq!(durable_failure.len(), 1);
+        assert_eq!(
+            durable_failure[0].0.terminal_state,
+            verlet_history::ThreadTerminalState::Failed
+        );
+        assert_eq!(
+            durable_failure[0].0.result_digest.as_deref(),
+            Some("child turn failed")
         );
         assert!(joined_payloads(&store, &queued_parent).await.is_empty());
         assert_eq!(

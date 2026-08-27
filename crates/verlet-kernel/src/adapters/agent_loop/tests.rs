@@ -3016,12 +3016,179 @@ async fn retry_exhaustion_journals_exactly_one_turn_failed() {
     );
     assert_eq!(payload.provider_id.as_deref(), Some("openai"));
     assert_eq!(payload.http_status, None);
-    assert!(payload.message.contains("outage-3"));
+    assert_eq!(payload.message, "provider HTTP transport failed");
     assert_eq!(payload.retries_attempted, 2);
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cancellation_during_provider_retry_sleep_journals_no_turn_failed() {
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![
+        ScriptedResponse::Error(verlet_provider::ProviderError::Http(
+            "temporary outage".to_string(),
+        )),
+        ScriptedResponse::Response(response_text("unused reply")),
+    ]));
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    config.max_tokens = 128;
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_model_request_retry_policy(
+                crate::adapters::agent_loop::ModelRequestRetryPolicy::fixed(2, 60_000),
+            ),
+    );
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
+    let store = host.runtime_store();
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new(
+                "tenant_a",
+                "user_1",
+                "cancel-retry-sleep",
+            ),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "hello")
+        .await
+        .unwrap();
+    loop {
+        let event = events.recv().await.unwrap();
+        if matches!(
+            event,
+            crate::kernel::runtime_host::runtime_api::ThreadEvent::Runtime {
+                event: crate::kernel::runtime_host::runtime_events::RuntimeEvent {
+                    kind: crate::kernel::runtime_host::runtime_events::RuntimeEventKind::ModelRequestRetryScheduled { .. },
+                    ..
+                },
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    host.cancel(thread.context().coordinates.thread_id, "cancel retry sleep")
+        .await
+        .unwrap();
+    assert_cancelled(&mut events, "cancel retry sleep").await;
+
+    assert_eq!(
+        thread.status(),
+        verlet_runtime_contracts::ThreadStatus::Idle
+    );
+    assert_eq!(client.requests().len(), 1);
+    assert!(
+        turn_failed_events(store.as_ref(), &thread.context().coordinates)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn concurrent_turn_failure_replay_appends_exactly_one_outcome() {
+    let inner = std::sync::Arc::new(verlet_history::InMemorySessionStore::new());
+    let store = std::sync::Arc::new(
+        crate::support::fault::FaultingRuntimeStore::new(inner.clone())
+            .delay_nth_after("read_events", 1, tokio::time::Duration::from_millis(1))
+            .delay_nth_after("read_events", 2, tokio::time::Duration::from_millis(1)),
+    );
+    let services = crate::kernel::runtime_host::runtime_services::RuntimeServices::new(
+        store.clone(),
+        crate::kernel::runtime_host::runtime_services::RuntimeExecutionPolicy::default(),
+    );
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new(
+        "tenant_a",
+        "user_1",
+        "concurrent-turn-failure",
+    );
+    let failure = crate::adapters::agent_loop::TerminalTurnFailure::provider(
+        "openai".to_string(),
+        crate::adapters::agent_loop::classify_provider_error(
+            verlet_provider::ProviderError::HttpStatus {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                body: "upstream body".to_string(),
+            },
+        ),
+        1,
+    );
+
+    let first_services = services.clone();
+    let first_coordinates = coordinates.clone();
+    let first_failure = failure.clone();
+    let first = tokio::spawn(async move {
+        crate::adapters::agent_loop::append_turn_failed_event(
+            &first_services,
+            &first_coordinates,
+            "turn-1",
+            None,
+            &first_failure,
+        )
+        .await
+    });
+    let second_services = services.clone();
+    let second_coordinates = coordinates.clone();
+    let second_failure = failure.clone();
+    let second = tokio::spawn(async move {
+        crate::adapters::agent_loop::append_turn_failed_event(
+            &second_services,
+            &second_coordinates,
+            "turn-1",
+            None,
+            &second_failure,
+        )
+        .await
+    });
+
+    while store.call_count("read_events") < 2 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(tokio::time::Duration::from_millis(1)).await;
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+
+    let failed = turn_failed_events(inner.as_ref(), &coordinates).await;
+    assert_eq!(failed.len(), 1);
+    assert_eq!(first.id, failed[0].id);
+    assert_eq!(second.id, failed[0].id);
+}
+
+#[test]
+fn provider_journal_messages_do_not_preserve_transport_decode_or_stream_details() {
+    for (error, expected) in [
+        (
+            verlet_provider::ProviderError::Http(
+                "request to https://user:secret@example.test failed".to_string(),
+            ),
+            "provider HTTP transport failed",
+        ),
+        (
+            verlet_provider::ProviderError::Decode(
+                "raw response body and header Authorization: secret".to_string(),
+            ),
+            "provider response decode failed",
+        ),
+    ] {
+        let classified = crate::adapters::agent_loop::classify_provider_error(error);
+        assert_eq!(classified.journal_message, expected);
+        assert_ne!(classified.message, classified.journal_message);
+    }
+
+    let stream = crate::adapters::agent_loop::stream_assembly_error(
+        "raw streamed response body and stack trace",
+    );
+    assert_eq!(stream.journal_message, "provider stream assembly failed");
+    assert_ne!(stream.message, stream.journal_message);
+}
+
 #[tokio::test]
-async fn terminal_provider_message_is_journaled_at_most_1024_bytes() {
+async fn terminal_provider_transport_message_is_normalized() {
     let client = std::sync::Arc::new(ScriptedClient::new(vec![ScriptedResponse::Error(
         verlet_provider::ProviderError::Http("x".repeat(2_048)),
     )]));
@@ -3045,13 +3212,7 @@ async fn terminal_provider_message_is_journaled_at_most_1024_bytes() {
     assert_eq!(failed.len(), 1);
     let payload: verlet_history::TurnFailedPayload =
         serde_json::from_value(failed[0].payload.clone()).unwrap();
-    assert_eq!(payload.message.as_bytes().len(), 1024);
-    assert!(payload.message.is_char_boundary(payload.message.len()));
-    assert!(
-        payload
-            .message
-            .starts_with("provider HTTP request failed: ")
-    );
+    assert_eq!(payload.message, "provider HTTP transport failed");
 }
 
 #[tokio::test]

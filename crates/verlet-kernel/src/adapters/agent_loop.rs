@@ -2204,61 +2204,63 @@ fn model_request_id(
 
 fn classify_provider_error(error: verlet_provider::ProviderError) -> ModelRequestAttemptError {
     let message = error.to_string();
-    let (class, terminal_class, http_status, journal_message) = match error {
-        verlet_provider::ProviderError::Cancelled => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Cancelled,
-            verlet_history::TurnFailureErrorClass::Runner,
-            None,
-            "provider request cancelled".to_string(),
-        ),
+    match error {
+        verlet_provider::ProviderError::Cancelled => ModelRequestAttemptError {
+            class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Cancelled,
+            terminal_class: verlet_history::TurnFailureErrorClass::Runner,
+            http_status: None,
+            message,
+            journal_message: "provider request cancelled".to_string(),
+        },
         verlet_provider::ProviderError::UnsupportedCapability { .. }
-        | verlet_provider::ProviderError::ApiMismatch { .. } => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability,
-            verlet_history::TurnFailureErrorClass::Runner,
-            None,
-            message.clone(),
-        ),
-        verlet_provider::ProviderError::Http(_) => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
-            verlet_history::TurnFailureErrorClass::ProviderTransport,
-            None,
-            message.clone(),
-        ),
-        verlet_provider::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited,
-            verlet_history::TurnFailureErrorClass::ProviderHttp,
-            Some(status.as_u16()),
-            format!("provider HTTP status {}", status.as_u16()),
-        ),
+        | verlet_provider::ProviderError::ApiMismatch { .. } => ModelRequestAttemptError {
+            class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability,
+            terminal_class: verlet_history::TurnFailureErrorClass::Runner,
+            http_status: None,
+            message,
+            journal_message: "provider request capability unsupported".to_string(),
+        },
+        verlet_provider::ProviderError::Http(_) => ModelRequestAttemptError {
+            class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
+            terminal_class: verlet_history::TurnFailureErrorClass::ProviderTransport,
+            http_status: None,
+            message,
+            journal_message: "provider HTTP transport failed".to_string(),
+        },
+        verlet_provider::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => {
+            ModelRequestAttemptError {
+                class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited,
+                terminal_class: verlet_history::TurnFailureErrorClass::ProviderHttp,
+                http_status: Some(status.as_u16()),
+                message,
+                journal_message: format!("provider HTTP status {}", status.as_u16()),
+            }
+        }
         verlet_provider::ProviderError::HttpStatus { status, .. }
             if status.is_server_error() || matches!(status.as_u16(), 408 | 409 | 425) =>
         {
-            (
-                verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
-                verlet_history::TurnFailureErrorClass::ProviderHttp,
-                Some(status.as_u16()),
-                format!("provider HTTP status {}", status.as_u16()),
-            )
+            ModelRequestAttemptError {
+                class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
+                terminal_class: verlet_history::TurnFailureErrorClass::ProviderHttp,
+                http_status: Some(status.as_u16()),
+                message,
+                journal_message: format!("provider HTTP status {}", status.as_u16()),
+            }
         }
-        verlet_provider::ProviderError::Decode(_) => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
-            verlet_history::TurnFailureErrorClass::ProviderTransport,
-            None,
-            message.clone(),
-        ),
-        verlet_provider::ProviderError::HttpStatus { status, .. } => (
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
-            verlet_history::TurnFailureErrorClass::ProviderHttp,
-            Some(status.as_u16()),
-            format!("provider HTTP status {}", status.as_u16()),
-        ),
-    };
-    ModelRequestAttemptError {
-        class,
-        terminal_class,
-        http_status,
-        message,
-        journal_message,
+        verlet_provider::ProviderError::Decode(_) => ModelRequestAttemptError {
+            class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
+            terminal_class: verlet_history::TurnFailureErrorClass::ProviderTransport,
+            http_status: None,
+            message,
+            journal_message: "provider response decode failed".to_string(),
+        },
+        verlet_provider::ProviderError::HttpStatus { status, .. } => ModelRequestAttemptError {
+            class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
+            terminal_class: verlet_history::TurnFailureErrorClass::ProviderHttp,
+            http_status: Some(status.as_u16()),
+            message,
+            journal_message: format!("provider HTTP status {}", status.as_u16()),
+        },
     }
 }
 
@@ -2268,7 +2270,7 @@ fn stream_assembly_error(message: impl Into<String>) -> ModelRequestAttemptError
         class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::StreamAssembly,
         terminal_class: verlet_history::TurnFailureErrorClass::ProviderTransport,
         http_status: None,
-        journal_message: message.clone(),
+        journal_message: "provider stream assembly failed".to_string(),
         message,
     }
 }
@@ -5810,27 +5812,6 @@ async fn append_turn_failed_event(
     source_event_id: Option<verlet_history::EventRecordId>,
     failure: &TerminalTurnFailure,
 ) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
-    let existing = services
-        .runtime_store()
-        .read_events(
-            &verlet_history::EventStreamId::for_thread(coordinates),
-            None,
-        )
-        .await
-        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
-        .into_iter()
-        .filter(|event| {
-            event.kind == verlet_history::EventKind::TurnFailed
-                && event
-                    .payload
-                    .get("turn_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(turn_id)
-        })
-        .max_by_key(|event| event.sequence.get());
-    if let Some(existing) = existing {
-        return Ok(existing);
-    }
     let payload = verlet_history::TurnFailedPayload::new(
         turn_id,
         failure.error_class,
@@ -5844,23 +5825,63 @@ async fn append_turn_failed_event(
             "turn.failed payload codec failed: {err}"
         ))
     })?;
-    services
-        .append_thread_event(
-            coordinates,
-            verlet_history::NewEventRecord::discharged(
-                coordinates.clone(),
-                verlet_history::EventKind::TurnFailed,
-                payload,
-                verlet_history::EventProvenance {
-                    source_streams: vec![verlet_history::EventStreamId::for_thread(coordinates)],
-                    source_event_ids: source_event_id.into_iter().collect(),
-                    discharged_by: Some("propagator:agent-loop".to_string()),
-                    function: Some("turn_fail/v1".to_string()),
-                    ..verlet_history::EventProvenance::default()
-                },
-            ),
-        )
-        .await
+    let stream_id = verlet_history::EventStreamId::for_thread(coordinates);
+    let record = verlet_history::NewEventRecord::discharged(
+        coordinates.clone(),
+        verlet_history::EventKind::TurnFailed,
+        payload,
+        verlet_history::EventProvenance {
+            source_streams: vec![stream_id.clone()],
+            source_event_ids: source_event_id.into_iter().collect(),
+            discharged_by: Some("propagator:agent-loop".to_string()),
+            function: Some("turn_fail/v1".to_string()),
+            ..verlet_history::EventProvenance::default()
+        },
+    );
+    loop {
+        let events = services
+            .runtime_store()
+            .read_events(&stream_id, None)
+            .await
+            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?;
+        if let Some(existing) = events.iter().find(|event| {
+            event.kind == verlet_history::EventKind::TurnFailed
+                && event
+                    .payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(turn_id)
+        }) {
+            return Ok(existing.clone());
+        }
+        let expected_next_sequence = events
+            .last()
+            .map(|event| verlet_history::EventSequence::new(event.sequence.get().saturating_add(1)))
+            .unwrap_or_else(|| verlet_history::EventSequence::new(1));
+        match services
+            .runtime_store()
+            .append_events_fenced(&stream_id, expected_next_sequence, vec![record.clone()])
+            .await
+        {
+            Ok(mut appended) if appended.len() == 1 => {
+                let appended = appended.remove(0);
+                services.run_bound_couplings(vec![appended.clone()]).await?;
+                return Ok(appended);
+            }
+            Ok(appended) => {
+                return Err(crate::kernel::runtime_host::VerletError::History(format!(
+                    "turn.failed fenced append returned {} records",
+                    appended.len()
+                )));
+            }
+            Err(verlet_history::HistoryError::AppendFenceConflict { .. }) => continue,
+            Err(err) => {
+                return Err(crate::kernel::runtime_host::VerletError::History(
+                    err.to_string(),
+                ));
+            }
+        }
+    }
 }
 
 async fn append_turn_resumed_event(
