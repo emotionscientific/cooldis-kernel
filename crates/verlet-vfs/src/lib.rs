@@ -559,6 +559,46 @@ impl HostFileSystem {
         let _ = path;
         Ok(())
     }
+
+    #[cfg(unix)]
+    fn host_path_is_special(&self, path: &std::path::Path) -> std::io::Result<bool> {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let normalized = normalize_vfs_path(path);
+        let relative = normalized.strip_prefix("/").unwrap_or(normalized.as_path());
+        let file_type = std::fs::symlink_metadata(self.root.join(relative))?.file_type();
+        Ok(file_type.is_socket()
+            || file_type.is_fifo()
+            || file_type.is_block_device()
+            || file_type.is_char_device())
+    }
+
+    #[cfg(unix)]
+    async fn reject_special_file_open(
+        &self,
+        path: &std::path::Path,
+        allow_missing: bool,
+    ) -> bashkit::Result<()> {
+        match self.inner.stat(path).await {
+            Ok(_) => {}
+            Err(bashkit::Error::Io(error))
+                if allow_missing && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+        match self.host_path_is_special(path) {
+            Ok(true) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("path is not a regular file: {}", path.display()),
+            )
+            .into()),
+            Ok(false) => Ok(()),
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 impl std::fmt::Debug for HostFileSystem {
@@ -585,18 +625,24 @@ impl bashkit::FileSystemExt for HostFileSystem {
 impl bashkit::FileSystem for HostFileSystem {
     async fn read_file(&self, path: &std::path::Path) -> bashkit::Result<Vec<u8>> {
         let _guard = self.operation_lock.lock().await;
+        #[cfg(unix)]
+        self.reject_special_file_open(path, false).await?;
         self.inner.read_file(path).await
     }
 
     async fn write_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
+        #[cfg(unix)]
+        self.reject_special_file_open(path, true).await?;
         self.inner.write_file(path, content).await
     }
 
     async fn append_file(&self, path: &std::path::Path, content: &[u8]) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
+        #[cfg(unix)]
+        self.reject_special_file_open(path, true).await?;
         self.inner.append_file(path, content).await
     }
 
@@ -612,12 +658,34 @@ impl bashkit::FileSystem for HostFileSystem {
 
     async fn stat(&self, path: &std::path::Path) -> bashkit::Result<bashkit::Metadata> {
         let _guard = self.operation_lock.lock().await;
-        self.inner.stat(path).await
+        let mut metadata = self.inner.stat(path).await?;
+        #[cfg(unix)]
+        if metadata.file_type == bashkit::FileType::File && self.host_path_is_special(path)? {
+            metadata.file_type = bashkit::FileType::Fifo;
+            metadata.size = 0;
+        }
+        Ok(metadata)
     }
 
     async fn read_dir(&self, path: &std::path::Path) -> bashkit::Result<Vec<bashkit::DirEntry>> {
         let _guard = self.operation_lock.lock().await;
-        self.inner.read_dir(path).await
+        let mut entries = self.inner.read_dir(path).await?;
+        #[cfg(unix)]
+        for entry in &mut entries {
+            if entry.metadata.file_type != bashkit::FileType::File {
+                continue;
+            }
+            match self.host_path_is_special(&path.join(&entry.name)) {
+                Ok(true) => {
+                    entry.metadata.file_type = bashkit::FileType::Fifo;
+                    entry.metadata.size = 0;
+                }
+                Ok(false) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(entries)
     }
 
     async fn exists(&self, path: &std::path::Path) -> bashkit::Result<bool> {
@@ -633,6 +701,8 @@ impl bashkit::FileSystem for HostFileSystem {
     async fn copy(&self, from: &std::path::Path, to: &std::path::Path) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(to)?;
+        #[cfg(unix)]
+        self.reject_special_file_open(from, false).await?;
         self.inner.copy(from, to).await
     }
 
@@ -663,6 +733,8 @@ impl bashkit::FileSystem for HostFileSystem {
     ) -> bashkit::Result<()> {
         let _guard = self.operation_lock.lock().await;
         self.reject_external_hard_link_mutation(path)?;
+        #[cfg(unix)]
+        self.reject_special_file_open(path, false).await?;
         self.inner.set_modified_time(path, time).await
     }
 }

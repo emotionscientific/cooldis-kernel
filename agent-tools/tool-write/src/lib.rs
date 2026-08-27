@@ -50,6 +50,15 @@ pub fn run(
     let input_path = args.path;
     let path = verlet_tool_core::normalize_tool_path(&input_path);
     let replaced = fs.exists(&path).unwrap_or(false);
+    if fs
+        .stat(&path)
+        .is_ok_and(|stat| !stat.is_file && !stat.is_dir)
+    {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "Path is not a file: {}",
+            path.display()
+        )));
+    }
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -144,6 +153,21 @@ mod tests {
         let error = crate::run(args("", "content"), &fs(root.path())).unwrap_err();
 
         assert!(!error.to_string().contains("is not a file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_fifo_before_opening_it() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(root.path().join("named.pipe"))
+            .status()
+            .unwrap()
+            .success());
+
+        let error = crate::run(args("named.pipe", "blocked"), &fs(root.path())).unwrap_err();
+
+        assert_eq!(error.to_string(), "Path is not a file: named.pipe");
     }
 
     #[test]

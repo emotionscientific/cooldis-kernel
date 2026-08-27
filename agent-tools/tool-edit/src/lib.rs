@@ -336,6 +336,12 @@ pub fn run(
     let stat = fs
         .stat(&path)
         .map_err(|error| edit_access_error(&path_display, error))?;
+    if !stat.is_file && !stat.is_dir {
+        return Err(edit_access_error(
+            &path_display,
+            verlet_tool_core::ToolFsError::Io("path is not a regular file".to_owned()),
+        ));
+    }
     if stat.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
         return Err(edit_access_error(
             &path_display,
@@ -1159,6 +1165,28 @@ mod tests {
             "Could not edit file: missing.txt. Error code: ENOENT."
         );
         assert!(!directory.to_string().contains("is not a file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_rejected_before_edit_opens_it() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(root.path().join("named.pipe"))
+            .status()
+            .unwrap()
+            .success());
+
+        let error = crate::run(
+            args("named.pipe", &[("hello", "goodbye")]),
+            &fs(root.path()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Could not edit file: named.pipe. path is not a regular file."
+        );
     }
 
     #[test]

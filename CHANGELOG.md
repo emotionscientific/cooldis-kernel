@@ -22,11 +22,14 @@
   replayed, and surface operations are not also exposed through raw
   virtual-bash operation commands.
 - Pi-kit file search now skips non-UTF-8, NUL-containing, and oversized files
-  during grep walks, bounds grep, read, edit, and find ignore-file reads to 8 MiB,
+  during grep walks, skips Unix special files and per-file read failures during
+  directory walks, bounds grep, read, edit, and find ignore-file reads to 8 MiB,
   rejects mismatched file and directory path kinds through structured tool
   errors, and keeps native and wasm output envelopes identical for those cases.
-  The default Wasm fuel budget is now 10 billion: measured file processing costs
-  about 154 fuel per byte, so a maximal read fits several times over and
+  Directly named grep files still surface read errors, and directly named
+  special files are rejected before opening so FIFOs never wait for a peer.
+  The default Wasm fuel budget is now 10 billion: measured file processing
+  costs about 154 fuel per byte, so a maximal read fits several times over and
   multi-file grep walks across tens of MiB complete while runaway guests remain
   bounded to seconds of CPU.
 
