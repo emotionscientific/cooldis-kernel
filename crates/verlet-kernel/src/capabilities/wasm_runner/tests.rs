@@ -1819,12 +1819,19 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
+async fn wasm_pi_special_files_match_native_skip_and_error_envelopes() {
     let native = tempfile::tempdir().unwrap();
     let project = native.path().join("project");
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("input.txt"), "hello from text\n").unwrap();
     let _listener = std::os::unix::net::UnixListener::bind(project.join("verlet.sock")).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(project.join("named.pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
     let native_output = verlet_tool_grep::run(
         verlet_tool_grep::GrepArgs {
@@ -1843,12 +1850,32 @@ async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
     let native_direct_error = verlet_tool_grep::run(
         verlet_tool_grep::GrepArgs {
             pattern: "hello".to_owned(),
-            path: Some(std::path::PathBuf::from("project/verlet.sock")),
+            path: Some(std::path::PathBuf::from("project/named.pipe")),
             glob: None,
             ignore_case: false,
             literal: false,
             context: None,
             limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let native_read_error = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project/named.pipe"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let native_edit_error = verlet_tool_edit::run(
+        verlet_tool_edit::EditArgs {
+            path: std::path::PathBuf::from("project/named.pipe"),
+            edits: vec![verlet_tool_edit::Edit {
+                old_text: "hello".to_owned(),
+                new_text: "goodbye".to_owned(),
+            }],
         },
         &native_fs,
     )
@@ -1867,17 +1894,67 @@ async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
     let vfs = std::sync::Arc::new(verlet_vfs::VerletVfs::new(std::sync::Arc::new(
         bashkit::InMemoryFs::new(),
     )));
-    let host = verlet_vfs::HostFileSystem::read_only(native.path()).unwrap();
+    let host = verlet_vfs::HostFileSystem::read_write(native.path()).unwrap();
     vfs.mount("/workspace", std::sync::Arc::new(host)).unwrap();
-    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+    assert_eq!(
+        vfs.stat(std::path::Path::new("/workspace/project/named.pipe"))
+            .await
+            .unwrap()
+            .file_type,
+        bashkit::FileType::Fifo
+    );
+    // tight-timeout: mounted special-file precheck must complete without a peer
+    let mounted_read = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        vfs.read_file(std::path::Path::new("/workspace/project/named.pipe")),
+    )
+    .await
+    .expect("mounted FIFO read must not wait for a writer");
+    assert!(mounted_read.is_err());
+    let stat_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_vfs_tools_guest(),
+        ))
+        .with_vfs(vfs.clone()),
+    )
+    .unwrap();
+    let search_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             wasm_search_tool_guest(),
         ))
-        .with_vfs(vfs),
+        .with_vfs(vfs.clone()),
     )
     .unwrap();
+    let read_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_read_tool_guest(),
+        ))
+        .with_vfs(vfs.clone()),
+    )
+    .unwrap();
+    let edit_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_edit_tool_guest(),
+        ))
+        .with_vfs(vfs)
+        .with_capability_grant(verlet_wasm::runner::FS_WRITE_CAPABILITY),
+    )
+    .unwrap();
+    let direct_operation_timeout = std::time::Duration::from_secs(30);
 
-    let walked = factory
+    let stat = tokio::time::timeout(
+        direct_operation_timeout,
+        stat_factory.invoke_operation_bytes("stat", b"/workspace/project/named.pipe".to_vec()),
+    )
+    .await
+    .expect("FIFO stat through the guest ABI must not wait for a peer")
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stat.output).unwrap(),
+        serde_json::json!({"kind": "other", "size": 0})
+    );
+
+    let walked = search_factory
         .invoke_operation_bytes(
             "grep",
             pi_tool_input(serde_json::json!({"pattern": "hello", "path": "project"})),
@@ -1886,7 +1963,7 @@ async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
         .unwrap();
     assert_eq!(walked.output, tool_success_envelope(native_output));
 
-    let find = factory
+    let find = search_factory
         .invoke_operation_bytes(
             "find",
             pi_tool_input(serde_json::json!({"pattern": "**", "path": "project"})),
@@ -1895,19 +1972,55 @@ async fn wasm_pi_grep_walk_skips_a_unix_socket_and_matches_native_envelope() {
         .unwrap();
     assert_eq!(find.output, tool_success_envelope(native_find));
 
-    let direct = factory
-        .invoke_operation_bytes(
+    let direct = tokio::time::timeout(
+        direct_operation_timeout,
+        search_factory.invoke_operation_bytes(
             "grep",
             pi_tool_input(serde_json::json!({
                 "pattern": "hello",
-                "path": "project/verlet.sock",
+                "path": "project/named.pipe",
             })),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("direct FIFO grep must not wait for a writer")
+    .unwrap();
     assert_eq!(
         direct.output,
         tool_error_envelope(native_direct_error.to_string())
+    );
+
+    let read = tokio::time::timeout(
+        direct_operation_timeout,
+        read_factory.invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project/named.pipe"})),
+        ),
+    )
+    .await
+    .expect("direct FIFO read must not wait for a writer")
+    .unwrap();
+    assert_eq!(
+        read.output,
+        tool_error_envelope(native_read_error.to_string())
+    );
+
+    let edit = tokio::time::timeout(
+        direct_operation_timeout,
+        edit_factory.invoke_operation_bytes(
+            "edit",
+            pi_tool_input(serde_json::json!({
+                "path": "project/named.pipe",
+                "edits": [{"oldText": "hello", "newText": "goodbye"}],
+            })),
+        ),
+    )
+    .await
+    .expect("direct FIFO edit must not wait for a writer")
+    .unwrap();
+    assert_eq!(
+        edit.output,
+        tool_error_envelope(native_edit_error.to_string())
     );
 }
 

@@ -567,6 +567,7 @@ impl StdFs {
 impl ToolFs for StdFs {
     fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ToolFsError> {
         let resolved = self.resolve(path)?;
+        reject_special_file_open(path, &resolved, false)?;
         std::fs::read(resolved).map_err(|error| map_io_error(path, error))
     }
 
@@ -576,6 +577,7 @@ impl ToolFs for StdFs {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ToolFsError> {
         let resolved = self.resolve(path)?;
+        reject_special_file_open(path, &resolved, false)?;
         let file = std::fs::File::open(resolved).map_err(|error| map_io_error(path, error))?;
         let read_limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
         let mut reader = std::io::Read::take(file, read_limit);
@@ -593,6 +595,7 @@ impl ToolFs for StdFs {
 
     fn write_file(&self, path: &std::path::Path, content: &[u8]) -> Result<(), ToolFsError> {
         let resolved = self.resolve(path)?;
+        reject_special_file_open(path, &resolved, true)?;
         std::fs::write(resolved, content).map_err(|error| map_io_error(path, error))
     }
 
@@ -648,6 +651,23 @@ impl ToolFs for StdFs {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(map_io_error(path, error)),
         }
+    }
+}
+
+#[cfg(feature = "std-fs")]
+fn reject_special_file_open(
+    path: &std::path::Path,
+    resolved: &std::path::Path,
+    allow_missing: bool,
+) -> Result<(), ToolFsError> {
+    match std::fs::metadata(resolved) {
+        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => Err(ToolFsError::Io(format!(
+            "path is not a regular file: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(map_io_error(path, error)),
     }
 }
 
@@ -910,6 +930,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reads_reject_a_fifo_before_waiting_for_a_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("named.pipe");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let writer_path = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::fs::write(writer_path, b"late writer").unwrap();
+        });
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = crate::ToolFs::read_file_bounded(
+            &fs,
+            std::path::Path::new("named.pipe"),
+            crate::MAX_FILE_BYTES,
+        );
+        let elapsed = started.elapsed();
+
+        let mut cleanup_reader = std::fs::File::open(&fifo).unwrap();
+        let mut cleanup_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut cleanup_reader, &mut cleanup_bytes).unwrap();
+        writer.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "{elapsed:?}"
+        );
     }
 
     #[test]

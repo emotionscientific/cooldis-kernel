@@ -106,8 +106,78 @@ async fn host_filesystem_reports_a_unix_socket_as_a_non_file_kind() {
     let fs = crate::HostFileSystem::read_only(&fixture).unwrap();
 
     let metadata = fs.stat(std::path::Path::new("/live.sock")).await.unwrap();
+    let listing = fs.read_dir(std::path::Path::new("/")).await.unwrap();
 
     assert_eq!(metadata.file_type, bashkit::FileType::Fifo);
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].name, "live.sock");
+    assert_eq!(listing[0].metadata.file_type, bashkit::FileType::Fifo);
+    let _ = std::fs::remove_dir_all(fixture);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_filesystem_rejects_fifo_io_without_waiting_for_a_peer() {
+    let fixture = unique_host_fs_root("fifo-io");
+    let fifo_path = fixture.join("named.pipe");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let fs = crate::HostFileSystem::read_write(&fixture).unwrap();
+
+    let metadata = fs.stat(std::path::Path::new("/named.pipe")).await.unwrap();
+    // tight-timeout: special-file precheck must complete without a peer
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fs.read_file(std::path::Path::new("/named.pipe")),
+    )
+    .await
+    .expect("FIFO read must not wait for a writer");
+    // tight-timeout: special-file precheck must complete without a peer
+    let write = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fs.write_file(std::path::Path::new("/named.pipe"), b"blocked"),
+    )
+    .await
+    .expect("FIFO write must not wait for a reader");
+    // tight-timeout: special-file precheck must complete without a peer
+    let append = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fs.append_file(std::path::Path::new("/named.pipe"), b"blocked"),
+    )
+    .await
+    .expect("FIFO append must not wait for a reader");
+    // tight-timeout: special-file precheck must complete without a peer
+    let copy = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fs.copy(
+            std::path::Path::new("/named.pipe"),
+            std::path::Path::new("/copy.txt"),
+        ),
+    )
+    .await
+    .expect("FIFO copy must not wait for a writer");
+    // tight-timeout: special-file precheck must complete without a peer
+    let set_modified_time = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fs.set_modified_time(
+            std::path::Path::new("/named.pipe"),
+            std::time::SystemTime::now(),
+        ),
+    )
+    .await
+    .expect("FIFO timestamp update must not wait for a writer");
+
+    assert_eq!(metadata.file_type, bashkit::FileType::Fifo);
+    assert!(read.is_err());
+    assert!(write.is_err());
+    assert!(append.is_err());
+    assert!(copy.is_err());
+    assert!(set_modified_time.is_err());
     let _ = std::fs::remove_dir_all(fixture);
 }
 

@@ -109,10 +109,12 @@ cargo build --manifest-path agent-tools/wasm/read/Cargo.toml \
   a structured error for files over the limit; offset/limit cannot bypass the
   ceiling because the current ABI has no seek or ranged-read operation. Find
   skips special entries and ignore-rule files that are oversized or fail while
-  being read. Edit preserves whole-file atomicity under the same ceiling and
-  returns a structured error without changing or silently skipping an
-  oversized target. Pi delegates grep to `rg` without this size ceiling and its
-  read and grep context paths can load whole files. The Wasm fuel budget is a
-  runaway guard, sized from the measured guest cost of about 154 fuel per file
-  byte so an 8 MiB read fits several times over and multi-file grep walks across
-  tens of MiB complete while runaway guests remain bounded to seconds of CPU.
+  being read. Direct file operations reject special entries before opening
+  them, so a FIFO cannot wait indefinitely for a peer. Edit preserves
+  whole-file atomicity under the same ceiling and returns a structured error
+  without changing or silently skipping an oversized target. Pi delegates grep
+  to `rg` without this size ceiling and its read and grep context paths can load
+  whole files. The Wasm fuel budget is a runaway guard, sized from the measured
+  guest cost of about 154 fuel per file byte so an 8 MiB read fits several times
+  over and multi-file grep walks across tens of MiB complete while runaway
+  guests remain bounded to seconds of CPU.
