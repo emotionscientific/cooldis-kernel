@@ -114,7 +114,9 @@ impl TenantRuntimeContext {
     }
 
     pub fn session_history_path(&self) -> std::path::PathBuf {
-        self.config.state_home.join("session_history.turso")
+        self.config
+            .state_home
+            .join(crate::adapters::app_server::SESSION_HISTORY_DB_NAME)
     }
 
     pub fn descriptor(&self) -> TenantRuntimeContextDescriptor {

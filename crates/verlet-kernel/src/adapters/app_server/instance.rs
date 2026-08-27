@@ -271,7 +271,7 @@ fn replace_endpoint_record(
 }
 
 #[cfg(unix)]
-fn process_is_live(pid: u32) -> bool {
+pub(crate) fn process_is_live(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
@@ -285,7 +285,7 @@ fn process_is_live(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_is_live(pid: u32) -> bool {
+pub(crate) fn process_is_live(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -310,7 +310,7 @@ fn process_is_live(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_is_live(pid: u32) -> bool {
+pub(crate) fn process_is_live(pid: u32) -> bool {
     pid == std::process::id()
 }
 

@@ -126,8 +126,8 @@ The V1 work is focused on runtime primitives:
 - OpenAI Codex backend access through browser or device OAuth against a user's
   ChatGPT plan, with credentials isolated in the user provider store;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
-- single-owner Turso state homes with live journal inspection through
-  `verlet debug journal` RPC and direct read-only access only while cold;
+- single-owner Turso state homes with working-directory discovery for live
+  `verlet debug journal` owner RPC and direct read-only access only while cold;
 - daemon-hosted remote child placement: store-backed ingress, separate local
   child processes, and local-first stream propagation fenced by durable scoped
   credentials and leases;

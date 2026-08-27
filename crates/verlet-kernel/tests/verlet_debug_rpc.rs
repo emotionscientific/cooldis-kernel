@@ -62,6 +62,114 @@ async fn rpc_cli_startup_names_unix_state_home_and_peer_authentication() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn debug_journal_discovers_live_unix_socket_owner_from_instance_directory() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root = TestRoot::new("verlet-debug-discovered-unix");
+    let project = root.path().join("project");
+    let user_home = root.path().join("user-home");
+    let state_home = project.join(".verlet/state");
+    let runtime_home = project.join(".verlet/runtime");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    let mut serve = command
+        .args(["serve", "--no-idle-timeout", "--cwd"])
+        .arg(&project)
+        .arg("--runtime-home")
+        .arg(&runtime_home)
+        .arg("--state-home")
+        .arg(&state_home)
+        .arg("--user-state-home")
+        .arg(user_home.join("state"))
+        .current_dir(&project)
+        .env("VERLET_HOME", &user_home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let endpoint = wait_for_instance_endpoint(&state_home, &mut serve).await;
+    let unix_url = format!("unix://{}", endpoint.unix_socket.display());
+
+    let started = run_verlet_in(
+        &project,
+        &user_home,
+        [
+            "debug",
+            "rpc",
+            "call",
+            "thread/start",
+            "{}",
+            "--url",
+            unix_url.as_str(),
+        ],
+    )
+    .await;
+    assert_success(&started);
+    let started: serde_json::Value = serde_json::from_slice(&started.stdout).unwrap();
+    let thread_id = started["thread"]["id"].as_str().unwrap();
+
+    let journal = run_verlet_in(
+        &project,
+        &user_home,
+        ["debug", "journal", "--thread", thread_id, "--json"],
+    )
+    .await;
+    assert_success(&journal);
+    let records: serde_json::Value = serde_json::from_slice(&journal.stdout).unwrap();
+    let records = records.as_array().unwrap();
+    assert!(!records.is_empty());
+    assert!(
+        records
+            .iter()
+            .all(|record| { record["coordinates"]["thread_id"].as_str() == Some(thread_id) })
+    );
+
+    serve.start_kill().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), serve.wait())
+        .await
+        .expect("serve did not stop")
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn debug_discovery_names_stale_record_and_cold_journal_lane() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root = TestRoot::new("verlet-debug-stale-record");
+    let project = root.path().join("project");
+    let user_home = root.path().join("user-home");
+    let state_home = project.join(".verlet/state");
+    std::fs::create_dir_all(&state_home).unwrap();
+    let record_path = state_home.join("endpoint.json");
+    std::fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "pid": std::process::id(),
+            "unix_socket": root.path().join("missing-owner.sock"),
+            "started_at": "2026-08-27T00:00:00Z",
+            "instance_id": "stale-debug-owner"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = run_verlet_in(&project, &user_home, ["debug", "journal", "--json"]).await;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&record_path.display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("appears stale"), "{stderr}");
+    assert!(stderr.contains("debug journal --journal"), "{stderr}");
+}
+
 async fn rpc_startup_lines(
     listen: &str,
     state_home: &std::path::Path,
@@ -633,6 +741,48 @@ async fn run_verlet<const N: usize>(args: [&str; N], token: Option<&str>) -> std
         command.env_remove("VERLET_APP_SERVER_TOKEN");
     }
     command.output().await.unwrap()
+}
+
+async fn run_verlet_in<const N: usize>(
+    project: &std::path::Path,
+    user_home: &std::path::Path,
+    args: [&str; N],
+) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_verlet"));
+    model_catalog_test_support::disable_for_tokio_command(&mut command);
+    command
+        .args(args)
+        .current_dir(project)
+        .env("VERLET_HOME", user_home)
+        .env_remove("VERLET_APP_SERVER_TOKEN")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap()
+}
+
+#[cfg(unix)]
+async fn wait_for_instance_endpoint(
+    state_home: &std::path::Path,
+    child: &mut tokio::process::Child,
+) -> verlet::adapters::app_server::instance::InstanceEndpoint {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if let Some(endpoint) =
+            verlet::adapters::app_server::instance::resolve_instance_endpoint(state_home)
+        {
+            return endpoint;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("serve exited before endpoint publication: {status}");
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for endpoint {}",
+            state_home.join("endpoint.json").display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 fn assert_success(output: &std::process::Output) {

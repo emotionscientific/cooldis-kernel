@@ -45,6 +45,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_COMMAND_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const DEFAULT_OPERATION_REGISTRY_ROOT: &str = ".verlet/operations";
 const METADATA_DB_NAME: &str = "metadata.turso";
+pub(crate) const SESSION_HISTORY_DB_NAME: &str = "session_history.turso";
 pub const ENDPOINT_RECORD_NAME: &str = "endpoint.json";
 const THREAD_APP_SERVER_CWD_METADATA: &str = "cooldis.app_server.cwd";
 const THREAD_APP_SERVER_MODEL_PROVIDER_METADATA: &str = "cooldis.app_server.model_provider";
@@ -3433,7 +3434,7 @@ fn runtime_factory_from_provider_parts_with_app_paths_and_router(
         secret_resolver,
         Some(config.metadata_store_path()),
         Some(config.user_metadata_store_path()),
-        Some(config.state_home.join("session_history.turso")),
+        Some(config.state_home.join(SESSION_HISTORY_DB_NAME)),
         config.lease_epoch,
         Some(config.agent_registry_root.clone()),
         Some(config.blob_registry_root.clone()),
