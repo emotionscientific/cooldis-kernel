@@ -21,6 +21,10 @@
   JSON objects, bound values are validated when bindings are created or
   replayed, and surface operations are not also exposed through raw
   virtual-bash operation commands.
+- Pi-kit file search now skips non-UTF-8, NUL-containing, and oversized files
+  during grep walks, bounds grep, read, and find ignore-file reads to 8 MiB,
+  rejects mismatched file and directory path kinds through structured tool
+  errors, and keeps native and wasm output envelopes identical for those cases.
 
 ## v0.5.1 (2026-08-26)
 

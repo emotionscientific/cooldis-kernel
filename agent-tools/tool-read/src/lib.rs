@@ -13,7 +13,8 @@
 //! - Caller limits and automatic truncation use Pi's exact continuation text.
 //! - Line accounting follows Pi's newline split: an empty file is one empty
 //!   logical line, and a terminal newline creates a final empty line.
-//! - The 4 MiB result cap remains only as a final structured-result backstop.
+//! - Files over the shared 8 MiB limit return a structured tool error; the
+//!   4 MiB result cap remains a final structured-result backstop.
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ReadArgs {
@@ -65,17 +66,36 @@ pub fn run(
 ) -> Result<ReadOutput, verlet_tool_core::ToolError> {
     let input_path = args.path;
     let path = verlet_tool_core::normalize_tool_path(&input_path);
-    let bytes = fs.read_file(&path)?;
-    let content = String::from_utf8_lossy(&bytes);
-    let lines = content.split('\n').collect::<Vec<_>>();
-    let total_lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+    let stat = fs.stat(&path)?;
+    if stat.is_dir {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "Path is a directory: {}",
+            path.display()
+        )));
+    }
+    if !stat.is_file {
+        return Err(verlet_tool_core::ToolError::Failed(format!(
+            "Path is not a file: {}",
+            path.display()
+        )));
+    }
+    if stat.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
+        return Err(verlet_tool_core::ToolFsError::FileTooLarge {
+            path,
+            max_bytes: verlet_tool_core::MAX_FILE_BYTES,
+        }
+        .into());
+    }
+    let bytes = fs.read_file_bounded(&path, verlet_tool_core::MAX_FILE_BYTES)?;
+    let total_line_count = file_line_count(&bytes);
+    let total_lines = u64::try_from(total_line_count).unwrap_or(u64::MAX);
     let requested_offset = args.offset;
     let start_index_i64 = match requested_offset {
         Some(offset) if offset != 0 => offset.saturating_sub(1).max(0),
         _ => 0,
     };
 
-    if i128::from(start_index_i64) >= lines.len() as i128 {
+    if i128::from(start_index_i64) >= total_line_count as i128 {
         return Err(offset_past_end(requested_offset.unwrap_or(1), total_lines));
     }
 
@@ -84,18 +104,19 @@ pub fn run(
     let (end_index, user_limit_end) = match args.limit {
         Some(limit) => {
             let numeric_end =
-                (start_index_i64 as i128 + i128::from(limit)).min(lines.len() as i128);
+                (start_index_i64 as i128 + i128::from(limit)).min(total_line_count as i128);
             let slice_end = if numeric_end < 0 {
-                (lines.len() as i128 + numeric_end).max(0)
+                (total_line_count as i128 + numeric_end).max(0)
             } else {
                 numeric_end
             }
-            .clamp(0, lines.len() as i128) as usize;
+            .clamp(0, total_line_count as i128) as usize;
             (slice_end.max(start_index), Some(numeric_end))
         }
-        None => (lines.len(), None),
+        None => (total_line_count, None),
     };
-    let selected_content = lines[start_index..end_index].join("\n");
+    let selected_bytes = line_range(&bytes, start_index, end_index, total_line_count);
+    let selected_content = String::from_utf8_lossy(selected_bytes);
     let truncation = verlet_tool_core::truncate_head(
         &selected_content,
         verlet_tool_core::DEFAULT_MAX_LINES,
@@ -107,7 +128,9 @@ pub fn run(
     let mut truncation_details = None;
 
     if truncation.first_line_exceeds_limit {
-        let first_line_size = lines.get(start_index).map_or(0, |line| line.len());
+        let first_line_size = selected_content
+            .split_once('\n')
+            .map_or(selected_content.len(), |(line, _)| line.len());
         text = format!(
             "[Line {start_line} is {}, exceeds {} limit. Use bash: sed -n '{start_line}p' {} | head -c {}]",
             verlet_tool_core::format_size(first_line_size),
@@ -135,8 +158,8 @@ pub fn run(
         truncation_details = Some(truncation);
     } else if let Some(numeric_end) = user_limit_end {
         text = truncation.content;
-        if numeric_end < lines.len() as i128 {
-            let remaining = lines.len() as i128 - numeric_end;
+        if numeric_end < total_line_count as i128 {
+            let remaining = total_line_count as i128 - numeric_end;
             let next_offset = numeric_end + 1;
             text.push_str(&format!(
                 "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
@@ -156,6 +179,39 @@ pub fn run(
         total_lines,
         truncation: truncation_details,
     })
+}
+
+fn file_line_count(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        .saturating_add(1)
+}
+
+fn line_range(bytes: &[u8], start_index: usize, end_index: usize, total_lines: usize) -> &[u8] {
+    let start = line_start_byte(bytes, start_index);
+    if end_index <= start_index {
+        return &bytes[start..start];
+    }
+    let end = if end_index >= total_lines {
+        bytes.len()
+    } else {
+        line_start_byte(bytes, end_index).saturating_sub(1)
+    };
+    &bytes[start..end.max(start)]
+}
+
+fn line_start_byte(bytes: &[u8], line_index: usize) -> usize {
+    if line_index == 0 {
+        return 0;
+    }
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(line_index.saturating_sub(1))
+        .map_or(bytes.len(), |(index, _)| index.saturating_add(1))
 }
 
 fn offset_past_end(offset: i64, total_lines: u64) -> verlet_tool_core::ToolError {
@@ -249,12 +305,29 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_reaches_the_backend_read_error() {
+    fn a_directory_is_a_structured_tool_error() {
         let root = tempfile::tempdir().unwrap();
 
         let error = crate::run(args(".", None, None), &fs(root.path())).unwrap_err();
 
-        assert!(!error.to_string().contains("is not a file"));
+        assert_eq!(error.to_string(), "Path is a directory: .");
+    }
+
+    #[test]
+    fn an_oversized_file_is_a_structured_tool_error() {
+        let root = tempfile::tempdir().unwrap();
+        let content = vec![b'x'; verlet_tool_core::MAX_FILE_BYTES.saturating_add(1)];
+        std::fs::write(root.path().join("oversized.txt"), content).unwrap();
+
+        let error = crate::run(args("oversized.txt", None, None), &fs(root.path())).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "file exceeds {} byte read limit: oversized.txt",
+                verlet_tool_core::MAX_FILE_BYTES
+            )
+        );
     }
 
     #[test]

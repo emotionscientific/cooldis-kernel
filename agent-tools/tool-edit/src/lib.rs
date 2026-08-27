@@ -494,6 +494,12 @@ fn edit_access_error(
     let message = match error {
         verlet_tool_core::ToolFsError::NotFound(_) => "Error code: ENOENT".to_owned(),
         verlet_tool_core::ToolFsError::Denied(_) => "Error code: EACCES".to_owned(),
+        verlet_tool_core::ToolFsError::FileTooLarge { path, max_bytes } => {
+            format!(
+                "file exceeds {max_bytes} byte read limit: {}",
+                path.display()
+            )
+        }
         verlet_tool_core::ToolFsError::Io(message) => message,
     };
     verlet_tool_core::ToolError::Failed(format!("Could not edit file: {path}. {message}."))

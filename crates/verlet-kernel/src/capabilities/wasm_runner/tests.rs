@@ -655,6 +655,25 @@ async fn pi_tool_fixture() -> (std::sync::Arc<verlet_vfs::VerletVfs>, tempfile::
     (vfs, native)
 }
 
+async fn write_pi_tool_fixture_file(
+    vfs: &std::sync::Arc<verlet_vfs::VerletVfs>,
+    native: &tempfile::TempDir,
+    relative: &str,
+    content: &[u8],
+) {
+    let vfs_path = std::path::Path::new("/workspace").join(relative);
+    if let Some(parent) = vfs_path.parent() {
+        vfs.mkdir(parent, true).await.unwrap();
+    }
+    vfs.write_file(&vfs_path, content).await.unwrap();
+
+    let native_path = native.path().join(relative);
+    if let Some(parent) = native_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(native_path, content).unwrap();
+}
+
 fn pi_tool_input(args: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "root": "/workspace",
@@ -1463,8 +1482,14 @@ async fn wasm_vfs_write_guest_requires_declared_capability_before_execution() {
 }
 
 #[tokio::test]
-async fn wasm_pi_read_matches_native_envelope_and_surfaces_missing_file() {
+async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
     let (vfs, native) = pi_tool_fixture().await;
+    let oversized = b"oversized\n".repeat(
+        verlet_tool_core::MAX_FILE_BYTES
+            .saturating_div(b"oversized\n".len())
+            .saturating_add(1),
+    );
+    write_pi_tool_fixture_file(&vfs, &native, "project/oversized.txt", &oversized).await;
     let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
     let args = verlet_tool_read::ReadArgs {
         path: std::path::PathBuf::from("project/input.txt"),
@@ -1517,11 +1542,66 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_missing_file() {
         missing.output,
         tool_error_envelope(native_error.to_string())
     );
+
+    let native_directory_error = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let directory = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        directory.output,
+        tool_error_envelope(native_directory_error.to_string())
+    );
+
+    let native_oversized_error = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project/oversized.txt"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let oversized = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project/oversized.txt"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        oversized.output,
+        tool_error_envelope(native_oversized_error.to_string())
+    );
 }
 
 #[tokio::test]
 async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
     let (vfs, native) = pi_tool_fixture().await;
+    write_pi_tool_fixture_file(&vfs, &native, "project/non-utf8.bin", b"\xffneedle\n").await;
+    let oversized = b"needle\n".repeat(
+        verlet_tool_core::MAX_FILE_BYTES
+            .saturating_div(b"needle\n".len())
+            .saturating_add(1),
+    );
+    write_pi_tool_fixture_file(
+        &vfs,
+        &native,
+        "project/build/oversized.artifact",
+        &oversized,
+    )
+    .await;
     let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
@@ -1570,6 +1650,30 @@ async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
     assert_eq!(
         find_error.output,
         tool_error_envelope(native_find_error.to_string())
+    );
+
+    let native_find_kind_error = verlet_tool_glob::run(
+        verlet_tool_glob::GlobArgs {
+            pattern: "**".to_owned(),
+            path: Some(std::path::PathBuf::from("project/input.txt")),
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap_err();
+    let find_kind_error = factory
+        .invoke_operation_bytes(
+            "find",
+            pi_tool_input(serde_json::json!({
+                "pattern": "**",
+                "path": "project/input.txt",
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        find_kind_error.output,
+        tool_error_envelope(native_find_kind_error.to_string())
     );
 
     let native_grep = verlet_tool_grep::run(

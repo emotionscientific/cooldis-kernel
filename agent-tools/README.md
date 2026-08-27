@@ -62,9 +62,10 @@ transport failures use a non-OK ABI status. Read, find, and grep need only an
 attached VFS. Write and edit also declare and require the `fs.write` grant.
 
 Known wasm-lane divergence: the guest ABI reports symlinks as kind `Other`
-(neither file nor directory), so the walker skips symlinked entries that the
-native `StdFs` lane would follow. The ABI exposes no follow-symlink
-distinction; resolving this needs a host-side change, tracked separately.
+(neither file nor directory), so the walker skips symlinked entries and direct
+read rejects symlink paths that the native `StdFs` lane would follow. The ABI
+exposes no follow-symlink distinction; resolving this needs a host-side change,
+tracked separately.
 
 Each module directory is a standalone Cargo workspace with its own lockfile,
 a `cdylib` library target, and `panic = "abort"` in the release profile. This
@@ -97,3 +98,9 @@ cargo build --manifest-path agent-tools/wasm/read/Cargo.toml \
 - **Mutation-queue deferral.** Same-path write/edit serialization belongs to
   the kernel invocation layer and is deferred until the wasm integration
   stage.
+- **Bounded text scanning.** Grep skips files that are not valid UTF-8 text,
+  contain NUL, or exceed the shared 8 MiB per-file read limit. Read returns a
+  structured error for files over that limit, and find skips ignore-rule files
+  over it. Pi delegates grep to `rg` without this size ceiling and its read and
+  grep context paths can load whole files. The limit trades search completeness
+  for deterministic memory use in native and wasm lanes.

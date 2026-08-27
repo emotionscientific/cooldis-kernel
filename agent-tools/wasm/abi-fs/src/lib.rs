@@ -159,6 +159,40 @@ impl verlet_tool_core::ToolFs for AbiFs {
         Ok(bytes)
     }
 
+    fn read_file_bounded(
+        &self,
+        path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
+        let resolved = self.resolve(path);
+        let resolved = path_str(path, &resolved)?;
+        let handle = verlet_guest_sdk::open_file_read(resolved)
+            .map_err(|status| map_status(path, status))?;
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+        let mut buffer = [0_u8; 1024];
+        loop {
+            match verlet_guest_sdk::read_file(handle, &mut buffer) {
+                Ok(0) => break,
+                Ok(read) if read <= max_bytes.saturating_sub(bytes.len()) => {
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                Ok(_) => {
+                    let _ = verlet_guest_sdk::close_file(handle);
+                    return Err(verlet_tool_core::ToolFsError::FileTooLarge {
+                        path: path.to_path_buf(),
+                        max_bytes,
+                    });
+                }
+                Err(status) => {
+                    let _ = verlet_guest_sdk::close_file(handle);
+                    return Err(map_status(path, status));
+                }
+            }
+        }
+        verlet_guest_sdk::close_file(handle).map_err(|status| map_status(path, status))?;
+        Ok(bytes)
+    }
+
     /// `open_file_write` + `write_file` + `close_file`; the close is the
     /// commit point (whole-file replace). Parent directories are the tool
     /// core's job (`mkdir` first), matching the ABI contract.

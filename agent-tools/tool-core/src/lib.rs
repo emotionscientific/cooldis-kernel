@@ -23,6 +23,9 @@ pub const DEFAULT_MAX_LINES: usize = 2000;
 /// Pi's automatic head-truncation byte limit (50 KiB).
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
+/// Maximum bytes one file-search tool reads from a single file (8 MiB).
+pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TruncatedBy {
@@ -50,15 +53,14 @@ pub struct TruncationResult {
 /// Port of Pi `core/tools/truncate.ts::truncateHead`.
 pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
     let total_bytes = content.len();
-    let mut lines = if content.is_empty() {
-        Vec::new()
+    let total_lines = if content.is_empty() {
+        0
     } else {
-        content.split('\n').collect::<Vec<_>>()
+        content
+            .split('\n')
+            .count()
+            .saturating_sub(usize::from(content.ends_with('\n')))
     };
-    if content.ends_with('\n') {
-        lines.pop();
-    }
-    let total_lines = lines.len();
 
     if total_lines <= max_lines && total_bytes <= max_bytes {
         return TruncationResult {
@@ -76,10 +78,8 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
         };
     }
 
-    if lines
-        .first()
-        .is_some_and(|first_line| first_line.len() > max_bytes)
-    {
+    let first_line = content.split_once('\n').map_or(content, |(line, _)| line);
+    if !content.is_empty() && first_line.len() > max_bytes {
         return TruncationResult {
             content: String::new(),
             truncated: true,
@@ -95,22 +95,26 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
         };
     }
 
-    let mut output_lines = Vec::new();
+    let mut output = String::new();
+    let mut output_lines = 0_usize;
     let mut output_bytes = 0_usize;
     let mut truncated_by = TruncatedBy::Lines;
-    for (index, line) in lines.iter().take(max_lines).enumerate() {
-        let line_bytes = line.len().saturating_add(usize::from(index > 0));
+    for line in content.split_terminator('\n').take(max_lines) {
+        let line_bytes = line.len().saturating_add(usize::from(output_lines > 0));
         if output_bytes.saturating_add(line_bytes) > max_bytes {
             truncated_by = TruncatedBy::Bytes;
             break;
         }
-        output_lines.push(*line);
+        if output_lines > 0 {
+            output.push('\n');
+        }
+        output.push_str(line);
+        output_lines = output_lines.saturating_add(1);
         output_bytes = output_bytes.saturating_add(line_bytes);
     }
-    if output_lines.len() >= max_lines && output_bytes <= max_bytes {
+    if output_lines >= max_lines && output_bytes <= max_bytes {
         truncated_by = TruncatedBy::Lines;
     }
-    let output = output_lines.join("\n");
 
     TruncationResult {
         output_bytes: output.len(),
@@ -119,7 +123,7 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
         truncated_by: Some(truncated_by),
         total_lines,
         total_bytes,
-        output_lines: output_lines.len(),
+        output_lines,
         last_line_partial: false,
         first_line_exceeds_limit: false,
         max_lines,
@@ -183,6 +187,12 @@ pub fn normalize_tool_path(path: &std::path::Path) -> std::path::PathBuf {
 /// Tool cores never re-check confinement.
 pub trait ToolFs {
     fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ToolFsError>;
+    /// Read at most `max_bytes` from one file.
+    fn read_file_bounded(
+        &self,
+        path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ToolFsError>;
     fn write_file(&self, path: &std::path::Path, content: &[u8]) -> Result<(), ToolFsError>;
     /// Create a directory. `recursive` = `mkdir -p`.
     fn mkdir(&self, path: &std::path::Path, recursive: bool) -> Result<(), ToolFsError>;
@@ -210,6 +220,11 @@ pub enum ToolFsError {
     NotFound(std::path::PathBuf),
     #[error("access denied: {0}")]
     Denied(std::path::PathBuf),
+    #[error("file exceeds {max_bytes} byte read limit: {path}")]
+    FileTooLarge {
+        path: std::path::PathBuf,
+        max_bytes: usize,
+    },
     #[error("{0}")]
     Io(String),
 }
@@ -238,6 +253,7 @@ pub struct WalkFile {
     pub path: std::path::PathBuf,
     pub relative_path: String,
     pub is_dir: bool,
+    pub size: u64,
 }
 
 /// Walk a file or directory using only [`ToolFs`].
@@ -260,6 +276,7 @@ pub fn walk_files(root: &std::path::Path, fs: &dyn ToolFs) -> Result<Vec<WalkFil
             path: root.to_path_buf(),
             relative_path,
             is_dir: false,
+            size: stat.size,
         }]);
     }
     if !stat.is_dir {
@@ -312,6 +329,7 @@ fn walk_directory(
                 path: path.clone(),
                 relative_path: format!("{}/", relative_path_string(&relative)),
                 is_dir: true,
+                size: 0,
             });
             let matcher_count = ignore_matchers.len();
             add_ignore_file(fs, &path, &path.join(".gitignore"), ignore_matchers)?;
@@ -328,6 +346,7 @@ fn walk_directory(
                     path,
                     relative_path: relative_path_string(&relative),
                     is_dir: false,
+                    size: stat.size,
                 });
             }
         }
@@ -341,11 +360,20 @@ fn add_ignore_file(
     ignore_path: &std::path::Path,
     ignore_matchers: &mut Vec<ignore::gitignore::Gitignore>,
 ) -> Result<(), ToolError> {
-    if !fs.exists(ignore_path)? {
+    let stat = match fs.stat(ignore_path) {
+        Ok(stat) => stat,
+        Err(ToolFsError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !stat.is_file || stat.size > u64::try_from(MAX_FILE_BYTES).unwrap_or(u64::MAX) {
         return Ok(());
     }
 
-    let bytes = fs.read_file(ignore_path)?;
+    let bytes = match fs.read_file_bounded(ignore_path, MAX_FILE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(ToolFsError::FileTooLarge { .. }) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let content = String::from_utf8_lossy(&bytes);
     let mut builder = ignore::gitignore::GitignoreBuilder::new(match_root);
     for (index, line) in content.lines().enumerate() {
@@ -505,6 +533,27 @@ impl ToolFs for StdFs {
     fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ToolFsError> {
         let resolved = self.resolve(path)?;
         std::fs::read(resolved).map_err(|error| map_io_error(path, error))
+    }
+
+    fn read_file_bounded(
+        &self,
+        path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ToolFsError> {
+        let resolved = self.resolve(path)?;
+        let file = std::fs::File::open(resolved).map_err(|error| map_io_error(path, error))?;
+        let read_limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+        let mut reader = std::io::Read::take(file, read_limit);
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+        std::io::Read::read_to_end(&mut reader, &mut bytes)
+            .map_err(|error| map_io_error(path, error))?;
+        if bytes.len() > max_bytes {
+            return Err(ToolFsError::FileTooLarge {
+                path: path.to_path_buf(),
+                max_bytes,
+            });
+        }
+        Ok(bytes)
     }
 
     fn write_file(&self, path: &std::path::Path, content: &[u8]) -> Result<(), ToolFsError> {
@@ -788,6 +837,42 @@ mod tests {
 
         assert!(matches!(prefix_collision, crate::ToolFsError::Denied(_)));
         assert!(matches!(missing_tail, crate::ToolFsError::Denied(_)));
+    }
+
+    #[test]
+    fn bounded_reads_stop_at_the_declared_limit() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("large.bin"), vec![b'x'; 1025]).unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let exact =
+            crate::ToolFs::read_file_bounded(&fs, std::path::Path::new("large.bin"), 1025).unwrap();
+        let error = crate::ToolFs::read_file_bounded(&fs, std::path::Path::new("large.bin"), 1024)
+            .unwrap_err();
+
+        assert_eq!(exact.len(), 1025);
+        assert!(matches!(
+            error,
+            crate::ToolFsError::FileTooLarge {
+                max_bytes: 1024,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn walk_skips_oversized_ignore_rules_without_reading_unbounded_content() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ignore = vec![b'#'; crate::MAX_FILE_BYTES.saturating_add(1)];
+        ignore.push(b'\n');
+        ignore.extend_from_slice(b"hidden.txt\n");
+        std::fs::write(root.path().join(".gitignore"), ignore).unwrap();
+        std::fs::write(root.path().join("hidden.txt"), "visible").unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
+
+        assert!(files.iter().any(|file| file.relative_path == "hidden.txt"));
     }
 
     #[test]
