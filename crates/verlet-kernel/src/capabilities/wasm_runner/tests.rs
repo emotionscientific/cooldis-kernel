@@ -1484,7 +1484,7 @@ async fn wasm_vfs_write_guest_requires_declared_capability_before_execution() {
 #[tokio::test]
 async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
     let (vfs, native) = pi_tool_fixture().await;
-    let exact_limit = vec![b'x'; verlet_tool_core::MAX_FILE_BYTES];
+    let exact_limit = b"x\n".repeat(verlet_tool_core::MAX_FILE_BYTES / 2);
     write_pi_tool_fixture_file(&vfs, &native, "project/exact-limit.txt", &exact_limit).await;
     let oversized = b"oversized\n".repeat(
         verlet_tool_core::MAX_FILE_BYTES
@@ -1533,20 +1533,7 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
         &native_fs,
     )
     .unwrap();
-    // Isolate the ToolFs boundary from the global Wasm fuel policy. Copying
-    // the full accepted 8 MiB through today's sequential ABI exceeds the
-    // default store fuel even though AbiFs returns the correct complete
-    // buffer; changing that runtime policy is an architecture decision.
-    let boundary_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
-        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
-            wasm_read_tool_guest(),
-        ))
-        .with_vfs(vfs)
-        .with_fuel(None)
-        .with_fuel_yield_interval(None),
-    )
-    .unwrap();
-    let exact_limit = boundary_factory
+    let exact_limit = factory
         .invoke_operation_bytes(
             "read",
             pi_tool_input(serde_json::json!({"path": "project/exact-limit.txt"})),

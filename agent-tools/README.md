@@ -100,12 +100,12 @@ cargo build --manifest-path agent-tools/wasm/read/Cargo.toml \
   the kernel invocation layer and is deferred until the wasm integration
   stage.
 - **Bounded text scanning.** Grep skips files that are not valid UTF-8 text,
-  contain NUL, or exceed the shared 8 MiB per-file read limit. Read returns a
+  contain NUL, or exceed the shared 16 KiB per-file read limit. Read returns a
   structured error for files over that limit; offset/limit cannot bypass the
   ceiling because the current ABI has no seek or ranged-read operation. Find
   skips ignore-rule files over the ceiling. Edit preserves whole-file atomicity
   under the same ceiling and returns a structured error without changing or
   silently skipping an oversized target. Pi delegates grep to `rg` without this
   size ceiling and its read and grep context paths can load whole files. The
-  limit trades search completeness for deterministic memory use in native and
-  wasm lanes.
+  shared limit is the largest measured power-of-two ceiling whose maximal file
+  completes in the guest lane within half the standard execution fuel budget.

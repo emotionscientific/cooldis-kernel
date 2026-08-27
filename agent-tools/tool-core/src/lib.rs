@@ -23,8 +23,8 @@ pub const DEFAULT_MAX_LINES: usize = 2000;
 /// Pi's automatic head-truncation byte limit (50 KiB).
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
-/// Maximum bytes one bounded file tool reads from a single file (8 MiB).
-pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum bytes one bounded file tool reads from a single file (16 KiB).
+pub const MAX_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

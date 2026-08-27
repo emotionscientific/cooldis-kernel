@@ -19,7 +19,7 @@
 //! - `limit` (default 100) caps match count; search stops early when
 //!   reached and emits Pi's actionable notice.
 //! - Final text is complete-line head-truncated at 50 KiB.
-//! - Non-UTF-8 files, files containing NUL, and files over 8 MiB are skipped.
+//! - Non-UTF-8 files, files containing NUL, and files over 16 KiB are skipped.
 //! - Deterministic file order (same as glob's sort), so identical state
 //!   yields identical output on every backend.
 
@@ -676,16 +676,18 @@ mod tests {
         // Pi behavior sheet item 25; source: core/tools/grep.ts:338-366.
         let root = tempfile::tempdir().unwrap();
         let line = format!("{}hit\n", "🙂".repeat(crate::MAX_LINE_CHARS + 1));
-        let line_count = 2200;
-        std::fs::write(root.path().join("large.txt"), line.repeat(line_count)).unwrap();
+        let file_count = 60;
+        for index in 0..file_count {
+            std::fs::write(root.path().join(format!("large-{index:02}.txt")), &line).unwrap();
+        }
         let mut search = args("hit");
-        search.limit = Some(line_count as i64);
+        search.limit = Some(file_count);
 
         let output = crate::run(search, &fs(root.path())).unwrap();
 
         assert!(output.truncated);
         assert!(output.text.ends_with(
-            "\n\n[2200 matches limit reached. Use limit=4400 for more, or refine pattern. 50.0KB limit reached. Some lines truncated to 500 chars. Use read tool to see full lines]"
+            "\n\n[60 matches limit reached. Use limit=120 for more, or refine pattern. 50.0KB limit reached. Some lines truncated to 500 chars. Use read tool to see full lines]"
         ));
     }
 
