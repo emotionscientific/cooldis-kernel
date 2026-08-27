@@ -693,7 +693,7 @@ fn stale_debug_rpc_record_error(
     let journal = record_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("session_history.turso");
+        .join(crate::adapters::app_server::SESSION_HISTORY_DB_NAME);
     debug_rpc_usage_error(format!(
         "Verlet instance endpoint record {} appears stale: {detail}; after confirming the owner has stopped, inspect the cold journal with `verlet debug journal --journal {}`",
         record_path.display(),

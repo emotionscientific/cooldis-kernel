@@ -1341,7 +1341,7 @@ mod tests {
         let runtime_home = root.join("runtime");
         std::fs::create_dir_all(&state_home).unwrap();
         let store = verlet_history_sqlite::SqliteSessionStore::open(
-            state_home.join("session_history.turso"),
+            state_home.join(crate::adapters::app_server::SESSION_HISTORY_DB_NAME),
         )
         .await
         .unwrap();
