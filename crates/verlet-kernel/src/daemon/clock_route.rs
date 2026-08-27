@@ -81,11 +81,22 @@ impl VerletDaemonClockRoute {
     }
 
     pub async fn run(self) {
+        let mut retry_state = crate::daemon::retry::RetryState::new(self.poll_interval);
         loop {
-            if let Err(err) = self.enqueue_due_once().await {
-                eprintln!("verlet clock route {} failed: {err}", self.route_id);
+            let decision = match self.enqueue_due_once().await {
+                Ok(_) => retry_state.on_success(self.poll_interval),
+                Err(err) => retry_state.on_failure(&err.to_string(), self.poll_interval),
+            };
+            if let Some(log) = decision.log {
+                eprintln!(
+                    "{}",
+                    log.message(
+                        &format!("verlet clock route {}", self.route_id),
+                        decision.delay
+                    )
+                );
             }
-            tokio::time::sleep(self.poll_interval).await;
+            tokio::time::sleep(decision.delay).await;
         }
     }
 

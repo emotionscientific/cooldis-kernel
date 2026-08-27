@@ -55,6 +55,7 @@ pub mod daemon {
     pub mod identity;
     pub(crate) mod recovery_sweep;
     pub mod remote_store;
+    pub(crate) mod retry;
 }
 
 pub mod kernel {

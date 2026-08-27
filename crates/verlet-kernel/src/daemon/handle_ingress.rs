@@ -26,6 +26,8 @@
 use verlet_history::EventStore as _;
 use verlet_history::SessionStore as _;
 
+const INGRESS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Durable ingress source for terminal outcomes of thread handles.
 ///
 /// Recovery is scan-based: no live subscription or durable cursor is part of
@@ -67,7 +69,7 @@ impl ThreadHandleIngressAdapter {
             sink,
             tenant_id: tenant_id.into(),
             user_id: user_id.into(),
-            poll_interval: std::time::Duration::from_millis(250),
+            poll_interval: INGRESS_POLL_INTERVAL,
             acknowledged_dispatches: tokio::sync::Mutex::new(std::collections::BTreeSet::new()),
         }
     }
@@ -75,9 +77,17 @@ impl ThreadHandleIngressAdapter {
     /// Scans durable spawn/terminal records once and submits each ready,
     /// previously unacknowledged settlement. A poisoned stream or settlement
     /// is diagnosed and retried on the next pass without blocking its peers.
+    #[cfg(test)]
     pub(crate) async fn enqueue_ready_once(
         &self,
     ) -> crate::kernel::runtime_host::VerletResult<usize> {
+        Ok(self.poll_ready_once().await?.enqueued)
+    }
+
+    async fn poll_ready_once(
+        &self,
+    ) -> crate::kernel::runtime_host::VerletResult<IngressPollOutcome> {
+        let mut outcome = IngressPollOutcome::default();
         let mut ready = Vec::new();
         for consumer in self
             .store
@@ -97,23 +107,18 @@ impl ThreadHandleIngressAdapter {
             {
                 Ok(events) => events,
                 Err(err) => {
-                    eprintln!(
-                        "verlet thread handle ingress skipped control stream {stream_id}: {err}"
-                    );
+                    outcome.record_failure("control stream read", stream_id.to_string(), &err);
                     continue;
                 }
             };
             match fold_terminal_settlements(&consumer, &events) {
                 Ok(settlements) => ready.extend(settlements),
                 Err(err) => {
-                    eprintln!(
-                        "verlet thread handle ingress skipped control stream {stream_id}: {err}"
-                    );
+                    outcome.record_failure("control stream fold", stream_id.to_string(), &err);
                 }
             }
         }
 
-        let mut enqueued = 0;
         for settlement in ready {
             let dispatch_id = settlement.dispatch_id.to_string();
             if self
@@ -138,26 +143,26 @@ impl ThreadHandleIngressAdapter {
             {
                 Ok(context) => context,
                 Err(err) => {
-                    log_settlement_skip(&settlement, "context assembly", &err);
+                    outcome.record_settlement_failure(&settlement, "context assembly", &err);
                     continue;
                 }
             };
             let envelope = match settlement.ingress_envelope(&context) {
                 Ok(envelope) => envelope,
                 Err(err) => {
-                    log_settlement_skip(&settlement, "envelope assembly", &err);
+                    outcome.record_settlement_failure(&settlement, "envelope assembly", &err);
                     continue;
                 }
             };
             let ack = match self.sink.submit(envelope).await.map_err(io_error) {
                 Ok(ack) => ack,
                 Err(err) => {
-                    log_settlement_skip(&settlement, "queue submit", &err);
+                    outcome.record_settlement_failure(&settlement, "queue submit", &err);
                     continue;
                 }
             };
             if ack.accepted {
-                enqueued += 1;
+                outcome.enqueued += 1;
             }
             if ack.accepted || ack.reason.as_deref() == Some("duplicate dedupe key") {
                 self.acknowledged_dispatches
@@ -165,39 +170,116 @@ impl ThreadHandleIngressAdapter {
                     .await
                     .insert(dispatch_id);
             } else {
-                eprintln!(
-                    "verlet thread handle ingress sink rejected dispatch {} child {} consumer {}: {}",
-                    settlement.dispatch_id,
-                    settlement.child_thread_id,
-                    crate::kernel::control_decision::control_stream_id(&settlement.consumer),
-                    ack.reason.as_deref().unwrap_or("unspecified rejection"),
+                outcome.record_settlement_failure(
+                    &settlement,
+                    "queue rejection",
+                    &ack.reason.as_deref().unwrap_or("unspecified rejection"),
                 );
             }
         }
-        Ok(enqueued)
+        Ok(outcome)
     }
 
     pub(crate) async fn run(self) {
+        let mut retry_state = crate::daemon::retry::RetryState::new(self.poll_interval);
         loop {
-            if let Err(err) = self.enqueue_ready_once().await {
-                eprintln!("verlet thread handle ingress adapter failed: {err}");
+            let decision = match self.poll_ready_once().await {
+                Ok(outcome) => match outcome.retry_failure() {
+                    Some(failure) => retry_state.on_failure_with_key(
+                        &failure.key,
+                        &failure.message,
+                        self.poll_interval,
+                    ),
+                    None => retry_state.on_success(self.poll_interval),
+                },
+                Err(err) => retry_state.on_failure(&err.to_string(), self.poll_interval),
+            };
+            if let Some(log) = decision.log {
+                eprintln!(
+                    "{}",
+                    log.message("verlet thread handle ingress adapter", decision.delay)
+                );
             }
-            tokio::time::sleep(self.poll_interval).await;
+            tokio::time::sleep(decision.delay).await;
         }
     }
 }
 
-fn log_settlement_skip(
-    settlement: &ThreadTerminalSettlement,
-    stage: &str,
-    err: &impl std::fmt::Display,
-) {
-    eprintln!(
-        "verlet thread handle ingress skipped dispatch {} child {} consumer {} during {stage}: {err}",
-        settlement.dispatch_id,
-        settlement.child_thread_id,
-        crate::kernel::control_decision::control_stream_id(&settlement.consumer),
-    );
+#[derive(Default)]
+struct IngressPollOutcome {
+    enqueued: usize,
+    failure_count: usize,
+    first_failure: Option<IngressPollFailure>,
+}
+
+impl IngressPollOutcome {
+    fn record_failure(
+        &mut self,
+        stage: &'static str,
+        subject: String,
+        err: &impl std::fmt::Display,
+    ) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        if self.first_failure.is_none() {
+            self.first_failure = Some(IngressPollFailure {
+                stage,
+                subject,
+                error: err.to_string(),
+            });
+        }
+    }
+
+    fn record_settlement_failure(
+        &mut self,
+        settlement: &ThreadTerminalSettlement,
+        stage: &'static str,
+        err: &impl std::fmt::Display,
+    ) {
+        self.record_failure(
+            stage,
+            format!(
+                "dispatch {} child {} consumer {}",
+                settlement.dispatch_id,
+                settlement.child_thread_id,
+                crate::kernel::control_decision::control_stream_id(&settlement.consumer),
+            ),
+            err,
+        );
+    }
+
+    fn retry_failure(&self) -> Option<IngressRetryFailure> {
+        let first = self.first_failure.as_ref()?;
+        let suffix = if self.failure_count == 1 {
+            String::new()
+        } else {
+            format!(
+                "; {} additional operation(s) skipped",
+                self.failure_count - 1
+            )
+        };
+        Some(IngressRetryFailure {
+            key: format!(
+                "{}: {}",
+                first.stage,
+                crate::daemon::retry::stable_error_key(&first.error)
+            ),
+            message: format!(
+                "{} for {} failed: {}{}",
+                first.stage, first.subject, first.error, suffix
+            ),
+        })
+    }
+}
+
+struct IngressPollFailure {
+    stage: &'static str,
+    subject: String,
+    error: String,
+}
+
+struct IngressRetryFailure {
+    key: String,
+    message: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -443,6 +525,216 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ingress_retry_state_grows_until_degraded_cap() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::retry::RetryState::new(poll_interval);
+
+        let first = state.on_failure("history store failed", poll_interval);
+        assert_eq!(first.delay, poll_interval);
+        assert_eq!(
+            first.log,
+            Some(crate::daemon::retry::RetryLog::Failed {
+                error: "history store failed".to_string(),
+            })
+        );
+
+        for (count, delay) in [
+            (2, std::time::Duration::from_millis(500)),
+            (3, std::time::Duration::from_secs(1)),
+            (4, std::time::Duration::from_secs(2)),
+        ] {
+            let decision = state.on_failure("history store failed", poll_interval);
+            assert_eq!(decision.delay, delay);
+            assert_eq!(
+                decision.log,
+                Some(crate::daemon::retry::RetryLog::BackoffIncreased {
+                    failed_polls: count,
+                    delay,
+                })
+            );
+        }
+
+        let degraded = state.on_failure("history store failed", poll_interval);
+        assert_eq!(degraded.delay, crate::daemon::retry::RETRY_CAP);
+        assert_eq!(
+            degraded.log,
+            Some(crate::daemon::retry::RetryLog::Degraded {
+                failed_polls: 5,
+                delay: crate::daemon::retry::RETRY_CAP,
+                error: "history store failed".to_string(),
+            })
+        );
+        assert!(
+            degraded
+                .log
+                .as_ref()
+                .unwrap()
+                .message("verlet thread handle ingress adapter", degraded.delay)
+                .contains("adapter degraded after 5 failed polls")
+        );
+
+        let capped = state.on_failure("history store failed", poll_interval);
+        assert_eq!(capped.delay, crate::daemon::retry::RETRY_CAP);
+        assert_eq!(capped.log, None);
+
+        let changed = state.on_failure("replacement failure", poll_interval);
+        assert_eq!(
+            changed.log,
+            Some(crate::daemon::retry::RetryLog::ErrorChanged {
+                failed_polls: 7,
+                delay: crate::daemon::retry::RETRY_CAP,
+                error: "replacement failure".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ingress_retry_state_logs_changed_error_and_resets_on_success() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::retry::RetryState::new(poll_interval);
+
+        state.on_failure("first error", poll_interval);
+        let changed = state.on_failure("second error", poll_interval);
+        assert_eq!(changed.delay, std::time::Duration::from_millis(500));
+        assert_eq!(
+            changed.log,
+            Some(crate::daemon::retry::RetryLog::ErrorChanged {
+                failed_polls: 2,
+                delay: std::time::Duration::from_millis(500),
+                error: "second error".to_string(),
+            })
+        );
+
+        let tentative = state.on_success(poll_interval);
+        assert_eq!(tentative.delay, std::time::Duration::from_millis(500));
+        assert_eq!(tentative.log, None);
+        let recovered = state.on_success(poll_interval);
+        assert_eq!(recovered.delay, poll_interval);
+        assert_eq!(
+            recovered.log,
+            Some(crate::daemon::retry::RetryLog::Recovered { failed_polls: 2 })
+        );
+
+        let healthy = state.on_success(poll_interval);
+        assert_eq!(healthy.delay, poll_interval);
+        assert_eq!(healthy.log, None);
+
+        let failed_again = state.on_failure("first after recovery", poll_interval);
+        assert_eq!(failed_again.delay, poll_interval);
+        assert_eq!(
+            failed_again.log,
+            Some(crate::daemon::retry::RetryLog::Failed {
+                error: "first after recovery".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ingress_retry_state_requires_stable_recovery() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::retry::RetryState::new(poll_interval);
+
+        state.on_failure("history store failed", poll_interval);
+        let tentative = state.on_success(poll_interval);
+        assert_eq!(tentative.delay, poll_interval);
+        assert_eq!(tentative.log, None);
+
+        let failed_again = state.on_failure("history store failed", poll_interval);
+        assert_eq!(failed_again.delay, std::time::Duration::from_millis(500));
+        assert_eq!(
+            failed_again.log,
+            Some(crate::daemon::retry::RetryLog::BackoffIncreased {
+                failed_polls: 2,
+                delay: std::time::Duration::from_millis(500),
+            })
+        );
+
+        let tentative = state.on_success(poll_interval);
+        assert_eq!(tentative.delay, std::time::Duration::from_millis(500));
+        assert_eq!(tentative.log, None);
+        let recovered = state.on_success(poll_interval);
+        assert_eq!(recovered.delay, poll_interval);
+        assert_eq!(
+            recovered.log,
+            Some(crate::daemon::retry::RetryLog::Recovered { failed_polls: 2 })
+        );
+    }
+
+    #[test]
+    fn ingress_retry_state_deduplicates_dynamic_wal_offsets() {
+        let poll_interval = std::time::Duration::from_millis(250);
+        let mut state = crate::daemon::retry::RetryState::new(poll_interval);
+
+        state.on_failure(
+            "history storage failed: I/O error: short read on WAL frame at offset 840512: expected 4096 bytes, got 0",
+            poll_interval,
+        );
+        let next = state.on_failure(
+            "history storage failed: I/O error: short read on WAL frame at offset 844608: expected 4096 bytes, got 0",
+            poll_interval,
+        );
+
+        assert_eq!(
+            next.log,
+            Some(crate::daemon::retry::RetryLog::BackoffIncreased {
+                failed_polls: 2,
+                delay: std::time::Duration::from_millis(500),
+            })
+        );
+    }
+
+    #[test]
+    fn ingress_retry_state_clamps_zero_and_oversized_intervals() {
+        let mut zero = crate::daemon::retry::RetryState::new(std::time::Duration::ZERO);
+        let zero_failure = zero.on_failure("history store failed", std::time::Duration::ZERO);
+        assert!(zero_failure.delay > std::time::Duration::ZERO);
+        assert!(zero_failure.delay <= crate::daemon::retry::RETRY_CAP);
+        assert_eq!(
+            zero.on_success(std::time::Duration::ZERO).delay,
+            zero_failure.delay
+        );
+
+        let oversized_interval = crate::daemon::retry::RETRY_CAP.saturating_mul(2);
+        let mut oversized = crate::daemon::retry::RetryState::new(oversized_interval);
+        assert_eq!(
+            oversized
+                .on_failure("history store failed", oversized_interval)
+                .delay,
+            crate::daemon::retry::RETRY_CAP
+        );
+        assert_eq!(
+            oversized.on_success(oversized_interval).delay,
+            crate::daemon::retry::RETRY_CAP
+        );
+        assert_eq!(
+            oversized.on_success(oversized_interval).delay,
+            oversized_interval
+        );
+    }
+
+    #[test]
+    fn ingress_partial_poll_preserves_progress_and_drives_retry() {
+        let mut outcome = crate::daemon::handle_ingress::IngressPollOutcome {
+            enqueued: 2,
+            failure_count: 0,
+            first_failure: None,
+        };
+        outcome.record_failure(
+            "control stream read",
+            "control:tenant:user:session:thread".to_string(),
+            &"history storage failed: I/O error: short read on WAL frame at offset 840512: expected 4096 bytes, got 0",
+        );
+
+        assert_eq!(outcome.enqueued, 2);
+        let failure = outcome.retry_failure().unwrap();
+        assert_eq!(
+            failure.key,
+            "control stream read: history storage failed: I/O error: short read on WAL frame"
+        );
+        assert!(failure.message.contains("control stream read"));
+    }
 
     #[test]
     fn rc5_spawned_and_oldest_joined_payloads_decode_as_a_settlement() {
