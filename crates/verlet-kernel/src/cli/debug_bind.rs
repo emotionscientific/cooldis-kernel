@@ -252,8 +252,8 @@ async fn load_debug_bind_daemon_events(
     endpoint: &crate::cli::debug_rpc::DebugRpcEndpointArgs,
     thread_id: &str,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<RecordedReceiptEvent>> {
-    let url = crate::cli::debug_rpc::resolve_debug_rpc_endpoint(endpoint)?;
-    let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&url).await?;
+    let endpoint = crate::cli::debug_rpc::resolve_debug_rpc_endpoint(endpoint)?;
+    let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&endpoint).await?;
     let mut cursor: Option<String> = None;
     let mut events = Vec::new();
     let compile_kind = verlet_history::EventKind::ManifestCompileCompleted;
@@ -792,10 +792,11 @@ pub(crate) fn print_debug_bind_help() {
         "verlet debug bind\n\
 \n\
 Usage:\n\
-  verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
+  verlet debug bind <thread-id> [--json] [--url <unix://path|ws-url> | --config <verlet.toml> | --journal <db>]\n\
 \n\
 Explain the effective runtime envelope from recorded manifest compile and bind\n\
-receipts. Daemon mode uses thread/events/list; --journal reads Turso offline.\n"
+receipts. Live mode discovers the current instance endpoint when no explicit\n\
+endpoint flag is given; --journal reads Turso offline.\n"
     );
 }
 

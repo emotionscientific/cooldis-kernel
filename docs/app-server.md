@@ -118,8 +118,8 @@ With a prompt argument, it opens the terminal console and submits that prompt:
 cargo run --bin verlet -- chat "hello from verlet"
 ```
 
-`verlet debug rpc` connects to a running standalone or server WebSocket app
-server. It is useful for protocol debugging
+`verlet debug rpc` connects to a running standalone or server app server. It
+is useful for protocol debugging
 and for checking live state from scripts. Export the credential first so each
 command presents it:
 
@@ -129,9 +129,13 @@ verlet debug rpc call thread/list
 verlet debug rpc call thread/read '{"threadId":"...","includeTurns":false}'
 ```
 
-By default it connects to `ws://127.0.0.1:49200/rpc`. Pass `--url` for another
-running WebSocket endpoint, or `--config` to read `daemon.app_server.listen`
-from a `verlet.toml`:
+Without `--url` or `--config`, it discovers the project instance from the
+working directory and connects to the listener recorded in its `endpoint.json`,
+including a Unix socket. If no instance or endpoint record exists, it falls
+back to `ws://127.0.0.1:49200/rpc`. Pass `--url` with `unix://path` or a
+WebSocket URL for an explicit endpoint, or `--config` to read a WebSocket
+`daemon.app_server.listen` from a `verlet.toml`. A stale record error names the
+record path and suggests the cold `debug journal --journal` lane:
 
 ```sh
 verlet debug rpc turn --new "hello from the daemon"
@@ -141,7 +145,7 @@ verlet debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 
 `verlet debug bind` answers why a thread has its effective configuration by
 projecting its recorded `manifest.compile.completed` and
-`manifest.bind.completed` receipts. It uses the same WebSocket endpoint
+`manifest.bind.completed` receipts. It uses the same endpoint
 selection as `debug rpc`, and it can inspect the same thread offline from the
 Turso journal without a daemon:
 

@@ -170,8 +170,8 @@ fn parse_debug_journal_sequence(
 async fn load_debug_journal_rpc(
     options: &DebugJournalArgs,
 ) -> crate::kernel::runtime_host::VerletResult<Vec<verlet_history::EventRecord>> {
-    let url = crate::cli::debug_rpc::resolve_debug_rpc_endpoint(&options.endpoint)?;
-    let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&url).await?;
+    let endpoint = crate::cli::debug_rpc::resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = crate::cli::debug_rpc::connect_debug_rpc_client(&endpoint).await?;
     let result = client
         .request("journal/events/list", debug_journal_rpc_params(options))
         .await?;
@@ -261,10 +261,11 @@ pub(crate) fn print_debug_journal_help() {
         "verlet debug journal\n\
 \n\
 Usage:\n\
-  verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
+  verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <unix://path|ws-url> | --config <verlet.toml> | --journal <db>]\n\
 \n\
-List raw event records for forensic inspection. Live mode reads through the\n\
-owner RPC. --journal directly opens a cold Turso store read-only and is refused\n\
+List raw event records for forensic inspection. Live mode discovers the current\n\
+instance endpoint and reads through its owner RPC. --journal directly opens a\n\
+cold Turso store read-only and is refused\n\
 while another owner process holds that store. Sequence filters are positive,\n\
 inclusive, and apply to each stream's local sequence; without --thread the\n\
 result can contain records from many streams with the same sequence.\n"

@@ -26,9 +26,9 @@ pub(crate) async fn run_debug(
     }
 }
 
-/// `verlet debug rpc` — protocol-level debug client for a RUNNING daemon's
-/// app-server websocket. Connects with `OperatorClient::connect_websocket`,
-/// performs the initialize handshake, then dispatches a subcommand.
+/// `verlet debug rpc` is a protocol-level debug client for a running daemon's
+/// app-server endpoint. It performs the initialize handshake, then dispatches
+/// a subcommand.
 pub(crate) async fn run_debug_rpc(
     mut args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
@@ -51,10 +51,10 @@ pub(crate) async fn run_debug_rpc(
     }
 }
 
-/// Endpoint selection shared by all `debug rpc` subcommands:
-/// `--url <ws://…>` wins; else `--config <verlet.toml>` reads
-/// `daemon.app_server.listen`; else default `ws://127.0.0.1:49200/rpc`.
-/// `--url` and `--config` together is a usage error.
+/// Endpoint selection shared by `debug rpc`, `debug bind`, and `debug journal`.
+/// `--url` wins, then `--config`. Without either flag, the resolver discovers
+/// the current project state home and reads its endpoint record. The fixed
+/// websocket endpoint remains the fallback when that record does not exist.
 #[derive(Debug)]
 pub(crate) struct DebugRpcEndpointArgs {
     pub(crate) url: Option<String>,
@@ -93,6 +93,24 @@ pub(crate) enum DebugRpcTurnStreamResult {
     TurnError(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DebugRpcTransport {
+    Unix(std::path::PathBuf),
+    WebSocket(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedDebugRpcEndpoint {
+    pub(crate) transport: DebugRpcTransport,
+    pub(crate) record_path: Option<std::path::PathBuf>,
+}
+
+pub(crate) enum DebugRpcClient {
+    #[cfg(unix)]
+    Unix(crate::adapters::operator_client::OperatorClient<tokio::net::UnixStream>),
+    WebSocket(crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>),
+}
+
 pub(crate) const DEBUG_RPC_DEFAULT_URL: &str = "ws://127.0.0.1:49200/rpc";
 pub(crate) const DEBUG_RPC_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -104,8 +122,8 @@ pub(crate) async fn run_debug_rpc_call(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_call_args(args)?;
-    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_debug_rpc_client(&url).await?;
+    let endpoint = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&endpoint).await?;
     let result = client.request(&options.method, options.params).await?;
     serde_json::to_writer_pretty(std::io::stdout(), &result).map_err(|err| {
         crate::cli::usage_error(format!("failed to encode JSON-RPC result: {err}"))
@@ -126,8 +144,8 @@ pub(crate) async fn run_debug_rpc_turn(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_turn_args(args)?;
-    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_debug_rpc_client(&url).await?;
+    let endpoint = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&endpoint).await?;
     let thread_id = match &options.target {
         DebugRpcThreadTarget::New => {
             let thread = client.thread_start(serde_json::json!({})).await?;
@@ -167,8 +185,8 @@ pub(crate) async fn run_debug_rpc_tail(
     args: Vec<std::ffi::OsString>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
     let options = parse_debug_rpc_tail_args(args)?;
-    let url = resolve_debug_rpc_endpoint(&options.endpoint)?;
-    let mut client = connect_debug_rpc_client(&url).await?;
+    let endpoint = resolve_debug_rpc_endpoint(&options.endpoint)?;
+    let mut client = connect_debug_rpc_client(&endpoint).await?;
     client
         .request(
             "thread/resume",
@@ -213,12 +231,13 @@ pub(crate) fn print_debug_rpc_help() {
         "verlet debug rpc\n\
 \n\
 Usage:\n\
-  verlet debug rpc call <method> [PARAMS_JSON] [--url <ws-url> | --config <verlet.toml>]\n\
-  verlet debug rpc turn (--thread <id> | --new) [--json] <text> [--url <ws-url> | --config <verlet.toml>]\n\
-  verlet debug rpc tail --thread <id> [--url <ws-url> | --config <verlet.toml>]\n\
+  verlet debug rpc call <method> [PARAMS_JSON] [--url <unix://path|ws-url> | --config <verlet.toml>]\n\
+  verlet debug rpc turn (--thread <id> | --new) [--json] <text> [--url <unix://path|ws-url> | --config <verlet.toml>]\n\
+  verlet debug rpc tail --thread <id> [--url <unix://path|ws-url> | --config <verlet.toml>]\n\
 \n\
-Protocol-level debug client for a running daemon's app-server websocket.\n\
-Defaults to ws://127.0.0.1:49200/rpc when neither --url nor --config is given.\n\
+Protocol-level debug client for a running daemon's app-server endpoint.\n\
+Without --url or --config, discovers the current instance endpoint record;\n\
+falls back to ws://127.0.0.1:49200/rpc when no record exists.\n\
 call prints the JSON-RPC result; turn streams agent deltas as text (or all\n\
 notifications as JSONL with --json); tail prints notifications until Ctrl-C.\n"
     );
@@ -396,16 +415,34 @@ pub(crate) fn validate_debug_rpc_endpoint_args(
 
 pub(crate) fn resolve_debug_rpc_endpoint(
     endpoint: &DebugRpcEndpointArgs,
-) -> crate::kernel::runtime_host::VerletResult<String> {
+) -> crate::kernel::runtime_host::VerletResult<ResolvedDebugRpcEndpoint> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        debug_rpc_usage_error(format!(
+            "failed to read the working directory for endpoint discovery: {error}"
+        ))
+    })?;
+    resolve_debug_rpc_endpoint_from(endpoint, &cwd)
+}
+
+pub(crate) fn resolve_debug_rpc_endpoint_from(
+    endpoint: &DebugRpcEndpointArgs,
+    cwd: &std::path::Path,
+) -> crate::kernel::runtime_host::VerletResult<ResolvedDebugRpcEndpoint> {
     validate_debug_rpc_endpoint_args(endpoint)?;
     if let Some(url) = &endpoint.url {
-        return Ok(url.clone());
+        return Ok(ResolvedDebugRpcEndpoint {
+            transport: debug_rpc_transport_from_url(url)?,
+            record_path: None,
+        });
     }
     if let Some(config_path) = &endpoint.config {
         let loaded = crate::daemon::daemon_config::load_verlet_daemon_config(Some(config_path))?;
         match loaded.config.app_server.listen_addr()? {
             crate::adapters::app_server::AppServerListenAddr::WebSocket(_) => {
-                return Ok(loaded.config.app_server.listen);
+                return Ok(ResolvedDebugRpcEndpoint {
+                    transport: DebugRpcTransport::WebSocket(loaded.config.app_server.listen),
+                    record_path: None,
+                });
             }
             crate::adapters::app_server::AppServerListenAddr::Unix(_) => {
                 return Err(crate::cli::usage_error(
@@ -414,26 +451,114 @@ pub(crate) fn resolve_debug_rpc_endpoint(
             }
         }
     }
-    Ok(DEBUG_RPC_DEFAULT_URL.to_string())
+
+    let resolved = crate::cli::console::resolve_instance_app_server_config(
+        cwd.to_path_buf(),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    let state_root = resolved.config.state_home;
+    let record_path = state_root.join(crate::adapters::app_server::ENDPOINT_RECORD_NAME);
+    let record = match std::fs::read(&record_path) {
+        Ok(record) => record,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ResolvedDebugRpcEndpoint {
+                transport: DebugRpcTransport::WebSocket(DEBUG_RPC_DEFAULT_URL.to_string()),
+                record_path: None,
+            });
+        }
+        Err(error) => {
+            return Err(debug_rpc_usage_error(format!(
+                "failed to read Verlet instance endpoint record {}: {error}",
+                record_path.display()
+            )));
+        }
+    };
+    let instance =
+        serde_json::from_slice::<crate::adapters::app_server::instance::InstanceEndpoint>(&record)
+            .map_err(|error| {
+                debug_rpc_usage_error(format!(
+                    "failed to decode Verlet instance endpoint record {}: {error}",
+                    record_path.display()
+                ))
+            })?;
+    if !instance.unix_socket.is_absolute()
+        || instance.started_at.trim().is_empty()
+        || instance.instance_id.trim().is_empty()
+    {
+        return Err(debug_rpc_usage_error(format!(
+            "Verlet instance endpoint record {} is invalid",
+            record_path.display()
+        )));
+    }
+    if !crate::adapters::app_server::instance::process_is_live(instance.pid) {
+        return Err(stale_debug_rpc_record_error(
+            &record_path,
+            format!("recorded pid {} is not running", instance.pid),
+        ));
+    }
+    Ok(ResolvedDebugRpcEndpoint {
+        transport: DebugRpcTransport::Unix(instance.unix_socket),
+        record_path: Some(record_path),
+    })
+}
+
+fn debug_rpc_transport_from_url(
+    url: &str,
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcTransport> {
+    if let Some(path) = url.strip_prefix("unix://") {
+        if path.is_empty() {
+            return Err(debug_rpc_usage_error(
+                "--url unix:// requires a socket path",
+            ));
+        }
+        return Ok(DebugRpcTransport::Unix(std::path::PathBuf::from(path)));
+    }
+    Ok(DebugRpcTransport::WebSocket(url.to_string()))
 }
 
 pub(crate) async fn connect_debug_rpc_client(
-    url: &str,
-) -> crate::kernel::runtime_host::VerletResult<
-    crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>,
-> {
-    crate::adapters::operator_client::OperatorClient::connect_websocket(
-        url,
-        crate::adapters::operator_client::OperatorConnectConfig {
-            client_name: "verlet-debug-rpc".to_string(),
-            ..crate::adapters::operator_client::OperatorConnectConfig::default()
-        },
-    )
-    .await
+    endpoint: &ResolvedDebugRpcEndpoint,
+) -> crate::kernel::runtime_host::VerletResult<DebugRpcClient> {
+    let config = crate::adapters::operator_client::OperatorConnectConfig {
+        client_name: "verlet-debug-rpc".to_string(),
+        ..crate::adapters::operator_client::OperatorConnectConfig::default()
+    };
+    let connected = match &endpoint.transport {
+        DebugRpcTransport::Unix(path) => {
+            #[cfg(unix)]
+            {
+                crate::adapters::operator_client::OperatorClient::connect_unix(path.clone(), config)
+                    .await
+                    .map(DebugRpcClient::Unix)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (path, config);
+                Err(debug_rpc_usage_error(
+                    "unix:// debug RPC endpoints require a Unix platform",
+                ))
+            }
+        }
+        DebugRpcTransport::WebSocket(url) => {
+            crate::adapters::operator_client::OperatorClient::connect_websocket(url, config)
+                .await
+                .map(DebugRpcClient::WebSocket)
+        }
+    };
+    connected.map_err(|error| match endpoint.record_path.as_deref() {
+        Some(record_path) => stale_debug_rpc_record_error(
+            record_path,
+            format!("the recorded listener could not be reached: {error}"),
+        ),
+        None => error,
+    })
 }
 
 pub(crate) async fn stream_debug_rpc_turn(
-    client: &mut crate::adapters::operator_client::OperatorClient<tokio::net::TcpStream>,
+    client: &mut DebugRpcClient,
     thread_id: &str,
     turn_id: &str,
     json_output: bool,
@@ -496,6 +621,79 @@ pub(crate) async fn stream_debug_rpc_turn(
             }
         }
     }
+}
+
+impl DebugRpcClient {
+    pub(crate) async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<serde_json::Value> {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(client) => client.request(method, params).await,
+            Self::WebSocket(client) => client.request(method, params).await,
+        }
+    }
+
+    pub(crate) async fn thread_start(
+        &mut self,
+        params: serde_json::Value,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::operator_client::OperatorThread>
+    {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(client) => client.thread_start(params).await,
+            Self::WebSocket(client) => client.thread_start(params).await,
+        }
+    }
+
+    pub(crate) async fn turn_start_text(
+        &mut self,
+        thread_id: &str,
+        text: &str,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::operator_client::OperatorTurn>
+    {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(client) => client.turn_start_text(thread_id, text).await,
+            Self::WebSocket(client) => client.turn_start_text(thread_id, text).await,
+        }
+    }
+
+    pub(crate) async fn next_event(
+        &mut self,
+    ) -> crate::kernel::runtime_host::VerletResult<crate::adapters::operator_client::OperatorEvent>
+    {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(client) => client.next_event().await,
+            Self::WebSocket(client) => client.next_event().await,
+        }
+    }
+
+    pub(crate) async fn close(&mut self) -> crate::kernel::runtime_host::VerletResult<()> {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(client) => client.close().await,
+            Self::WebSocket(client) => client.close().await,
+        }
+    }
+}
+
+fn stale_debug_rpc_record_error(
+    record_path: &std::path::Path,
+    detail: impl std::fmt::Display,
+) -> crate::kernel::runtime_host::VerletError {
+    let journal = record_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("session_history.turso");
+    debug_rpc_usage_error(format!(
+        "Verlet instance endpoint record {} appears stale: {detail}; after confirming the owner has stopped, inspect the cold journal with `verlet debug journal --journal {}`",
+        record_path.display(),
+        journal.display()
+    ))
 }
 
 pub(crate) fn print_jsonl_notification(
@@ -585,8 +783,8 @@ pub(crate) fn print_debug_help() {
         "verlet debug\n\
 \n\
 Usage:\n\
-  verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
-  verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
+  verlet debug bind <thread-id> [--json] [--url <unix://path|ws-url> | --config <verlet.toml> | --journal <db>]\n\
+  verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <unix://path|ws-url> | --config <verlet.toml> | --journal <db>]\n\
   verlet debug rpc (call|turn|tail) ...   debug client for a running daemon (see `verlet debug rpc --help`)\n\
 \n\
 Maintainer and protocol inspection tools. These commands are not the public\n\
