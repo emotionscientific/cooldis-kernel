@@ -367,7 +367,7 @@ impl RuntimeServices {
         Ok(appended)
     }
 
-    async fn run_bound_couplings(
+    pub(crate) async fn run_bound_couplings(
         &self,
         appended: Vec<verlet_history::EventRecord>,
     ) -> crate::kernel::runtime_host::VerletResult<()> {

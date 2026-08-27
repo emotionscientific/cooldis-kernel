@@ -3701,11 +3701,13 @@ impl crate::adapters::app_server::VerletAppServer {
         for event in control_events
             .iter()
             .filter(|event| event.kind == verlet_history::EventKind::TurnResumed)
-            .chain(
-                thread_events
-                    .iter()
-                    .filter(|event| event.kind == verlet_history::EventKind::TurnCompleted),
-            )
+            .chain(thread_events.iter().filter(|event| {
+                matches!(
+                    event.kind,
+                    verlet_history::EventKind::TurnCompleted
+                        | verlet_history::EventKind::TurnFailed
+                )
+            }))
         {
             if let Some(turn_id) = event
                 .payload

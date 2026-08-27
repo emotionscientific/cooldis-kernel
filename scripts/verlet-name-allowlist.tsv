@@ -1,6 +1,6 @@
 # path	reason
 @source-pattern	cooldis\.events/0\.3	Frozen event-kind vocabulary version.
-@source-pattern	(^|[^[:alnum:]_.-])cooldis\.events/0\.4([^[:alnum:]_.-]|$)	Frozen event-kind vocabulary version.
+@source-pattern	(^|[^[:alnum:]_.-])cooldis\.events/0\.5([^[:alnum:]_.-]|$)	Frozen event-kind vocabulary version.
 @source-pattern	cooldis\.event\.	Frozen event payload schema-ID namespace.
 @source-pattern	cooldis\.stream\.	Frozen stream schema-ID namespace.
 @source-pattern	cooldis\.context\.[a-z0-9_.-]+/[0-9]+	Frozen context schema IDs.

@@ -126,3 +126,61 @@ fn render_debug_journal_keeps_each_record_on_one_compact_line() {
     assert!(rendered.contains(":7\tsession.entry.appended\t"));
     assert!(rendered.contains(r#"{"text":"first\nsecond"}"#));
 }
+
+#[tokio::test]
+async fn turn_failed_kind_filters_a_real_journal_store() {
+    use verlet_history::EventStore as _;
+
+    let root = std::env::temp_dir().join(format!(
+        "verlet-debug-journal-turn-failed-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let journal = root.join("session_history.turso");
+    let store = verlet_history_sqlite::SqliteSessionStore::open(&journal)
+        .await
+        .unwrap();
+    let coordinates = verlet_runtime_contracts::ThreadCoordinates::new("tenant", "user", "session");
+    store
+        .append_events(
+            &verlet_history::EventStreamId::for_thread(&coordinates),
+            vec![verlet_history::NewEventRecord::discharged(
+                coordinates,
+                verlet_history::EventKind::TurnFailed,
+                serde_json::to_value(verlet_history::TurnFailedPayload::new(
+                    "turn-1",
+                    verlet_history::TurnFailureErrorClass::ProviderHttp,
+                    Some("openai".to_string()),
+                    Some(503),
+                    "provider HTTP status 503",
+                    2,
+                ))
+                .unwrap(),
+                verlet_history::EventProvenance {
+                    discharged_by: Some("test:debug-journal".to_string()),
+                    function: Some("turn_fail/v1".to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    drop(store);
+
+    let options = crate::cli::debug_journal::parse_debug_journal_args(vec![
+        "--kind".into(),
+        "turn.failed".into(),
+        "--journal".into(),
+        journal.clone().into_os_string(),
+    ])
+    .unwrap();
+    assert_eq!(options.kind, Some(verlet_history::EventKind::TurnFailed));
+    let records = crate::cli::debug_journal::load_debug_journal_direct(&journal, &options)
+        .await
+        .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, verlet_history::EventKind::TurnFailed);
+    assert_eq!(records[0].payload["turn_id"], "turn-1");
+    let _ = std::fs::remove_dir_all(root);
+}

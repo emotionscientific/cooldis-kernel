@@ -658,7 +658,8 @@ fn fold_remote_status(
         }
         verlet_history::EventKind::LoopDenied
         | verlet_history::EventKind::LoopBlocked
-        | verlet_history::EventKind::LoopBudgetExhausted => {
+        | verlet_history::EventKind::LoopBudgetExhausted
+        | verlet_history::EventKind::TurnFailed => {
             Some(verlet_runtime_contracts::ThreadStatus::Failed)
         }
         verlet_history::EventKind::TurnSubmitted => {
@@ -1245,9 +1246,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn turn_failed_folds_remote_status_to_failed() {
+        let request = request_fixture();
+        let record = child_record(
+            &request,
+            verlet_history::EventKind::TurnFailed,
+            "spawn-turn",
+        );
+        assert_eq!(
+            crate::daemon::remote_store::process_executor::fold_remote_status(&[record]),
+            Some(verlet_runtime_contracts::ThreadStatus::Failed)
+        );
+    }
+
     #[tokio::test]
     async fn spawn_turn_failure_terminals_settle_with_emo426_state_projection() {
         for (kind, expected) in [
+            (
+                verlet_history::EventKind::TurnFailed,
+                verlet_history::ThreadTerminalState::Failed,
+            ),
             (
                 verlet_history::EventKind::LoopDenied,
                 verlet_history::ThreadTerminalState::Failed,
