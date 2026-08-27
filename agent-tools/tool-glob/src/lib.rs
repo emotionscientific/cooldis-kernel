@@ -17,7 +17,7 @@
 //!   `/`-separated, and sorted
 //!   lexicographically (Pi preserves backend process order; we pin deterministic
 //!   order instead — recorded deviation).
-//! - Ignore-rule files over the shared 16 KiB file limit are skipped.
+//! - Ignore-rule files over the shared 8 MiB file limit are skipped.
 //! - `limit` (default 1000) and the 50 KiB complete-line head limit emit Pi's
 //!   actionable notices.
 

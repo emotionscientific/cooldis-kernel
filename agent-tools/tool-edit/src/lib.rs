@@ -21,7 +21,7 @@
 //!   matching normalizes CRLF to LF for comparison.
 //! - Invalid UTF-8 decodes lossily for matching; untouched lines are spliced
 //!   back from their original bytes.
-//! - Edit keeps its whole-file atomic behavior under the shared 16 KiB ceiling.
+//! - Edit keeps its whole-file atomic behavior under the shared 8 MiB ceiling.
 //!   Oversized targets return a structured error and are never silently
 //!   skipped or partially changed.
 

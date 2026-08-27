@@ -15,7 +15,7 @@ max_output_bytes = 262144
 
 [[operations]]
 name = "edit"
-description = "Atomically apply replacements to a file up to 16 KiB with Pi diff output and error envelopes."
+description = "Atomically apply replacements to a file up to 8 MiB with Pi diff output and error envelopes."
 input_schema = "schemas/edit.input.json"
 output_schema = "schemas/edit.output.json"
 required_capabilities = ["fs.write"]

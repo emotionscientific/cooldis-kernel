@@ -13,7 +13,7 @@
 //! - Caller limits and automatic truncation use Pi's exact continuation text.
 //! - Line accounting follows Pi's newline split: an empty file is one empty
 //!   logical line, and a terminal newline creates a final empty line.
-//! - Files over the shared 16 KiB limit return a structured tool error; the
+//! - Files over the shared 8 MiB limit return a structured tool error; the
 //!   4 MiB result cap remains a final structured-result backstop.
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -344,14 +344,19 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_file_ceiling_precedes_pi_first_line_truncation() {
+    fn reports_an_oversized_first_line_with_pi_text() {
+        // Pi behavior sheet item 9; source: core/tools/read.ts:297-301.
         let root = tempfile::tempdir().unwrap();
         let content = vec![b'x'; verlet_tool_core::DEFAULT_MAX_BYTES + 1];
         std::fs::write(root.path().join("large.txt"), content).unwrap();
 
-        let error = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap_err();
+        let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
 
-        assert!(error.to_string().contains("byte read limit: large.txt"));
+        assert_eq!(
+            output.text,
+            "[Line 1 is 50.0KB, exceeds 50.0KB limit. Use bash: sed -n '1p' large.txt | head -c 51200]"
+        );
+        assert!(output.truncation.unwrap().first_line_exceeds_limit);
     }
 
     #[test]
@@ -365,14 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_file_ceiling_precedes_pi_byte_truncation() {
+    fn byte_truncation_uses_complete_lines_and_pi_notice() {
+        // Pi behavior sheet item 9; source: core/tools/read.ts:294-312.
         let root = tempfile::tempdir().unwrap();
         let line = format!("{}\n", "x".repeat(1024));
         std::fs::write(root.path().join("large.txt"), line.repeat(60)).unwrap();
 
-        let error = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap_err();
+        let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
 
-        assert!(error.to_string().contains("byte read limit: large.txt"));
+        assert!(output.text.ends_with(
+            "\n\n[Showing lines 1-49 of 61 (50.0KB limit). Use offset=50 to continue.]"
+        ));
     }
 
     #[test]
@@ -417,16 +425,17 @@ mod tests {
     fn automatically_truncates_at_two_thousand_lines_with_pi_notice() {
         // Pi behavior sheet item 9; source: core/tools/read.ts:294-312.
         let root = tempfile::tempdir().unwrap();
-        let content = std::iter::repeat_n("x", 2001)
+        let content = (1..=2001)
+            .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(root.path().join("large.txt"), content).unwrap();
 
         let output = crate::run(args("large.txt", None, None), &fs(root.path())).unwrap();
 
-        assert!(output
-            .text
-            .ends_with("x\n\n[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]"));
+        assert!(output.text.ends_with(
+            "line 2000\n\n[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]"
+        ));
     }
 
     #[test]
