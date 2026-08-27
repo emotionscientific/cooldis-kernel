@@ -32,6 +32,8 @@
 
 ### Fixes
 
+- Terminally failed turns now append one bounded, body-free `turn.failed`
+  outcome to the thread journal with provider attribution and retry count.
 - The serve thread-handle ingress adapter now backs off persistent history-store
   failures to a 60 second retry interval, logs only retry state transitions,
   reports degradation, and reports recovery without exiting the serve process.

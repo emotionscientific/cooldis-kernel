@@ -535,6 +535,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "turn.waiting",
         "turn.resumed",
         "turn.completed",
+        "turn.failed",
         "approval.requested",
         "approval.resolved",
         "mandate.started",
@@ -566,7 +567,7 @@ fn event_kind_parse_round_trips_and_fails_closed() {
         "io.egress.failed",
         "admission.decided",
     ];
-    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.4");
+    assert_eq!(crate::EVENT_KIND_SCHEMA_VERSION, "cooldis.events/0.5");
     let kinds = <crate::EventKind as strum::VariantArray>::VARIANTS;
     let actual: Vec<&str> = kinds.iter().map(|kind| kind.as_ref()).collect();
     assert_eq!(actual, expected);
@@ -589,14 +590,16 @@ fn event_kind_parse_round_trips_and_fails_closed() {
 }
 
 #[test]
-fn v03_journal_event_kinds_remain_decodable_after_v04_bump() {
-    let v03_kinds = [
+fn v04_journal_event_kinds_remain_decodable_after_v05_bump() {
+    let v04_kinds = [
         "session.entry.appended",
         "context.compile.completed",
         "context.summary.completed",
         "context.read_plan.set",
         "manifest.compile.completed",
         "manifest.bind.completed",
+        "binding.attached",
+        "binding.detached",
         "tool.universe.discovery.completed",
         "tool.universe.call.completed",
         "tool.call.requested",
@@ -638,10 +641,10 @@ fn v03_journal_event_kinds_remain_decodable_after_v04_bump() {
         "io.egress.failed",
         "admission.decided",
     ];
-    let coordinates = coords("tenant_a", "user_1", "v03-journal");
+    let coordinates = coords("tenant_a", "user_1", "v04-journal");
     let stream_id = crate::EventStreamId::for_thread(&coordinates);
 
-    for (index, encoded_kind) in v03_kinds.into_iter().enumerate() {
+    for (index, encoded_kind) in v04_kinds.into_iter().enumerate() {
         let kind = encoded_kind.parse::<crate::EventKind>().unwrap();
         let record = crate::EventRecord::from_new(
             stream_id.clone(),
@@ -658,9 +661,48 @@ fn v03_journal_event_kinds_remain_decodable_after_v04_bump() {
 
         assert_eq!(
             decoded.kind, kind,
-            "failed to decode v0.3 kind {encoded_kind}"
+            "failed to decode v0.4 kind {encoded_kind}"
         );
     }
+}
+
+#[test]
+fn turn_failed_payload_serializes_closed_class_and_truncates_utf8_message() {
+    let payload = crate::TurnFailedPayload::new(
+        "turn-1",
+        crate::TurnFailureErrorClass::ProviderHttp,
+        Some("openai".to_string()),
+        Some(400),
+        "é".repeat(600),
+        2,
+    );
+
+    assert_eq!(payload.message.as_bytes().len(), 1024);
+    assert!(payload.message.is_char_boundary(payload.message.len()));
+    assert_eq!(
+        serde_json::to_value(&payload).unwrap(),
+        serde_json::json!({
+            "turn_id": "turn-1",
+            "error_class": "provider_http",
+            "provider_id": "openai",
+            "http_status": 400,
+            "message": "é".repeat(512),
+            "retries_attempted": 2,
+        })
+    );
+
+    let decoded: crate::TurnFailedPayload =
+        serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap();
+    assert_eq!(
+        decoded.error_class,
+        crate::TurnFailureErrorClass::ProviderHttp
+    );
+    crate::stream_schema_registry_v1()
+        .validate(
+            &crate::EventKind::TurnFailed.payload_schema_id(),
+            &serde_json::to_value(decoded).unwrap(),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -672,6 +714,10 @@ fn event_kind_payload_schema_ids_are_frozen_for_stream_schema_v1() {
     assert_eq!(
         crate::EventKind::BindingDetached.payload_schema_id(),
         "cooldis.event.binding.detached/1"
+    );
+    assert_eq!(
+        crate::EventKind::TurnFailed.payload_schema_id(),
+        "cooldis.event.turn.failed/1"
     );
     assert_eq!(
         crate::EventKind::ContextCompileCompleted.payload_schema_id(),
@@ -1538,6 +1584,44 @@ fn stream_routing_decision_v1_separates_runtime_and_model_trace_profiles() {
         Some("controller:placement")
     );
     assert_eq!(decision.keys.stream_id, record.stream_id);
+}
+
+#[test]
+fn turn_failed_routes_as_model_trace_without_analytics_aggregation() {
+    let coordinates = coords("tenant_a", "user_1", "session_1");
+    let record = crate::EventRecord::from_new(
+        crate::EventStreamId::for_thread(&coordinates),
+        crate::EventSequence::new(10),
+        crate::NewEventRecord::discharged(
+            coordinates,
+            crate::EventKind::TurnFailed,
+            serde_json::to_value(crate::TurnFailedPayload::new(
+                "turn-1",
+                crate::TurnFailureErrorClass::Runner,
+                None,
+                None,
+                "runner failed",
+                0,
+            ))
+            .unwrap(),
+            crate::EventProvenance {
+                discharged_by: Some("propagator:agent-loop".to_string()),
+                ..crate::EventProvenance::default()
+            },
+        ),
+    );
+
+    let decision = record.route_decision_v1();
+    assert!(
+        decision
+            .routes
+            .contains(&crate::StreamRouteProfile::ModelTrace)
+    );
+    assert!(
+        !decision
+            .routes
+            .contains(&crate::StreamRouteProfile::AnalyticsAggregate)
+    );
 }
 
 #[test]

@@ -19,7 +19,8 @@ pub const STREAM_APPEND_ACK_SCHEMA_V1: &str = "cooldis.stream.append_ack/1";
 pub const STREAM_ROUTING_DECISION_SCHEMA_V1: &str = "cooldis.stream.routing_decision/1";
 pub const CONTEXT_READ_PLAN_SCHEMA_V1: &str = "cooldis.context.read_plan/1";
 pub const DEBUG_THREAD_EXPORT_SCHEMA_V1: &str = "cooldis.debug.thread_export/1";
-pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.4";
+pub const EVENT_KIND_SCHEMA_VERSION: &str = "cooldis.events/0.5";
+pub const TURN_FAILED_MESSAGE_MAX_BYTES: usize = 1024;
 
 pub const COMPACTION_SUMMARY_PREFIX: &str = "Compacted conversation summary:";
 
@@ -198,7 +199,7 @@ impl std::fmt::Display for EventRecordId {
     }
 }
 
-/// Frozen event-kind vocabulary, version `cooldis.events/0.4`.
+/// Frozen event-kind vocabulary, version `cooldis.events/0.5`.
 ///
 /// Laws:
 /// - The vocabulary is append-only: kinds may be added in later versions,
@@ -286,6 +287,9 @@ pub enum EventKind {
     /// A turn reached quiescence.
     #[strum(serialize = "turn.completed")]
     TurnCompleted,
+    /// A turn reached a terminal failure.
+    #[strum(serialize = "turn.failed")]
+    TurnFailed,
     /// A controller requested external approval.
     #[strum(serialize = "approval.requested")]
     ApprovalRequested,
@@ -452,6 +456,62 @@ pub enum AdmissionDecision {
     Observe,
     Reject,
     Coalesce,
+}
+
+/// Closed terminal failure classes recorded by `turn.failed`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureErrorClass {
+    ProviderHttp,
+    ProviderTransport,
+    Runner,
+    Internal,
+}
+
+/// Bounded terminal outcome recorded by `turn.failed`.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnFailedPayload {
+    pub turn_id: String,
+    pub error_class: TurnFailureErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub message: String,
+    pub retries_attempted: u32,
+}
+
+impl TurnFailedPayload {
+    pub fn new(
+        turn_id: impl Into<String>,
+        error_class: TurnFailureErrorClass,
+        provider_id: Option<String>,
+        http_status: Option<u16>,
+        message: impl Into<String>,
+        retries_attempted: u32,
+    ) -> Self {
+        Self {
+            turn_id: turn_id.into(),
+            error_class,
+            provider_id,
+            http_status,
+            message: truncate_utf8_bytes(message.into(), TURN_FAILED_MESSAGE_MAX_BYTES),
+            retries_attempted,
+        }
+    }
+}
+
+fn truncate_utf8_bytes(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value
 }
 
 #[derive(
@@ -1321,6 +1381,10 @@ pub fn stream_schema_registry_v1() -> &'static verlet_runtime_contracts::schema:
                 binding_detached_payload_schema_v1(),
             )?;
             registry.register(
+                EventKind::TurnFailed.payload_schema_id(),
+                turn_failed_payload_schema_v1(),
+            )?;
+            registry.register(
                 EventKind::ThreadSpawnRequested.payload_schema_id(),
                 thread_spawn_requested_payload_schema_v1(),
             )?;
@@ -1404,6 +1468,7 @@ fn event_kind_routes_to_model_trace(kind: EventKind) -> bool {
             | EventKind::ToolCallCompleted
             | EventKind::TurnSubmitted
             | EventKind::TurnCompleted
+            | EventKind::TurnFailed
     )
 }
 
@@ -1846,6 +1911,24 @@ fn binding_attachment_config_schema_v1() -> serde_json::Value {
 
 fn binding_effect_class_schema_v1() -> serde_json::Value {
     serde_json::json!({"enum": ["pure", "idempotent", "at-most-once"]})
+}
+
+pub fn turn_failed_payload_schema_v1() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["turn_id", "error_class", "message", "retries_attempted"],
+        "additionalProperties": false,
+        "properties": {
+            "turn_id": {"type": "string"},
+            "error_class": {
+                "enum": ["provider_http", "provider_transport", "runner", "internal"]
+            },
+            "provider_id": {"type": "string"},
+            "http_status": {"type": "integer"},
+            "message": {"type": "string"},
+            "retries_attempted": {"type": "integer"}
+        }
+    })
 }
 
 fn thread_spawned_payload_schema_v1() -> serde_json::Value {

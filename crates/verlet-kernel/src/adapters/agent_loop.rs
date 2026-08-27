@@ -870,7 +870,7 @@ impl AgentLoop {
             crate::kernel::runtime_host::runtime_api::ThreadEvent,
         >,
         fold_intra_turn_steers: bool,
-    ) -> crate::kernel::runtime_host::VerletResult<verlet_history::CanonicalMessage> {
+    ) -> Result<verlet_history::CanonicalMessage, TerminalTurnFailure> {
         let coordinates = turn_context.coordinates();
         let context = services.build_session_context(coordinates).await?;
         let source_cuts = context.source_cuts.clone();
@@ -1339,7 +1339,16 @@ async fn run_idle_provider_command(
                 input.provider = Some(turn_endpoint.config.provider.clone());
                 input.model = Some(turn_endpoint.config.model.clone());
             }
-            if let Err(err) = run_auto_compaction_if_needed(
+            let failed_turn = FailedTurnTransition {
+                coordinates,
+                services,
+                turn_id: &turn_id,
+                source_event_id: None,
+                thread_id,
+                events,
+                status,
+            };
+            if let Err(failure) = run_auto_compaction_if_needed(
                 runtime,
                 &turn_endpoint,
                 thread_context,
@@ -1351,14 +1360,7 @@ async fn run_idle_provider_command(
             )
             .await
             {
-                fail_provider_turn(
-                    coordinates,
-                    thread_id,
-                    events,
-                    status,
-                    "compaction",
-                    err.to_string(),
-                );
+                failed_turn.fail("compaction", failure).await;
                 return true;
             }
             let (turn_source_event_id, turn_delivery_start_sequence, turn_anchor_timestamp_ms) =
@@ -1377,13 +1379,7 @@ async fn run_idle_provider_command(
                         {
                             Ok(submitted) => submitted,
                             Err(err) => {
-                                let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
-                                let _ = events.send(
-                                    crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
-                                        thread_id,
-                                        message: err.to_string(),
-                                    },
-                                );
+                                failed_turn.fail_message("history", err.to_string()).await;
                                 return true;
                             }
                         };
@@ -1392,13 +1388,7 @@ async fn run_idle_provider_command(
                         (submitted.id, submitted.sequence, submitted.created_at_ms)
                     }
                     Err(err) => {
-                        let _ = status.send(verlet_runtime_contracts::ThreadStatus::Failed);
-                        let _ = events.send(
-                            crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed {
-                                thread_id,
-                                message: err.to_string(),
-                            },
-                        );
+                        failed_turn.fail_message("history", err.to_string()).await;
                         return true;
                     }
                 };
@@ -1446,14 +1436,14 @@ async fn run_idle_provider_command(
                     let _ = status.send(verlet_runtime_contracts::ThreadStatus::Idle);
                     false
                 }
-                Err(err) => {
+                Err(failure) => {
                     fail_provider_turn(
                         coordinates,
                         thread_id,
                         events,
                         status,
                         "compaction",
-                        err.to_string(),
+                        failure.message,
                     );
                     true
                 }
@@ -1514,14 +1504,17 @@ async fn run_idle_provider_command(
                     false
                 }
                 Err(err) => {
-                    fail_provider_turn(
+                    FailedTurnTransition {
                         coordinates,
+                        services,
+                        turn_id: &turn_id,
+                        source_event_id: None,
                         thread_id,
                         events,
                         status,
-                        "tool_resume",
-                        err.to_string(),
-                    );
+                    }
+                    .fail_message("tool_resume", err.to_string())
+                    .await;
                     true
                 }
             }
@@ -1578,7 +1571,7 @@ async fn run_auto_compaction_if_needed(
     services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     thread_id: verlet_runtime_contracts::ThreadId,
     events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
-) -> crate::kernel::runtime_host::VerletResult<()> {
+) -> Result<(), TerminalTurnFailure> {
     let Some(max_text_bytes) = runtime.compaction_policy.auto_max_context_text_bytes else {
         return Ok(());
     };
@@ -1676,7 +1669,7 @@ async fn run_compaction(
     services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     thread_id: verlet_runtime_contracts::ThreadId,
     events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
-) -> crate::kernel::runtime_host::VerletResult<()> {
+) -> Result<(), TerminalTurnFailure> {
     let input = crate::kernel::runtime_host::turn::TurnInput::text("");
     let turn_context = runtime.turn_context(
         thread_context,
@@ -1805,7 +1798,7 @@ async fn generate_compaction_summary(
     turn_context: &crate::kernel::runtime_host::turn::TurnContext,
     services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
     events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
-) -> crate::kernel::runtime_host::VerletResult<String> {
+) -> Result<String, TerminalTurnFailure> {
     let context = services
         .build_session_context(turn_context.coordinates())
         .await?;
@@ -1857,9 +1850,76 @@ struct ExecutedProviderResponse {
 }
 
 #[derive(Clone, Debug)]
+struct TerminalTurnFailure {
+    error_class: verlet_history::TurnFailureErrorClass,
+    provider_id: Option<String>,
+    http_status: Option<u16>,
+    message: String,
+    journal_message: String,
+    retries_attempted: u32,
+}
+
+impl TerminalTurnFailure {
+    fn from_code(code: &str, message: String) -> Self {
+        let error_class = if code == "history" {
+            verlet_history::TurnFailureErrorClass::Internal
+        } else {
+            verlet_history::TurnFailureErrorClass::Runner
+        };
+        Self {
+            error_class,
+            provider_id: None,
+            http_status: None,
+            journal_message: message.clone(),
+            message,
+            retries_attempted: 0,
+        }
+    }
+
+    fn provider(
+        provider_id: String,
+        error: ModelRequestAttemptError,
+        retries_attempted: u32,
+    ) -> Self {
+        Self {
+            error_class: error.terminal_class,
+            provider_id: Some(provider_id),
+            http_status: error.http_status,
+            message: error.message,
+            journal_message: error.journal_message,
+            retries_attempted,
+        }
+    }
+}
+
+impl From<crate::kernel::runtime_host::VerletError> for TerminalTurnFailure {
+    fn from(error: crate::kernel::runtime_host::VerletError) -> Self {
+        let error_class = match &error {
+            crate::kernel::runtime_host::VerletError::RuntimeExecution(_)
+            | crate::kernel::runtime_host::VerletError::RuntimeFactory(_) => {
+                verlet_history::TurnFailureErrorClass::Runner
+            }
+            _ => verlet_history::TurnFailureErrorClass::Internal,
+        };
+        let message = error.to_string();
+        Self {
+            error_class,
+            provider_id: None,
+            http_status: None,
+            journal_message: message.clone(),
+            message,
+            retries_attempted: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ModelRequestAttemptError {
     class: verlet_runtime_contracts::RuntimeModelRequestErrorClass,
+    terminal_class: verlet_history::TurnFailureErrorClass,
+    http_status: Option<u16>,
     message: String,
+    journal_message: String,
 }
 
 impl ModelRequestAttemptError {
@@ -1890,7 +1950,7 @@ async fn execute_provider_request(
     mode: verlet_provider::ProviderRequestMode,
     purpose: verlet_runtime_contracts::RuntimeModelRequestPurpose,
     events: &tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
-) -> crate::kernel::runtime_host::VerletResult<ExecutedProviderResponse> {
+) -> Result<ExecutedProviderResponse, TerminalTurnFailure> {
     let request_mode = mode;
     let mode = runtime_request_mode(mode);
     let mut endpoints = Vec::with_capacity(runtime.model_request_fallbacks.len() + 1);
@@ -1902,6 +1962,7 @@ async fn execute_provider_request(
     let retry_policy = runtime.model_request_retry_policy;
     let attempts = retry_policy.attempts();
     let mut last_error = None;
+    let mut retries_attempted = 0;
 
     'endpoints: for (endpoint_index, endpoint) in endpoints.iter().enumerate() {
         let request = request_for_endpoint(request, &endpoint.config);
@@ -2018,12 +2079,15 @@ async fn execute_provider_request(
                             tokio::select! {
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
                                 _ = turn_context.cancellation.cancelled() => {
-                                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
-                                        verlet_provider::ProviderError::Cancelled.to_string(),
+                                    return Err(TerminalTurnFailure::provider(
+                                        request.provider.clone(),
+                                        classify_provider_error(verlet_provider::ProviderError::Cancelled),
+                                        retries_attempted,
                                     ));
                                 }
                             }
                         }
+                        retries_attempted += 1;
                         continue;
                     }
 
@@ -2051,23 +2115,30 @@ async fn execute_provider_request(
                                 error: error.message.clone(),
                             },
                         );
-                        last_error = Some(error);
+                        last_error = Some((request.provider.clone(), error));
                         continue 'endpoints;
                     }
 
-                    return Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
-                        error.message,
+                    return Err(TerminalTurnFailure::provider(
+                        request.provider.clone(),
+                        error,
+                        retries_attempted,
                     ));
                 }
             }
         }
     }
 
-    Err(crate::kernel::runtime_host::VerletError::RuntimeExecution(
-        last_error
-            .map(|error| error.message)
-            .unwrap_or_else(|| "provider request did not run".to_string()),
-    ))
+    Err(last_error
+        .map(|(provider_id, error)| {
+            TerminalTurnFailure::provider(provider_id, error, retries_attempted)
+        })
+        .unwrap_or_else(|| {
+            TerminalTurnFailure::from_code(
+                "runtime_execution",
+                "provider request did not run".to_string(),
+            )
+        }))
 }
 
 async fn execute_provider_request_attempt(
@@ -2133,37 +2204,72 @@ fn model_request_id(
 
 fn classify_provider_error(error: verlet_provider::ProviderError) -> ModelRequestAttemptError {
     let message = error.to_string();
-    let class = match error {
-        verlet_provider::ProviderError::Cancelled => {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Cancelled
-        }
+    let (class, terminal_class, http_status, journal_message) = match error {
+        verlet_provider::ProviderError::Cancelled => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Cancelled,
+            verlet_history::TurnFailureErrorClass::Runner,
+            None,
+            "provider request cancelled".to_string(),
+        ),
         verlet_provider::ProviderError::UnsupportedCapability { .. }
-        | verlet_provider::ProviderError::ApiMismatch { .. } => {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability
-        }
-        verlet_provider::ProviderError::Http(_) => {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
-        }
-        verlet_provider::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited
-        }
+        | verlet_provider::ProviderError::ApiMismatch { .. } => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::UnsupportedCapability,
+            verlet_history::TurnFailureErrorClass::Runner,
+            None,
+            message.clone(),
+        ),
+        verlet_provider::ProviderError::Http(_) => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
+            verlet_history::TurnFailureErrorClass::ProviderTransport,
+            None,
+            message.clone(),
+        ),
+        verlet_provider::ProviderError::HttpStatus { status, .. } if status.as_u16() == 429 => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::RateLimited,
+            verlet_history::TurnFailureErrorClass::ProviderHttp,
+            Some(status.as_u16()),
+            format!("provider HTTP status {}", status.as_u16()),
+        ),
         verlet_provider::ProviderError::HttpStatus { status, .. }
             if status.is_server_error() || matches!(status.as_u16(), 408 | 409 | 425) =>
         {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable
+            (
+                verlet_runtime_contracts::RuntimeModelRequestErrorClass::Retryable,
+                verlet_history::TurnFailureErrorClass::ProviderHttp,
+                Some(status.as_u16()),
+                format!("provider HTTP status {}", status.as_u16()),
+            )
         }
-        verlet_provider::ProviderError::Decode(_)
-        | verlet_provider::ProviderError::HttpStatus { .. } => {
-            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal
-        }
+        verlet_provider::ProviderError::Decode(_) => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
+            verlet_history::TurnFailureErrorClass::ProviderTransport,
+            None,
+            message.clone(),
+        ),
+        verlet_provider::ProviderError::HttpStatus { status, .. } => (
+            verlet_runtime_contracts::RuntimeModelRequestErrorClass::Fatal,
+            verlet_history::TurnFailureErrorClass::ProviderHttp,
+            Some(status.as_u16()),
+            format!("provider HTTP status {}", status.as_u16()),
+        ),
     };
-    ModelRequestAttemptError { class, message }
+    ModelRequestAttemptError {
+        class,
+        terminal_class,
+        http_status,
+        message,
+        journal_message,
+    }
 }
 
 fn stream_assembly_error(message: impl Into<String>) -> ModelRequestAttemptError {
+    let message = message.into();
     ModelRequestAttemptError {
         class: verlet_runtime_contracts::RuntimeModelRequestErrorClass::StreamAssembly,
-        message: message.into(),
+        terminal_class: verlet_history::TurnFailureErrorClass::ProviderTransport,
+        http_status: None,
+        journal_message: message.clone(),
+        message,
     }
 }
 
@@ -2276,6 +2382,15 @@ async fn run_provider_turn(
 ) -> bool {
     runtime.retain_turn_endpoint(&turn_id, endpoint);
     let mut endpoint_retention = TurnEndpointRetention::new(runtime, &turn_id);
+    let failed_turn = FailedTurnTransition {
+        coordinates,
+        services,
+        turn_id: &turn_id,
+        source_event_id: Some(turn_source_event_id),
+        thread_id,
+        events,
+        status,
+    };
     let mut tool_rounds = match persisted_tool_rounds_for_turn(
         services,
         coordinates,
@@ -2286,14 +2401,7 @@ async fn run_provider_turn(
     {
         Ok(tool_rounds) => tool_rounds,
         Err(err) => {
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                "history",
-                err.to_string(),
-            );
+            failed_turn.fail_message("history", err.to_string()).await;
             return true;
         }
     };
@@ -2311,14 +2419,7 @@ async fn run_provider_turn(
                 .unwrap_or(crate::agent::agent_tool_router::DEFAULT_TOOL_CANCELLATION_GRACE),
             Ok(None) => crate::agent::agent_tool_router::DEFAULT_TOOL_CANCELLATION_GRACE,
             Err(err) => {
-                fail_provider_turn(
-                    coordinates,
-                    thread_id,
-                    events,
-                    status,
-                    "history",
-                    err.to_string(),
-                );
+                failed_turn.fail_message("history", err.to_string()).await;
                 return true;
             }
         };
@@ -2344,14 +2445,9 @@ async fn run_provider_turn(
         if let Err(err) =
             append_hook_mutation_witnesses(services, coordinates, outcome.mutation_witnesses).await
         {
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                "hook_pipeline",
-                err.to_string(),
-            );
+            failed_turn
+                .fail_message("hook_pipeline", err.to_string())
+                .await;
             return true;
         }
         if let Err(err) = append_hook_contexts(
@@ -2363,14 +2459,9 @@ async fn run_provider_turn(
         )
         .await
         {
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                "hook_pipeline",
-                err.to_string(),
-            );
+            failed_turn
+                .fail_message("hook_pipeline", err.to_string())
+                .await;
             return true;
         }
         if outcome.should_stop {
@@ -2397,14 +2488,7 @@ async fn run_provider_turn(
             {
                 Ok(pending) => pending,
                 Err(err) => {
-                    fail_provider_turn(
-                        coordinates,
-                        thread_id,
-                        events,
-                        status,
-                        "history",
-                        err.to_string(),
-                    );
+                    failed_turn.fail_message("history", err.to_string()).await;
                     return true;
                 }
             };
@@ -2420,14 +2504,7 @@ async fn run_provider_turn(
             match pending_witnessed_tool_batch_for_turn(services, coordinates, &turn_id).await {
                 Ok(batch) => batch,
                 Err(err) => {
-                    fail_provider_turn(
-                        coordinates,
-                        thread_id,
-                        events,
-                        status,
-                        "history",
-                        err.to_string(),
-                    );
+                    failed_turn.fail_message("history", err.to_string()).await;
                     return true;
                 }
             };
@@ -2458,14 +2535,9 @@ async fn run_provider_turn(
                 }
                 ToolBatchAwaitOutcome::Completed(Ok(_)) => {}
                 ToolBatchAwaitOutcome::Completed(Err(err)) => {
-                    fail_provider_turn(
-                        coordinates,
-                        thread_id,
-                        events,
-                        status,
-                        "tool_router",
-                        err.to_string(),
-                    );
+                    failed_turn
+                        .fail_message("tool_router", err.to_string())
+                        .await;
                     return true;
                 }
                 ToolBatchAwaitOutcome::Cancelled { reason } => {
@@ -2502,7 +2574,7 @@ async fn run_provider_turn(
                     return true;
                 }
                 ToolBatchAwaitOutcome::Failed { code, reason } => {
-                    fail_provider_turn(coordinates, thread_id, events, status, code, reason);
+                    failed_turn.fail_message(code, reason).await;
                     return true;
                 }
             }
@@ -2514,6 +2586,7 @@ async fn run_provider_turn(
         let mut failed = false;
         let mut failure_code = None;
         let mut failure_reason = None;
+        let mut terminal_failure = None;
         let mut emit_failure_signal = false;
         let mut terminal_join_recorded = false;
         let mut continue_after_tools = false;
@@ -2598,7 +2671,7 @@ async fn run_provider_turn(
                         return true;
                     }
                     ActiveProviderCommandOutcome::Failed { code, reason } => {
-                        fail_provider_turn(coordinates, thread_id, events, status, code, reason);
+                        failed_turn.fail_message(code, reason).await;
                         return true;
                     }
                 }
@@ -2840,14 +2913,7 @@ async fn run_provider_turn(
                                             return true;
                                         }
                                         ToolBatchAwaitOutcome::Failed { code, reason } => {
-                                            fail_provider_turn(
-                                                coordinates,
-                                                thread_id,
-                                                events,
-                                                status,
-                                                code,
-                                                reason,
-                                            );
+                                            failed_turn.fail_message(code, reason).await;
                                             return true;
                                         }
                                     }
@@ -2864,7 +2930,8 @@ async fn run_provider_turn(
                 Err(err) => {
                     failed = true;
                     failure_code = Some("runtime_execution");
-                    failure_reason = Some(err.to_string());
+                    failure_reason = Some(err.message.clone());
+                    terminal_failure = Some(err);
                     emit_failure_signal = true;
                     append_terminal_join_until_recorded(
                         services,
@@ -2895,6 +2962,7 @@ async fn run_provider_turn(
         if failed {
             let reason = failure_reason
                 .unwrap_or_else(|| "provider turn failed without reason detail".to_string());
+            let code = failure_code.unwrap_or("runtime_execution");
             if !terminal_join_recorded {
                 append_terminal_join_until_recorded(
                     services,
@@ -2916,14 +2984,13 @@ async fn run_provider_turn(
                     },
                 );
             }
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                failure_code.unwrap_or("runtime_execution"),
-                reason,
-            );
+            failed_turn
+                .fail(
+                    code,
+                    terminal_failure
+                        .unwrap_or_else(|| TerminalTurnFailure::from_code(code, reason)),
+                )
+                .await;
             return true;
         }
         if suspended_after_tools {
@@ -2953,14 +3020,7 @@ async fn run_provider_turn(
                 Some(turn_source_event_id),
             )
             .await;
-            fail_provider_turn(
-                coordinates,
-                thread_id,
-                events,
-                status,
-                "hook_pipeline",
-                reason,
-            );
+            failed_turn.fail_message("hook_pipeline", reason).await;
             return true;
         }
         if let Err(err) =
@@ -2975,7 +3035,7 @@ async fn run_provider_turn(
                 Some(turn_source_event_id),
             )
             .await;
-            fail_provider_turn(coordinates, thread_id, events, status, "history", reason);
+            failed_turn.fail_message("history", reason).await;
             return true;
         }
         crate::kernel::runtime_host::runtime_events::emit_runtime_event(
@@ -3448,6 +3508,49 @@ fn fail_provider_turn(
     );
     let _ = events
         .send(crate::kernel::runtime_host::runtime_api::ThreadEvent::Failed { thread_id, message });
+}
+
+struct FailedTurnTransition<'a> {
+    coordinates: &'a verlet_runtime_contracts::ThreadCoordinates,
+    services: &'a crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    turn_id: &'a str,
+    source_event_id: Option<verlet_history::EventRecordId>,
+    thread_id: verlet_runtime_contracts::ThreadId,
+    events:
+        &'a tokio::sync::broadcast::Sender<crate::kernel::runtime_host::runtime_api::ThreadEvent>,
+    status: &'a tokio::sync::watch::Sender<verlet_runtime_contracts::ThreadStatus>,
+}
+
+impl FailedTurnTransition<'_> {
+    async fn fail(&self, code: &'static str, failure: TerminalTurnFailure) {
+        if let Err(err) = append_turn_failed_event(
+            self.services,
+            self.coordinates,
+            self.turn_id,
+            self.source_event_id,
+            &failure,
+        )
+        .await
+        {
+            eprintln!(
+                "verlet agent loop could not persist turn.failed for turn {}: {err}",
+                self.turn_id
+            );
+        }
+        fail_provider_turn(
+            self.coordinates,
+            self.thread_id,
+            self.events,
+            self.status,
+            code,
+            failure.message,
+        );
+    }
+
+    async fn fail_message(&self, code: &'static str, message: String) {
+        self.fail(code, TerminalTurnFailure::from_code(code, message))
+            .await;
+    }
 }
 
 async fn append_terminal_join_until_recorded(
@@ -5698,6 +5801,66 @@ async fn append_turn_completed_event(
         )
         .await?;
     Ok(completed)
+}
+
+async fn append_turn_failed_event(
+    services: &crate::kernel::runtime_host::runtime_services::RuntimeServices,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+    turn_id: &str,
+    source_event_id: Option<verlet_history::EventRecordId>,
+    failure: &TerminalTurnFailure,
+) -> crate::kernel::runtime_host::VerletResult<verlet_history::EventRecord> {
+    let existing = services
+        .runtime_store()
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
+        .await
+        .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
+        .into_iter()
+        .filter(|event| {
+            event.kind == verlet_history::EventKind::TurnFailed
+                && event
+                    .payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(turn_id)
+        })
+        .max_by_key(|event| event.sequence.get());
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+    let payload = verlet_history::TurnFailedPayload::new(
+        turn_id,
+        failure.error_class,
+        failure.provider_id.clone(),
+        failure.http_status,
+        failure.journal_message.clone(),
+        failure.retries_attempted,
+    );
+    let payload = serde_json::to_value(payload).map_err(|err| {
+        crate::kernel::runtime_host::VerletError::History(format!(
+            "turn.failed payload codec failed: {err}"
+        ))
+    })?;
+    services
+        .append_thread_event(
+            coordinates,
+            verlet_history::NewEventRecord::discharged(
+                coordinates.clone(),
+                verlet_history::EventKind::TurnFailed,
+                payload,
+                verlet_history::EventProvenance {
+                    source_streams: vec![verlet_history::EventStreamId::for_thread(coordinates)],
+                    source_event_ids: source_event_id.into_iter().collect(),
+                    discharged_by: Some("propagator:agent-loop".to_string()),
+                    function: Some("turn_fail/v1".to_string()),
+                    ..verlet_history::EventProvenance::default()
+                },
+            ),
+        )
+        .await
 }
 
 async fn append_turn_resumed_event(

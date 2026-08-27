@@ -2853,6 +2853,50 @@ async fn runtime_emits_model_request_failed_on_provider_error() {
     }));
 }
 
+#[tokio::test]
+async fn terminal_provider_http_error_journals_one_body_free_turn_failed() {
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![ScriptedResponse::Error(
+        verlet_provider::ProviderError::HttpStatus {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "raw-response-body-must-not-be-journaled".to_string(),
+        },
+    )]));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(runtime_factory(client));
+    let store = host.runtime_store();
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "hello")
+        .await
+        .unwrap();
+    assert_failed_with_runtime_events(&mut events, "raw-response-body-must-not-be-journaled").await;
+
+    let failed = turn_failed_events(store.as_ref(), &thread.context().coordinates).await;
+    assert_eq!(failed.len(), 1);
+    let payload: verlet_history::TurnFailedPayload =
+        serde_json::from_value(failed[0].payload.clone()).unwrap();
+    assert_eq!(payload.turn_id, "turn-1");
+    assert_eq!(
+        payload.error_class,
+        verlet_history::TurnFailureErrorClass::ProviderHttp
+    );
+    assert_eq!(payload.provider_id.as_deref(), Some("openai"));
+    assert_eq!(payload.http_status, Some(400));
+    assert_eq!(payload.message, "provider HTTP status 400");
+    assert_eq!(payload.retries_attempted, 0);
+    assert!(
+        !serde_json::to_string(&failed[0].payload)
+            .unwrap()
+            .contains("raw-response-body-must-not-be-journaled")
+    );
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn model_request_retries_retryable_provider_error() {
     let inner = std::sync::Arc::new(RecordingClient::with_responses(vec![response_text(
@@ -2879,6 +2923,7 @@ async fn model_request_retries_retryable_provider_error() {
         factory,
         std::sync::Arc::new(verlet_history::InMemorySessionStore::new()),
     );
+    let store = host.runtime_store();
     let thread = host
         .start_thread(
             verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
@@ -2892,6 +2937,7 @@ async fn model_request_retries_retryable_provider_error() {
         .await
         .unwrap();
     let runtime_events = assert_output_with_runtime_events(&mut events, "retry reply").await;
+    assert_completed_terminal(&mut events).await;
 
     assert_eq!(client.call_count("complete"), 2);
     assert_eq!(inner.requests().len(), 1);
@@ -2917,6 +2963,95 @@ async fn model_request_retries_retryable_provider_error() {
             }
         )
     }));
+    assert!(
+        turn_failed_events(store.as_ref(), &thread.context().coordinates)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn retry_exhaustion_journals_exactly_one_turn_failed() {
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![
+        ScriptedResponse::Error(verlet_provider::ProviderError::Http("outage-1".to_string())),
+        ScriptedResponse::Error(verlet_provider::ProviderError::Http("outage-2".to_string())),
+        ScriptedResponse::Error(verlet_provider::ProviderError::Http("outage-3".to_string())),
+    ]));
+    let mut config = crate::adapters::agent_loop::AgentLoopConfig::new(
+        verlet_history::ProviderApi::OpenAIResponses,
+        "openai",
+        "gpt-test",
+    );
+    config.max_tokens = 128;
+    let factory = std::sync::Arc::new(
+        crate::adapters::agent_loop::AgentLoopFactory::new(config, client.clone())
+            .with_model_request_retry_policy(
+                crate::adapters::agent_loop::ModelRequestRetryPolicy::fixed(3, 0),
+            ),
+    );
+    let host = crate::kernel::runtime_host::RuntimeHost::new(factory);
+    let store = host.runtime_store();
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "hello")
+        .await
+        .unwrap();
+    assert_failed_with_runtime_events(&mut events, "outage-3").await;
+
+    assert_eq!(client.requests().len(), 3);
+    let failed = turn_failed_events(store.as_ref(), &thread.context().coordinates).await;
+    assert_eq!(failed.len(), 1);
+    let payload: verlet_history::TurnFailedPayload =
+        serde_json::from_value(failed[0].payload.clone()).unwrap();
+    assert_eq!(
+        payload.error_class,
+        verlet_history::TurnFailureErrorClass::ProviderTransport
+    );
+    assert_eq!(payload.provider_id.as_deref(), Some("openai"));
+    assert_eq!(payload.http_status, None);
+    assert!(payload.message.contains("outage-3"));
+    assert_eq!(payload.retries_attempted, 2);
+}
+
+#[tokio::test]
+async fn terminal_provider_message_is_journaled_at_most_1024_bytes() {
+    let client = std::sync::Arc::new(ScriptedClient::new(vec![ScriptedResponse::Error(
+        verlet_provider::ProviderError::Http("x".repeat(2_048)),
+    )]));
+    let host = crate::kernel::runtime_host::RuntimeHost::new(runtime_factory(client));
+    let store = host.runtime_store();
+    let thread = host
+        .start_thread(
+            verlet_runtime_contracts::ThreadCoordinates::new("tenant_a", "user_1", "session_1"),
+            verlet_runtime_contracts::ThreadTopology::root(),
+        )
+        .await
+        .unwrap();
+    let mut events = thread.subscribe_events();
+
+    host.submit(thread.context().coordinates.thread_id, "turn-1", "hello")
+        .await
+        .unwrap();
+    assert_failed_with_runtime_events(&mut events, "provider HTTP request failed").await;
+
+    let failed = turn_failed_events(store.as_ref(), &thread.context().coordinates).await;
+    assert_eq!(failed.len(), 1);
+    let payload: verlet_history::TurnFailedPayload =
+        serde_json::from_value(failed[0].payload.clone()).unwrap();
+    assert_eq!(payload.message.as_bytes().len(), 1024);
+    assert!(payload.message.is_char_boundary(payload.message.len()));
+    assert!(
+        payload
+            .message
+            .starts_with("provider HTTP request failed: ")
+    );
 }
 
 #[tokio::test]
@@ -9262,6 +9397,22 @@ fn wat_bytes(bytes: &[u8]) -> String {
 
 fn is_canonical_message_entry(entry: &verlet_history::SessionEntry) -> bool {
     matches!(entry.kind, verlet_history::SessionEntryKind::Message { .. })
+}
+
+async fn turn_failed_events(
+    store: &dyn verlet_history::RuntimeStore,
+    coordinates: &verlet_runtime_contracts::ThreadCoordinates,
+) -> Vec<verlet_history::EventRecord> {
+    store
+        .read_events(
+            &verlet_history::EventStreamId::for_thread(coordinates),
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == verlet_history::EventKind::TurnFailed)
+        .collect()
 }
 
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {

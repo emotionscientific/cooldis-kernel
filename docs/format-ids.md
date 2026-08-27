@@ -7,7 +7,7 @@ stored data or change interface hashes, so they never rename.
 
 The frozen families are:
 
-- event vocabulary version `cooldis.events/0.4`, event payload schema IDs under
+- event vocabulary version `cooldis.events/0.5`, event payload schema IDs under
   `cooldis.event.*`, and the `cooldis.stream.*`, `cooldis.context.*`, and
   `cooldis.debug.*` schema-ID namespaces;
 - operation names recorded in receipts, including `cooldis.thread_spawn`,
