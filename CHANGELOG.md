@@ -22,7 +22,7 @@
   replayed, and surface operations are not also exposed through raw
   virtual-bash operation commands.
 - Pi-kit file search now skips non-UTF-8, NUL-containing, and oversized files
-  during grep walks, bounds grep, read, and find ignore-file reads to 8 MiB,
+  during grep walks, bounds grep, read, edit, and find ignore-file reads to 8 MiB,
   rejects mismatched file and directory path kinds through structured tool
   errors, and keeps native and wasm output envelopes identical for those cases.
 

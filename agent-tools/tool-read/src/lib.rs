@@ -80,13 +80,14 @@ pub fn run(
         )));
     }
     if stat.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
-        return Err(verlet_tool_core::ToolFsError::FileTooLarge {
-            path,
-            max_bytes: verlet_tool_core::MAX_FILE_BYTES,
-        }
-        .into());
+        return Err(oversized_file_error(&path));
     }
-    let bytes = fs.read_file_bounded(&path, verlet_tool_core::MAX_FILE_BYTES)?;
+    let bytes = fs
+        .read_file_bounded(&path, verlet_tool_core::MAX_FILE_BYTES)
+        .map_err(|error| match error {
+            verlet_tool_core::ToolFsError::FileTooLarge { path, .. } => oversized_file_error(&path),
+            error => error.into(),
+        })?;
     let total_line_count = file_line_count(&bytes);
     let total_lines = u64::try_from(total_line_count).unwrap_or(u64::MAX);
     let requested_offset = args.offset;
@@ -220,6 +221,14 @@ fn offset_past_end(offset: i64, total_lines: u64) -> verlet_tool_core::ToolError
     ))
 }
 
+fn oversized_file_error(path: &std::path::Path) -> verlet_tool_core::ToolError {
+    verlet_tool_core::ToolError::Failed(format!(
+        "file exceeds {} byte read limit: {}; offset/limit cannot bypass this limit, use bash to inspect a bounded range or split the file",
+        verlet_tool_core::MAX_FILE_BYTES,
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     fn fs(root: &std::path::Path) -> verlet_tool_core::StdFs {
@@ -314,20 +323,24 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_file_is_a_structured_tool_error() {
+    fn an_oversized_file_is_an_actionable_structured_error_for_every_window() {
         let root = tempfile::tempdir().unwrap();
         let content = vec![b'x'; verlet_tool_core::MAX_FILE_BYTES.saturating_add(1)];
         std::fs::write(root.path().join("oversized.txt"), content).unwrap();
 
-        let error = crate::run(args("oversized.txt", None, None), &fs(root.path())).unwrap_err();
+        let filesystem = fs(root.path());
+        let error = crate::run(args("oversized.txt", None, None), &filesystem).unwrap_err();
+        let window_error =
+            crate::run(args("oversized.txt", Some(1), Some(1)), &filesystem).unwrap_err();
 
         assert_eq!(
             error.to_string(),
             format!(
-                "file exceeds {} byte read limit: oversized.txt",
+                "file exceeds {} byte read limit: oversized.txt; offset/limit cannot bypass this limit, use bash to inspect a bounded range or split the file",
                 verlet_tool_core::MAX_FILE_BYTES
             )
         );
+        assert_eq!(window_error.to_string(), error.to_string());
     }
 
     #[test]

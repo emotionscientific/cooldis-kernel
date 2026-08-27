@@ -1484,6 +1484,8 @@ async fn wasm_vfs_write_guest_requires_declared_capability_before_execution() {
 #[tokio::test]
 async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
     let (vfs, native) = pi_tool_fixture().await;
+    let exact_limit = vec![b'x'; verlet_tool_core::MAX_FILE_BYTES];
+    write_pi_tool_fixture_file(&vfs, &native, "project/exact-limit.txt", &exact_limit).await;
     let oversized = b"oversized\n".repeat(
         verlet_tool_core::MAX_FILE_BYTES
             .saturating_div(b"oversized\n".len())
@@ -1501,7 +1503,7 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             wasm_read_tool_guest(),
         ))
-        .with_vfs(vfs),
+        .with_vfs(vfs.clone()),
     )
     .unwrap();
     let manifest = factory.validate_operation_artifact().await.unwrap();
@@ -1521,6 +1523,40 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
 
     assert_eq!(output.output, tool_success_envelope(native_output));
     assert_eq!(output.operation.name, "read");
+
+    let native_exact_limit = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project/exact-limit.txt"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    // Isolate the ToolFs boundary from the global Wasm fuel policy. Copying
+    // the full accepted 8 MiB through today's sequential ABI exceeds the
+    // default store fuel even though AbiFs returns the correct complete
+    // buffer; changing that runtime policy is an architecture decision.
+    let boundary_factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_read_tool_guest(),
+        ))
+        .with_vfs(vfs)
+        .with_fuel(None)
+        .with_fuel_yield_interval(None),
+    )
+    .unwrap();
+    let exact_limit = boundary_factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project/exact-limit.txt"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        exact_limit.output,
+        tool_success_envelope(native_exact_limit)
+    );
 
     let native_error = verlet_tool_read::run(
         verlet_tool_read::ReadArgs {
@@ -1573,6 +1609,11 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
         &native_fs,
     )
     .unwrap_err();
+    let expected_oversized_error = format!(
+        "file exceeds {} byte read limit: project/oversized.txt; offset/limit cannot bypass this limit, use bash to inspect a bounded range or split the file",
+        verlet_tool_core::MAX_FILE_BYTES
+    );
+    assert_eq!(native_oversized_error.to_string(), expected_oversized_error);
     let oversized = factory
         .invoke_operation_bytes(
             "read",
@@ -1582,14 +1623,78 @@ async fn wasm_pi_read_matches_native_envelope_and_surfaces_tool_errors() {
         .unwrap();
     assert_eq!(
         oversized.output,
-        tool_error_envelope(native_oversized_error.to_string())
+        tool_error_envelope(expected_oversized_error.clone())
+    );
+    let oversized_window = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({
+                "path": "project/oversized.txt",
+                "offset": 1,
+                "limit": 1,
+            })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        oversized_window.output,
+        tool_error_envelope(expected_oversized_error)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wasm_pi_read_rejects_an_in_scope_symlink_that_native_read_follows() {
+    let (vfs, native) = pi_tool_fixture().await;
+    vfs.symlink(
+        std::path::Path::new("input.txt"),
+        std::path::Path::new("/workspace/project/input-link.txt"),
+    )
+    .await
+    .unwrap();
+    std::os::unix::fs::symlink("input.txt", native.path().join("project/input-link.txt")).unwrap();
+    let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
+    let native_output = verlet_tool_read::run(
+        verlet_tool_read::ReadArgs {
+            path: std::path::PathBuf::from("project/input-link.txt"),
+            offset: None,
+            limit: None,
+        },
+        &native_fs,
+    )
+    .unwrap();
+    let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
+        verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
+            wasm_read_tool_guest(),
+        ))
+        .with_vfs(vfs),
+    )
+    .unwrap();
+
+    let wasm_output = factory
+        .invoke_operation_bytes(
+            "read",
+            pi_tool_input(serde_json::json!({"path": "project/input-link.txt"})),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(native_output.text, "alpha\nneedle beta\ngamma\n");
+    assert_eq!(
+        wasm_output.output,
+        tool_error_envelope("Path is not a file: project/input-link.txt")
     );
 }
 
 #[tokio::test]
 async fn wasm_pi_find_and_grep_match_native_envelopes_and_tool_errors() {
     let (vfs, native) = pi_tool_fixture().await;
-    write_pi_tool_fixture_file(&vfs, &native, "project/non-utf8.bin", b"\xffneedle\n").await;
+    let mut invalid_utf8 = vec![b'x'; 4 * 1024];
+    invalid_utf8.extend_from_slice(b"\xffneedle\n");
+    write_pi_tool_fixture_file(&vfs, &native, "project/mid-invalid-utf8.bin", &invalid_utf8).await;
+    let mut late_nul = vec![b'x'; 8 * 1024];
+    late_nul.extend_from_slice(b"\0needle\n");
+    write_pi_tool_fixture_file(&vfs, &native, "project/late-nul.bin", &late_nul).await;
     let oversized = b"needle\n".repeat(
         verlet_tool_core::MAX_FILE_BYTES
             .saturating_div(b"needle\n".len())
@@ -1804,6 +1909,21 @@ async fn wasm_pi_write_matches_native_mutation_and_maps_io_into_envelope() {
 #[tokio::test]
 async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
     let (vfs, native) = pi_tool_fixture().await;
+    let padding_line = format!("{}\n", "x".repeat(1024));
+    let padding = padding_line.repeat(
+        verlet_tool_core::MAX_FILE_BYTES
+            .saturating_div(padding_line.len())
+            .saturating_add(1),
+    );
+    let oversized_content = format!("target\n{padding}");
+    assert!(oversized_content.len() > verlet_tool_core::MAX_FILE_BYTES);
+    write_pi_tool_fixture_file(
+        &vfs,
+        &native,
+        "project/oversized-edit.txt",
+        oversized_content.as_bytes(),
+    )
+    .await;
     let native_fs = verlet_tool_core::StdFs::new(native.path()).unwrap();
     let raw_args = serde_json::json!({
         "path": "project/input.txt",
@@ -1811,6 +1931,15 @@ async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
     });
     let native_args = verlet_tool_edit::parse_cli_args(raw_args.clone()).unwrap();
     let native_output = verlet_tool_edit::run(native_args, &native_fs).unwrap();
+    let oversized_args = serde_json::json!({
+        "path": "project/oversized-edit.txt",
+        "edits": [{"oldText": "target", "newText": "edited"}],
+    });
+    let native_oversized_error = verlet_tool_edit::run(
+        verlet_tool_edit::parse_cli_args(oversized_args.clone()).unwrap(),
+        &native_fs,
+    )
+    .unwrap_err();
     let factory = crate::capabilities::wasm_runner::WasmRuntimeFactory::new(
         verlet_wasm::WasmRuntimeConfig::new(verlet_wasm::WasmRuntimeArtifact::bytes(
             wasm_edit_tool_guest(),
@@ -1833,6 +1962,23 @@ async fn wasm_pi_edit_matches_native_mutation_and_validation_envelope() {
             .await
             .unwrap(),
         b"alpha\nneedle delta\ngamma\n"
+    );
+
+    let oversized_output = factory
+        .invoke_operation_bytes("edit", pi_tool_input(oversized_args))
+        .await
+        .unwrap();
+    assert_eq!(
+        oversized_output.output,
+        tool_error_envelope(native_oversized_error.to_string())
+    );
+    assert!(
+        vfs.read_file(std::path::Path::new(
+            "/workspace/project/oversized-edit.txt"
+        ))
+        .await
+        .unwrap()
+        .starts_with(b"target\n")
     );
 
     let invalid_args = serde_json::json!({"path": "project/input.txt"});

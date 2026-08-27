@@ -497,6 +497,7 @@ mod tests {
         let recording = RecordingFs {
             inner: fs(root.path()),
             reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
         };
         let mut search = args("hit");
         search.limit = Some(1);
@@ -545,7 +546,9 @@ mod tests {
     #[test]
     fn skips_non_utf8_files() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("invalid.txt"), b"\xffhit\n").unwrap();
+        let mut invalid = vec![b'x'; 4 * 1024];
+        invalid.extend_from_slice(b"\xffhit\n");
+        std::fs::write(root.path().join("invalid.txt"), invalid).unwrap();
         std::fs::write(root.path().join("text.txt"), b"hit\n").unwrap();
 
         let output = crate::run(args("hit"), &fs(root.path())).unwrap();
@@ -563,6 +566,7 @@ mod tests {
         let recording = RecordingFs {
             inner: fs(root.path()),
             reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(None),
         };
 
         let output = crate::run(args("hit"), &recording).unwrap();
@@ -573,6 +577,30 @@ mod tests {
             .borrow()
             .iter()
             .any(|path| path.ends_with("oversized.txt")));
+    }
+
+    #[test]
+    fn a_file_that_grows_after_stat_is_skipped_without_searching_a_partial_buffer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("changing.txt"), b"hit\n").unwrap();
+        let recording = RecordingFs {
+            inner: fs(root.path()),
+            reads: std::cell::RefCell::new(Vec::new()),
+            replacement_on_bounded_read: std::cell::RefCell::new(Some(vec![
+                b'x';
+                verlet_tool_core::MAX_FILE_BYTES
+                    .saturating_add(1)
+            ])),
+        };
+
+        let output = crate::run(args("hit"), &recording).unwrap();
+
+        assert_eq!(output.text, "No matches found");
+        assert_eq!(output.match_count, 0);
+        assert_eq!(
+            recording.reads.borrow().as_slice(),
+            &[std::path::PathBuf::from("./changing.txt")]
+        );
     }
 
     #[test]
@@ -742,6 +770,7 @@ mod tests {
     struct RecordingFs {
         inner: verlet_tool_core::StdFs,
         reads: std::cell::RefCell<Vec<std::path::PathBuf>>,
+        replacement_on_bounded_read: std::cell::RefCell<Option<Vec<u8>>>,
     }
 
     impl verlet_tool_core::ToolFs for RecordingFs {
@@ -759,6 +788,9 @@ mod tests {
             max_bytes: usize,
         ) -> Result<Vec<u8>, verlet_tool_core::ToolFsError> {
             self.reads.borrow_mut().push(path.to_path_buf());
+            if let Some(replacement) = self.replacement_on_bounded_read.borrow_mut().take() {
+                std::fs::write(self.inner.root.join(path), replacement).unwrap();
+            }
             verlet_tool_core::ToolFs::read_file_bounded(&self.inner, path, max_bytes)
         }
 

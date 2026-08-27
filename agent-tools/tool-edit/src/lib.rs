@@ -21,6 +21,9 @@
 //!   matching normalizes CRLF to LF for comparison.
 //! - Invalid UTF-8 decodes lossily for matching; untouched lines are spliced
 //!   back from their original bytes.
+//! - Edit keeps its whole-file atomic behavior under the shared 8 MiB ceiling.
+//!   Oversized targets return a structured error and are never silently
+//!   skipped or partially changed.
 
 use unicode_normalization::UnicodeNormalization as _;
 
@@ -330,10 +333,21 @@ pub fn run(
     let path_display = input_path.display().to_string();
     let path = verlet_tool_core::normalize_tool_path(&input_path);
 
-    if let Err(error) = fs.stat(&path) {
-        return Err(edit_access_error(&path_display, error));
+    let stat = fs
+        .stat(&path)
+        .map_err(|error| edit_access_error(&path_display, error))?;
+    if stat.size > u64::try_from(verlet_tool_core::MAX_FILE_BYTES).unwrap_or(u64::MAX) {
+        return Err(edit_access_error(
+            &path_display,
+            verlet_tool_core::ToolFsError::FileTooLarge {
+                path,
+                max_bytes: verlet_tool_core::MAX_FILE_BYTES,
+            },
+        ));
     }
-    let bytes = fs.read_file(&path)?;
+    let bytes = fs
+        .read_file_bounded(&path, verlet_tool_core::MAX_FILE_BYTES)
+        .map_err(|error| edit_access_error(&path_display, error))?;
     let (bom, text_bytes) = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         (&bytes[..3], &bytes[3..])
     } else {
@@ -494,12 +508,10 @@ fn edit_access_error(
     let message = match error {
         verlet_tool_core::ToolFsError::NotFound(_) => "Error code: ENOENT".to_owned(),
         verlet_tool_core::ToolFsError::Denied(_) => "Error code: EACCES".to_owned(),
-        verlet_tool_core::ToolFsError::FileTooLarge { path, max_bytes } => {
-            format!(
-                "file exceeds {max_bytes} byte read limit: {}",
-                path.display()
-            )
-        }
+        verlet_tool_core::ToolFsError::FileTooLarge { path, max_bytes } => format!(
+            "file exceeds {max_bytes} byte edit limit: {}; split the file or use bash to apply a bounded change",
+            path.display()
+        ),
         verlet_tool_core::ToolFsError::Io(message) => message,
     };
     verlet_tool_core::ToolError::Failed(format!("Could not edit file: {path}. {message}."))
@@ -1099,6 +1111,38 @@ mod tests {
         assert_eq!(
             empty.to_string(),
             "Could not find the exact text in empty.txt. The old text must match exactly including all whitespace and newlines."
+        );
+    }
+
+    #[test]
+    fn rejects_targets_over_the_ceiling_without_silently_skipping_or_changing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let padding_line = format!("{}\n", "x".repeat(1024));
+        let padding = padding_line.repeat(
+            verlet_tool_core::MAX_FILE_BYTES
+                .saturating_div(padding_line.len())
+                .saturating_add(1),
+        );
+        let content = format!("target\n{padding}");
+        assert!(content.len() > verlet_tool_core::MAX_FILE_BYTES);
+        std::fs::write(root.path().join("oversized.txt"), &content).unwrap();
+
+        let error = crate::run(
+            args("oversized.txt", &[("target", "edited")]),
+            &fs(root.path()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Could not edit file: oversized.txt. file exceeds {} byte edit limit: oversized.txt; split the file or use bash to apply a bounded change.",
+                verlet_tool_core::MAX_FILE_BYTES
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("oversized.txt")).unwrap(),
+            content
         );
     }
 

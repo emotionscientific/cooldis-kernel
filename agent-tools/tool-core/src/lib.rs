@@ -23,7 +23,7 @@ pub const DEFAULT_MAX_LINES: usize = 2000;
 /// Pi's automatic head-truncation byte limit (50 KiB).
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
-/// Maximum bytes one file-search tool reads from a single file (8 MiB).
+/// Maximum bytes one bounded file tool reads from a single file (8 MiB).
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
@@ -187,7 +187,8 @@ pub fn normalize_tool_path(path: &std::path::Path) -> std::path::PathBuf {
 /// Tool cores never re-check confinement.
 pub trait ToolFs {
     fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ToolFsError>;
-    /// Read at most `max_bytes` from one file.
+    /// Read one complete file only when it is at most `max_bytes`; an error
+    /// never exposes a partial buffer.
     fn read_file_bounded(
         &self,
         path: &std::path::Path,
@@ -840,21 +841,38 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reads_stop_at_the_declared_limit() {
+    fn bounded_reads_accept_the_exact_limit_and_return_no_partial_buffer() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("large.bin"), vec![b'x'; 1025]).unwrap();
+        std::fs::write(
+            root.path().join("large.bin"),
+            vec![b'x'; crate::MAX_FILE_BYTES],
+        )
+        .unwrap();
         let fs = crate::StdFs::new(root.path()).unwrap();
 
-        let exact =
-            crate::ToolFs::read_file_bounded(&fs, std::path::Path::new("large.bin"), 1025).unwrap();
-        let error = crate::ToolFs::read_file_bounded(&fs, std::path::Path::new("large.bin"), 1024)
-            .unwrap_err();
+        let exact = crate::ToolFs::read_file_bounded(
+            &fs,
+            std::path::Path::new("large.bin"),
+            crate::MAX_FILE_BYTES,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("large.bin"),
+            vec![b'x'; crate::MAX_FILE_BYTES.saturating_add(1)],
+        )
+        .unwrap();
+        let error = crate::ToolFs::read_file_bounded(
+            &fs,
+            std::path::Path::new("large.bin"),
+            crate::MAX_FILE_BYTES,
+        )
+        .unwrap_err();
 
-        assert_eq!(exact.len(), 1025);
+        assert_eq!(exact.len(), crate::MAX_FILE_BYTES);
         assert!(matches!(
             error,
             crate::ToolFsError::FileTooLarge {
-                max_bytes: 1024,
+                max_bytes: crate::MAX_FILE_BYTES,
                 ..
             }
         ));
@@ -873,6 +891,22 @@ mod tests {
         let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
 
         assert!(files.iter().any(|file| file.relative_path == "hidden.txt"));
+    }
+
+    #[test]
+    fn walk_applies_ignore_rules_at_the_exact_read_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ignore = b"hidden.txt\n".to_vec();
+        ignore.resize(crate::MAX_FILE_BYTES, b'#');
+        std::fs::write(root.path().join(".gitignore"), ignore).unwrap();
+        std::fs::write(root.path().join("hidden.txt"), "hidden").unwrap();
+        std::fs::write(root.path().join("visible.txt"), "visible").unwrap();
+        let fs = crate::StdFs::new(root.path()).unwrap();
+
+        let files = crate::walk_files(std::path::Path::new("."), &fs).unwrap();
+
+        assert!(!files.iter().any(|file| file.relative_path == "hidden.txt"));
+        assert!(files.iter().any(|file| file.relative_path == "visible.txt"));
     }
 
     #[test]

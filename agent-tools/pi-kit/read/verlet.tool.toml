@@ -15,7 +15,7 @@ max_output_bytes = 262144
 
 [[operations]]
 name = "read"
-description = "Read a file with Pi line offset/limit semantics and Pi truncation notices."
+description = "Read a file up to 8 MiB with Pi line offset/limit semantics and truncation notices."
 input_schema = "schemas/read.input.json"
 output_schema = "schemas/read.output.json"
 required_capabilities = []
