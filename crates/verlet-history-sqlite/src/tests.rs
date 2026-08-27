@@ -25,6 +25,23 @@ fn message_texts(messages: &[verlet_history::CanonicalMessage]) -> Vec<&str> {
         .collect()
 }
 
+fn sqlite_file_family_bytes(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    [
+        path.to_path_buf(),
+        std::path::PathBuf::from(format!("{}-wal", path.display())),
+        std::path::PathBuf::from(format!("{}-shm", path.display())),
+    ]
+    .into_iter()
+    .filter_map(|candidate| {
+        std::fs::read(&candidate)
+            .ok()
+            .map(|bytes| (candidate, bytes))
+    })
+    .collect()
+}
+
 async fn assert_fenced_append_conformance(
     store: &dyn verlet_history::EventStore,
 ) -> verlet_history::EventStreamId {
@@ -471,6 +488,7 @@ async fn sqlite_read_only_store_replays_and_rejects_writes() {
         .await
         .unwrap();
     drop(writable);
+    let before = sqlite_file_family_bytes(&path);
 
     let read_only = crate::SqliteSessionStore::open_read_only(&path)
         .await
@@ -486,6 +504,7 @@ async fn sqlite_read_only_store_replays_and_rejects_writes() {
             .is_err()
     );
     drop(read_only);
+    assert_eq!(sqlite_file_family_bytes(&path), before);
 
     let reopened = crate::SqliteSessionStore::open(&path).await.unwrap();
     assert_eq!(

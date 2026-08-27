@@ -165,7 +165,7 @@ fn console_app_server_config_defaults_to_project_local_roots_and_user_state() {
         config.user_metadata_store_path(),
         crate::cli::console::default_user_verlet_home()
             .unwrap()
-            .join("state/metadata.sqlite3")
+            .join("state/metadata.turso")
     );
 
     let _ = std::fs::remove_dir_all(root);

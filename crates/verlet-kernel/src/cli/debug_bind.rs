@@ -795,7 +795,7 @@ Usage:\n\
   verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <verlet.toml> | --journal <db>]\n\
 \n\
 Explain the effective runtime envelope from recorded manifest compile and bind\n\
-receipts. Daemon mode uses thread/events/list; --journal reads SQLite offline.\n"
+receipts. Daemon mode uses thread/events/list; --journal reads Turso offline.\n"
     );
 }
 

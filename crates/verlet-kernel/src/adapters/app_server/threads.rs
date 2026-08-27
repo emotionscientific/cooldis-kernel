@@ -765,10 +765,7 @@ impl crate::adapters::app_server::VerletAppServer {
         String,
         std::collections::BTreeMap<String, AppServerTurnState>,
     )> {
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| crate::kernel::runtime_host::VerletError::History(err.to_string()))?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let context = store
             .build_context(&record.coordinates)
             .await

@@ -143,17 +143,31 @@ verlet debug rpc tail --thread <thread-id> --url ws://127.0.0.1:49200/rpc
 projecting its recorded `manifest.compile.completed` and
 `manifest.bind.completed` receipts. It uses the same WebSocket endpoint
 selection as `debug rpc`, and it can inspect the same thread offline from the
-SQLite journal without a daemon:
+Turso journal without a daemon:
 
 ```sh
 cargo run --bin verlet -- debug bind <thread-id>
 cargo run --bin verlet -- debug bind <thread-id> --json --url ws://127.0.0.1:49200/rpc
-cargo run --bin verlet -- debug bind <thread-id> --journal .verlet/state/session_history.sqlite3
+cargo run --bin verlet -- debug bind <thread-id> --journal .verlet/state/session_history.turso
 ```
 
 The command never resolves the manifest again or consults current daemon
 defaults to fill old receipt gaps. Legacy origins that were not recorded print
 as `[unrecorded]`.
+
+`verlet debug journal` lists raw event records with optional thread, kind, and
+inclusive sequence filters. Live mode uses the read-only
+`journal/events/list` RPC method. Direct mode is explicit and only for a cold
+store:
+
+```sh
+cargo run --bin verlet -- debug journal --thread <thread-id> --json
+cargo run --bin verlet -- debug journal --kind tool.call.requested --from-sequence 10 --to-sequence 30
+cargo run --bin verlet -- debug journal --journal .verlet/state/session_history.turso --json
+```
+
+The human projection is one line per event. The JSON projection is an array of
+raw `EventRecord` values.
 
 ## Authentication
 
@@ -435,13 +449,30 @@ Unix-only `secret/resolve` method before local Wasm execution. `verlet chat`
 connects through the shared client preamble. None of these client paths opens a
 store beside the owning server.
 
-The app-server opens project metadata at `state_home/metadata.sqlite3` and user
-metadata at `user_state_home/metadata.sqlite3` on startup. Project metadata owns
+The app-server opens project metadata at `state_home/metadata.turso` and user
+metadata at `user_state_home/metadata.turso` on startup. Project metadata owns
 provider catalog rows, MCP source records, and thread lifecycle/topology records
 for local `thread/start`, fork paths, and kernel-spawned child threads created
 through `verlet-threads`. User metadata owns provider credentials and named
 secret values. Plain OpenAI Compatible config can use the catalog-backed
 provider path while resolving API keys from the user auth store.
+
+## State Home Access Rules
+
+Each state home has exactly one owner process. That process owns
+`session_history.turso` and `metadata.turso` for its lifetime and publishes its
+RPC endpoint through the state-home socket record. Every live consumer must
+read or mutate state through that owner. Do not open a live `.turso` file with
+`sqlite3`, another SQLite library, a backup tool, or a second Verlet process.
+Ordinary SQLite tools do not participate in Turso's file-lock protocol and can
+damage the live write-ahead log.
+
+Direct file access is sanctioned only after the owner has stopped and no live
+socket endpoint remains. `verlet debug journal --journal <db>` uses Turso's
+read-only open for this cold path. If an owner still holds the store, Turso's
+lock refusal is surfaced with guidance to use `verlet debug journal` through
+the owner RPC instead. Current releases do not discover or migrate the old
+`*.sqlite3` state filenames.
 
 ## Thread Residency
 
@@ -1096,6 +1127,20 @@ may be available.
 Unknown thread ids and malformed cursors fail with JSON-RPC errors. A valid
 thread with no matching events returns an empty `data` array and null cursors.
 
+### `journal/events/list`
+
+Params:
+`{ "threadId": "...", "kind": "tool.call.requested", "fromSequence": 10, "toSequence": 30 }`.
+Every field is optional. Sequence bounds are inclusive and apply to each event's
+stream-local sequence. Bounds must be positive. Without `threadId`, a range can
+therefore return records from many streams with the same sequence numbers. A
+reversed range, malformed thread id, or unknown kind is rejected as invalid
+params.
+
+Result: `{ "data": [...] }`. `data` is an array of raw `EventRecord` values in
+database insertion order. This is a read-only Host-authority method used by
+`verlet debug journal` for live-store forensics.
+
 #### Resumable receipts retrieval
 
 Metering and run-outcome consumers enumerate threads with `thread/list`, then
@@ -1273,6 +1318,7 @@ The V1 app-server implements the Codex TUI-critical request subset:
   `mcpSource/manifestPatch`;
 - `thread/start`, `thread/spawn`, `thread/submit`, `thread/resume`, `thread/fork`, `thread/read`,
   `thread/list`, `thread/loaded/list`, `thread/events/list`,
+  `journal/events/list`,
   `thread/couplings/list`, `thread/approvals/list`, `thread/waiting/list`,
   `thread/debug/export`;
 - `mandate/start`, `mandate/revoke`, `mandate/list`;

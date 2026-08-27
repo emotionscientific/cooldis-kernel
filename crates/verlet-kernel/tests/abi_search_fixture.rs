@@ -148,7 +148,7 @@ async fn published_search_operation_resolves_secret_store_and_invokes_through_ag
         .await
         .unwrap();
     let secret_store =
-        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.sqlite3"))
+        verlet_metadata::secret_store::SqliteSecretStore::open(root.join("state/metadata.turso"))
             .await
             .unwrap();
     secret_store

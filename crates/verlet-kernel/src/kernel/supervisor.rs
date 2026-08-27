@@ -114,7 +114,7 @@ impl TenantRuntimeContext {
     }
 
     pub fn session_history_path(&self) -> std::path::PathBuf {
-        self.config.state_home.join("session_history.sqlite3")
+        self.config.state_home.join("session_history.turso")
     }
 
     pub fn descriptor(&self) -> TenantRuntimeContextDescriptor {

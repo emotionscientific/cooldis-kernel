@@ -175,7 +175,7 @@ agents = "agents"
 
     let operator = crate::daemon::identity::PrincipalId::new("operator-managed");
     let identity_store = verlet_history_sqlite::SqliteSessionStore::open(
-        app_config.state_home.join("session_history.sqlite3"),
+        app_config.state_home.join("session_history.turso"),
     )
     .await
     .unwrap();

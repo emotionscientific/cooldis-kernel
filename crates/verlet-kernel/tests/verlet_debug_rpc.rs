@@ -233,7 +233,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
         "resumed turn output did not include prompt: {resumed_stdout:?}"
     );
     let store = verlet_history_sqlite::SqliteSessionStore::open(
-        root.path().join("state/session_history.sqlite3"),
+        root.path().join("state/session_history.turso"),
     )
     .await
     .unwrap();
@@ -255,7 +255,7 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     drop(store);
 
     server.stop().await;
-    let journal = root.path().join("state/session_history.sqlite3");
+    let journal = root.path().join("state/session_history.turso");
     let offline_bind = run_verlet(
         [
             "debug",
@@ -272,6 +272,123 @@ async fn debug_rpc_cli_calls_and_streams_turns_over_websocket() {
     let offline_explanation: serde_json::Value =
         serde_json::from_slice(&offline_bind.stdout).unwrap();
     assert_eq!(offline_explanation, live_explanation);
+}
+
+#[tokio::test]
+async fn debug_journal_reads_live_owner_and_cold_store_with_the_same_raw_records() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root = TestRoot::new("verlet-debug-journal");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let server = DebugRpcServer::start(root.path(), &workspace).await;
+    let url = server.url();
+
+    let turn = run_verlet(
+        [
+            "debug",
+            "rpc",
+            "turn",
+            "--new",
+            "journal filter fixture",
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
+    .await;
+    assert_success(&turn);
+    let thread_id = String::from_utf8(turn.stderr)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+
+    let live = run_verlet(
+        [
+            "debug",
+            "journal",
+            "--thread",
+            thread_id.as_str(),
+            "--kind",
+            "session.entry.appended",
+            "--from-sequence",
+            "1",
+            "--to-sequence",
+            "100",
+            "--json",
+            "--url",
+            url.as_str(),
+        ],
+        Some(&server.token),
+    )
+    .await;
+    assert_success(&live);
+    let live_records: serde_json::Value = serde_json::from_slice(&live.stdout).unwrap();
+    let live_records = live_records.as_array().unwrap();
+    assert!(!live_records.is_empty());
+    assert!(live_records.iter().all(|record| {
+        record["coordinates"]["thread_id"].as_str() == Some(&thread_id)
+            && record["kind"].as_str() == Some("session.entry.appended")
+            && record["sequence"]
+                .as_i64()
+                .is_some_and(|sequence| (1..=100).contains(&sequence))
+    }));
+
+    server.stop().await;
+    let journal = root.path().join("state/session_history.turso");
+    let cold = run_verlet(
+        [
+            "debug",
+            "journal",
+            "--thread",
+            thread_id.as_str(),
+            "--kind",
+            "session.entry.appended",
+            "--from-sequence",
+            "1",
+            "--to-sequence",
+            "100",
+            "--json",
+            "--journal",
+            journal.to_str().unwrap(),
+        ],
+        None,
+    )
+    .await;
+    assert_success(&cold);
+    let cold_records: serde_json::Value = serde_json::from_slice(&cold.stdout).unwrap();
+    assert_eq!(cold_records, serde_json::Value::Array(live_records.clone()));
+}
+
+#[tokio::test]
+async fn debug_journal_direct_open_refuses_a_live_owner_and_points_to_rpc() {
+    let _process_guard = RPC_PROCESS_TEST_LOCK.lock().await;
+    let root = TestRoot::new("verlet-debug-journal-lock");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let server = DebugRpcServer::start(root.path(), &workspace).await;
+    let journal = root.path().join("state/session_history.turso");
+
+    let direct = run_verlet(
+        [
+            "debug",
+            "journal",
+            "--json",
+            "--journal",
+            journal.to_str().unwrap(),
+        ],
+        None,
+    )
+    .await;
+    assert!(!direct.status.success());
+    let stderr = String::from_utf8(direct.stderr).unwrap();
+    assert!(
+        stderr.contains("read the live journal through the owner RPC"),
+        "live direct-open error did not point to RPC: {stderr:?}"
+    );
+
+    server.stop().await;
 }
 
 #[tokio::test]
@@ -385,12 +502,13 @@ impl DebugRpcServer {
             verlet::adapters::app_server::VerletAppServerConfig::local(listen, workspace);
         config.runtime_home = root.join("runtime");
         config.state_home = root.join("state");
-        let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
-            .await
-            .unwrap();
-        let store = verlet_history_sqlite::SqliteSessionStore::open(app.session_store_path())
-            .await
-            .unwrap();
+        let principal = verlet::daemon::identity::PrincipalId::new(&config.user_id);
+        let adapter = verlet::daemon::identity::PrincipalId::new("adapter:debug-rpc-error-test");
+        let store = verlet_history_sqlite::SqliteSessionStore::open(
+            config.state_home.join("session_history.turso"),
+        )
+        .await
+        .unwrap();
         let authority = verlet::daemon::identity::SqliteIdentityAuthority::new(
             store,
             std::sync::Arc::new(verlet::daemon::clock_route::SystemDaemonClock),
@@ -398,13 +516,11 @@ impl DebugRpcServer {
         )
         .await
         .unwrap();
-        let principal = verlet::daemon::identity::PrincipalId::new(app.user_id());
         let token = authority
-            .mint_credential(&principal, &principal, None)
+            .bootstrap_operator(&principal, "Debug RPC test operator")
             .await
             .unwrap()
-            .1;
-        let adapter = verlet::daemon::identity::PrincipalId::new("adapter:debug-rpc-error-test");
+            .2;
         authority
             .declare_principal(
                 &principal,
@@ -419,6 +535,10 @@ impl DebugRpcServer {
             .await
             .unwrap()
             .1;
+        drop(authority);
+        let app = verlet::adapters::app_server::VerletAppServer::new_local(config)
+            .await
+            .unwrap();
         let task = tokio::spawn(async move { app.serve_websocket_listener(listener).await });
         let server = Self {
             addr,

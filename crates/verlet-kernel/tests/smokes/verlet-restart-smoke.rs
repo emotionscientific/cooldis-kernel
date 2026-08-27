@@ -143,7 +143,7 @@ impl Fixture {
         let telegram_api_addr = unused_loopback_addr()?;
         let config_path = root.join("verlet.toml");
         let io_db = root.join("io.sqlite");
-        let history_db = root.join("state/session_history.sqlite3");
+        let history_db = root.join("state/session_history.turso");
         write_config(&config_path, &root, webhook_addr, telegram_api_addr)?;
         Ok(Self {
             root,

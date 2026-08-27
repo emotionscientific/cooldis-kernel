@@ -84,7 +84,7 @@ pub(crate) fn is_cross_process_database_guidance(
 }
 
 pub(crate) fn turso_cross_process_lock_error(message: &str) -> bool {
-    // turso 0.7.0-pre.18 erases LimboError::LockingError through turso::Error.
+    // turso 0.8.0-pre.7 erases LimboError::LockingError through turso::Error.
     let Some((_, engine_error)) = message.split_once("sqlite engine error: ") else {
         return false;
     };
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn turso_cross_process_lock_match_accepts_only_refused_open_shapes() {
         assert!(super::turso_cross_process_lock_error(
-            "history storage failed: sqlite engine error: Locking error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+            "history storage failed: sqlite engine error: Locking error: Failed locking file '/tmp/session_history.turso'. File is locked by another process"
         ));
         assert!(super::turso_cross_process_lock_error(
             "history storage failed: sqlite engine error: Locking error: Failed locking file. File is locked by another process"
@@ -715,7 +715,7 @@ mod tests {
             "history storage failed: sqlite engine error: Locking error: Failed to release file lock: permission denied"
         ));
         assert!(!super::turso_cross_process_lock_error(
-            "history storage failed: sqlite engine error: I/O error: Failed locking file '/tmp/session_history.sqlite3'. File is locked by another process"
+            "history storage failed: sqlite engine error: I/O error: Failed locking file '/tmp/session_history.turso'. File is locked by another process"
         ));
         assert!(!super::turso_cross_process_lock_error(
             "history storage failed: sqlite engine error: Internal error: sqlite engine error: Locking error: Failed locking file. File is locked by another process"

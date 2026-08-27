@@ -91,6 +91,7 @@ durable records survive when the server exits.
 ```sh
 verlet rpc --listen <unix://PATH|ws://HOST:PORT[/rpc]> [--runtime-home <path>] [--state-home <path>] [--cwd <path>]
 verlet debug bind <thread-id> [--json] [--url <ws-url> | --config <path> | --journal <db>]
+verlet debug journal [--thread <thread-id>] [--kind <kind>] [--from-sequence <n>] [--to-sequence <n>] [--json] [--url <ws-url> | --config <path> | --journal <db>]
 verlet debug rpc call <method> [PARAMS_JSON]
 verlet debug rpc turn (--thread <id> | --new) <text>
 verlet debug rpc tail --thread <id>
@@ -106,8 +107,15 @@ section in [Verlet RPC Control Plane](app-server.md). `verlet debug bind`
 explains the effective model,
 placement, workspace, runtime, tool attachment, coupling, skill, and context
 envelope strictly from recorded compile and bind receipts. It reads a running
-daemon through `thread/events/list`, or a stopped daemon's SQLite journal with
-`--journal`; `--json` emits the full receipt projection. `verlet debug rpc` is
+daemon through `thread/events/list`, or a stopped daemon's Turso journal with
+`--journal`; `--json` emits the full receipt projection. `verlet debug journal`
+lists raw event records with optional thread, kind, and inclusive sequence
+filters. Without `--journal` it reads through the live owner RPC. With
+`--journal` it opens a cold Turso store read-only and refuses a store held by a
+live owner. Sequence bounds must be positive and apply to each stream's local
+sequence. Without `--thread`, one range can therefore return records from many
+streams with the same sequence numbers. `--json` emits an array of raw records.
+`verlet debug rpc` is
 protocol tooling for maintainers and smoke tests; it is not the default user
 console.
 

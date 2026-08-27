@@ -29,7 +29,7 @@ async fn bootstrap_prints_one_secret_and_refuses_a_second_root() {
     assert_eq!(first_stdout.matches(token).count(), 1);
     assert!(first_stderr.contains("shown once"));
 
-    let store_path = state_home.join("session_history.sqlite3");
+    let store_path = state_home.join("session_history.turso");
     let store = verlet_history_sqlite::SqliteSessionStore::open(&store_path)
         .await
         .unwrap();
@@ -240,7 +240,7 @@ async fn bootstrap_on_a_locked_store_tells_the_user_to_stop_the_running_instance
     std::fs::create_dir_all(&state_home).unwrap();
     let state_home_arg = state_home.to_string_lossy().to_string();
     let store =
-        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.sqlite3"))
+        verlet_history_sqlite::SqliteSessionStore::open(state_home.join("session_history.turso"))
             .await
             .unwrap();
     let clock: std::sync::Arc<dyn verlet::daemon::clock_route::DaemonClock> =
@@ -323,7 +323,7 @@ async fn wait_for_endpoint_removal(state_home: &std::path::Path) {
 async fn open_session_store_after_owner_exit(
     state_home: &std::path::Path,
 ) -> verlet_history_sqlite::SqliteSessionStore {
-    let path = state_home.join("session_history.sqlite3");
+    let path = state_home.join("session_history.turso");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         match verlet_history_sqlite::SqliteSessionStore::open(&path).await {

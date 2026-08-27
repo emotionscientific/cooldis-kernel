@@ -126,6 +126,8 @@ The V1 work is focused on runtime primitives:
 - OpenAI Codex backend access through browser or device OAuth against a user's
   ChatGPT plan, with credentials isolated in the user provider store;
 - daemon, RPC, MCP, ACP, and CLI projections over the same kernel contracts;
+- single-owner Turso state homes with live journal inspection through
+  `verlet debug journal` RPC and direct read-only access only while cold;
 - daemon-hosted remote child placement: store-backed ingress, separate local
   child processes, and local-first stream propagation fenced by durable scoped
   credentials and leases;
@@ -164,8 +166,8 @@ the record of why it moved is in the commit history and the formalism.
   coding agent in this checkout ([PDF](docs/primer/agents-in-version-control.pdf)).
 - [Overview](docs/index.md): product category and current status.
 - [Getting started](docs/getting-started.md): local run and inspection path.
-- [CLI](docs/cli.md): canonical commands, help model, and receipt-backed bind
-  inspection.
+- [CLI](docs/cli.md): canonical commands, help model, receipt-backed bind
+  inspection, and sanctioned journal forensics.
 - [Runtime primitives](docs/developers/runtime-primitives.md): kernel-owned
   surfaces and boundaries.
 - [ABI](docs/abi.md): operation boundary and host/guest contract.

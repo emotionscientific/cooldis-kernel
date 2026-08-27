@@ -9,7 +9,7 @@
       "query_projected"
     ],
     "kind": "sqlite",
-    "sessionStorePath": "/tmp/verlet/session_history.sqlite3"
+    "sessionStorePath": "/tmp/verlet/session_history.turso"
   },
   "generatedAtMs": 1771718499999,
   "receipts": [
@@ -40,7 +40,7 @@
       ],
       "backend": {
         "kind": "sqlite",
-        "sessionStorePath": "/tmp/verlet/session_history.sqlite3"
+        "sessionStorePath": "/tmp/verlet/session_history.turso"
       },
       "cursor": null,
       "data": [

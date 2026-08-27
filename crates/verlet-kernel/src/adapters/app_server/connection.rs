@@ -633,6 +633,19 @@ pub(crate) struct ThreadEventsListParams {
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct JournalEventsListParams {
+    #[serde(default)]
+    pub(crate) thread_id: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) from_sequence: Option<i64>,
+    #[serde(default)]
+    pub(crate) to_sequence: Option<i64>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadControlListParams {
     pub(crate) thread_id: String,
     #[serde(default)]
@@ -1085,6 +1098,10 @@ pub(crate) const DISPATCH_METHOD_AUTHORITY_CLASSES: &[(
     (
         "thread/events/list",
         crate::daemon::identity::AuthorityClass::Interactive,
+    ),
+    (
+        "journal/events/list",
+        crate::daemon::identity::AuthorityClass::Host,
     ),
     (
         "thread/couplings/list",
@@ -1851,6 +1868,10 @@ impl crate::adapters::app_server::VerletAppServer {
             "thread/events/list" => {
                 let params: ThreadEventsListParams = parse_params(params)?;
                 self.thread_events_list(params).await
+            }
+            "journal/events/list" => {
+                let params: JournalEventsListParams = parse_params(params)?;
+                self.journal_events_list(params).await
             }
             "thread/couplings/list" => {
                 let params: ThreadControlListParams = parse_params(params)?;
@@ -3476,14 +3497,7 @@ impl crate::adapters::app_server::VerletAppServer {
         }
         let stream_selector = params.stream.as_deref().unwrap_or("thread");
         let stream_id = thread_events_stream_id(&lifecycle.coordinates, stream_selector)?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let mut events = if let Some(stream_cursor) = params.stream_cursor.as_ref() {
             store
                 .read_events_after_cursor(&stream_id, stream_cursor)
@@ -3532,19 +3546,74 @@ impl crate::adapters::app_server::VerletAppServer {
         Ok(serde_json::json!({ "data": data, "cursor": cursor, "streamCursor": stream_cursor }))
     }
 
-    pub(crate) async fn thread_couplings_list(
+    pub(crate) async fn journal_events_list(
         &self,
-        params: ThreadControlListParams,
+        params: JournalEventsListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
-        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
+        if params.from_sequence.is_some_and(|sequence| sequence < 1)
+            || params.to_sequence.is_some_and(|sequence| sequence < 1)
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                "journal/events/list sequence must be positive",
+            ));
+        }
+        if params
+            .from_sequence
+            .zip(params.to_sequence)
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(jsonrpc_error(
+                -32602,
+                "journal/events/list fromSequence must not exceed toSequence",
+            ));
+        }
+        let thread_id = params
+            .thread_id
+            .as_deref()
+            .map(verlet_runtime_contracts::ThreadId::parse_str)
+            .transpose()
+            .map_err(|err| {
+                jsonrpc_error(
+                    -32602,
+                    format!("journal/events/list threadId is invalid: {err}"),
+                )
+            })?;
+        let kind = params
+            .kind
+            .as_deref()
+            .map(str::parse::<verlet_history::EventKind>)
+            .transpose()
+            .map_err(|err| {
+                jsonrpc_error(
+                    -32602,
+                    format!("journal/events/list kind is invalid: {err}"),
+                )
+            })?;
+        let data = self
+            .inner
+            .session_store
+            .list_event_records(
+                thread_id,
+                kind,
+                params.from_sequence.map(verlet_history::EventSequence::new),
+                params.to_sequence.map(verlet_history::EventSequence::new),
+            )
             .await
             .map_err(|err| {
                 internal_error(crate::kernel::runtime_host::VerletError::History(
                     err.to_string(),
                 ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+            })?;
+        Ok(serde_json::json!({ "data": data }))
+    }
+
+    pub(crate) async fn thread_couplings_list(
+        &self,
+        params: ThreadControlListParams,
+    ) -> Result<serde_json::Value, JsonRpcErrorError> {
+        let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
+        let store = self.inner.session_store.clone();
         let Some((bind_event_id, receipt)) =
             crate::kernel::control_decision::active_manifest_bind_receipt(
                 &store,
@@ -3582,14 +3651,7 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ThreadControlListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let mut pending = crate::kernel::control_decision::list_pending_tool_call_suspensions(
             &store,
             &lifecycle.coordinates,
@@ -3611,14 +3673,7 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ThreadControlListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let control_stream = verlet_history::EventStreamId::new(format!(
             "control:{}",
             lifecycle.coordinates.thread_id
@@ -3719,14 +3774,7 @@ impl crate::adapters::app_server::VerletAppServer {
         params: ApprovalResolveParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let control_stream = verlet_history::EventStreamId::new(format!(
             "control:{}",
             lifecycle.coordinates.thread_id
@@ -3816,14 +3864,7 @@ impl crate::adapters::app_server::VerletAppServer {
         params: MandateStartParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let receipt = crate::kernel::mandate_lifecycle::start_mandate(
             &store,
             &lifecycle.coordinates,
@@ -3857,14 +3898,7 @@ impl crate::adapters::app_server::VerletAppServer {
         let mandate_event_id =
             crate::kernel::mandate_lifecycle::parse_mandate_event_id(&params.mandate_event_id)
                 .map_err(mandate_jsonrpc_error)?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let receipt = crate::kernel::mandate_lifecycle::revoke_mandate(
             &store,
             &lifecycle.coordinates,
@@ -3887,14 +3921,7 @@ impl crate::adapters::app_server::VerletAppServer {
         params: MandateListParams,
     ) -> Result<serde_json::Value, JsonRpcErrorError> {
         let lifecycle = self.lifecycle_for_thread_query(&params.thread_id).await?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let data =
             crate::kernel::mandate_lifecycle::list_active_mandates(&store, &lifecycle.coordinates)
                 .await
@@ -3929,14 +3956,7 @@ impl crate::adapters::app_server::VerletAppServer {
             .unwrap_or(5_000)
             .clamp(1, 10_000);
         let redact = params.redact.unwrap_or(true);
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(|err| {
-                internal_error(crate::kernel::runtime_host::VerletError::History(
-                    err.to_string(),
-                ))
-            })?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let mut streams = Vec::new();
         let mut receipts = Vec::new();
         let mut redacted_keys = std::collections::BTreeSet::new();

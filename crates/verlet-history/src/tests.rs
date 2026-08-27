@@ -1615,7 +1615,7 @@ fn stream_append_ack_v1_freezes_ack_classes_and_tail_identity() {
 #[test]
 fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
     let capabilities =
-        crate::StreamBackendCapabilitiesV1::sqlite_local("/tmp/verlet/session_history.sqlite3");
+        crate::StreamBackendCapabilitiesV1::sqlite_local("/tmp/verlet/session_history.turso");
 
     assert_eq!(
         capabilities.schema,
@@ -1646,7 +1646,7 @@ fn stream_backend_capabilities_v1_freezes_sqlite_reference_shape() {
     assert!(!capabilities.supports_cold_archive);
     assert_eq!(
         capabilities.local_path.as_deref(),
-        Some("/tmp/verlet/session_history.sqlite3")
+        Some("/tmp/verlet/session_history.turso")
     );
 
     crate::stream_schema_registry_v1()
@@ -1817,7 +1817,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
             "kind": "sqlite",
-            "sessionStorePath": "/tmp/verlet/session_history.sqlite3",
+            "sessionStorePath": "/tmp/verlet/session_history.turso",
             "ackClasses": ["local_committed", "query_projected"]
         },
         "ackClasses": ["local_committed", "query_projected"],
@@ -1833,7 +1833,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
             "streamId": stream_id.as_str(),
             "backend": {
                 "kind": "sqlite",
-                "sessionStorePath": "/tmp/verlet/session_history.sqlite3"
+                "sessionStorePath": "/tmp/verlet/session_history.turso"
             },
             "ackClasses": ["local_committed", "query_projected"],
             "range": {
@@ -1872,7 +1872,7 @@ fn stream_schema_registry_v1_validates_envelopes_and_context_payloads() {
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
             "kind": "sqlite",
-            "sessionStorePath": "/tmp/verlet/session_history.sqlite3",
+            "sessionStorePath": "/tmp/verlet/session_history.turso",
             "ackClasses": ["local_committed", "query_projected"]
         },
         "ackClasses": ["local_committed", "query_projected"],

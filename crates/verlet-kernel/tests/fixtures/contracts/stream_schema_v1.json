@@ -20,7 +20,7 @@
         "query_projected"
       ],
       "backend_kind": "sqlite",
-      "local_path": "/tmp/verlet/session_history.sqlite3",
+      "local_path": "/tmp/verlet/session_history.turso",
       "schema": "cooldis.stream.backend_capabilities/1",
       "storage_scope": "local_embedded",
       "supports_atomic_batch_append": true,

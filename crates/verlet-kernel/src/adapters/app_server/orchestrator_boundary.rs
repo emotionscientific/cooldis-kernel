@@ -309,10 +309,7 @@ impl crate::adapters::app_server::VerletAppServer {
             &principal,
             Some(&envelope.metadata),
         )?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(history_jsonrpc_error)?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let stream_id = crate::kernel::control_decision::control_stream_id(&coordinates);
         let ingress_event = loop {
             let events = store
@@ -446,10 +443,7 @@ impl crate::adapters::app_server::VerletAppServer {
                     .map_err(crate::adapters::app_server::connection::json_codec_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(history_jsonrpc_error)?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let stream_id = verlet_history::EventStreamId::new(params.stream.clone());
         let appended = match params.expected_sequence {
             Some(expected) => {
@@ -512,10 +506,7 @@ impl crate::adapters::app_server::VerletAppServer {
     ) -> Result<serde_json::Value, crate::adapters::app_server::connection::JsonRpcErrorError> {
         validate_client_stream_id(&params.stream)?;
         let stream_id = verlet_history::EventStreamId::new(params.stream);
-        let store = verlet_history_sqlite::SqliteSessionStore::open(&self.inner.session_store_path)
-            .await
-            .map_err(history_jsonrpc_error)?
-            .with_lease_epoch(self.inner.lease_epoch);
+        let store = self.inner.session_store.clone();
         let mut events = if let Some(cursor) = params.stream_cursor.as_ref() {
             store
                 .read_events_after_cursor(&stream_id, cursor)

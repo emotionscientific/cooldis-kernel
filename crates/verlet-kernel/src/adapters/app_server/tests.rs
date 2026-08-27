@@ -244,6 +244,10 @@ fn dispatcher_method_authority_classes_are_exhaustive_and_explicit() {
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
         (
+            "journal/events/list",
+            crate::daemon::identity::AuthorityClass::Host,
+        ),
+        (
             "thread/couplings/list",
             crate::daemon::identity::AuthorityClass::Interactive,
         ),
@@ -695,7 +699,7 @@ async fn journal_less_runtime_factory_uses_the_current_context_binding_plan() {
 #[tokio::test]
 async fn persisted_thread_with_empty_event_stream_cannot_cross_the_start_boundary_again() {
     let root = unique_test_root("persisted-empty-event-stream");
-    let metadata_path = root.join("metadata.sqlite3");
+    let metadata_path = root.join("metadata.turso");
     let session_path = root.join("session.sqlite3");
     let mut context = verlet_runtime_contracts::ThreadContext::root(
         verlet_runtime_contracts::ThreadCoordinates::new(
@@ -7078,7 +7082,7 @@ async fn ref_less_thread_start_binds_default_manifest() {
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root.clone();
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -7448,7 +7452,7 @@ allow = ["default_cwd"]
     crate::adapters::app_server::sync_catalog_provider_identity(&mut config, &metadata_store)
         .await
         .unwrap();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
         verlet_history::ProviderApi::OpenAIChatCompletions,
         "fixture",
@@ -9904,7 +9908,7 @@ allow = ["streaming"]
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -11046,6 +11050,100 @@ async fn app_server_envelope_ingress_records_surface_admission_before_execution(
 }
 
 #[tokio::test]
+async fn journal_events_list_reads_concurrently_while_a_turn_is_running() {
+    let root = unique_test_root("journal-events-active-turn");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let client = std::sync::Arc::new(BlockingProviderClient::default());
+    let provider_client: std::sync::Arc<dyn verlet_provider::ProviderClient> = client.clone();
+    let app = test_app_with_provider_root(
+        &root,
+        &workspace,
+        provider_client,
+        // lexicon-allow: capsule - existing app-server test fixture config type
+        crate::adapters::app_server::CapsuleBindingsConfig::default(),
+    )
+    .await;
+    let (connection, mut outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&connection).await;
+    let started = app
+        .dispatch_request(&connection, "thread/start", Some(serde_json::json!({})))
+        .await
+        .unwrap();
+    let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+    let turn_id = start_text_turn(&app, &connection, &thread_id, "inspect the live journal").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.wait_for_request(),
+    )
+    .await
+    .expect("provider request did not start");
+    assert_eq!(
+        app.handle_for_thread(&thread_id).await.unwrap().status(),
+        verlet_runtime_contracts::ThreadStatus::Running
+    );
+
+    let params = Some(serde_json::json!({ "threadId": thread_id }));
+    let (first, second) = tokio::join!(
+        app.dispatch_request(&connection, "journal/events/list", params.clone()),
+        app.dispatch_request(&connection, "journal/events/list", params),
+    );
+    for result in [first.unwrap(), second.unwrap()] {
+        let records = result["data"].as_array().unwrap();
+        assert!(!records.is_empty());
+        assert!(records.iter().all(|record| {
+            record["coordinates"]["thread_id"].as_str() == Some(thread_id.as_str())
+        }));
+        assert!(
+            records
+                .iter()
+                .any(|record| { record["kind"].as_str() == Some("session.entry.appended") })
+        );
+    }
+
+    client.release_request();
+    wait_for_turn_completed_notification(&mut outbound_rx, &thread_id, &turn_id).await;
+    app.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn journal_events_list_requires_host_authority_and_positive_sequences() {
+    let app = test_app().await;
+    let (mut interactive_connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&interactive_connection).await;
+    interactive_connection.resolved_principal.kind = crate::daemon::identity::PrincipalKind::Member;
+    let denied = app
+        .dispatch_request(
+            &interactive_connection,
+            "journal/events/list",
+            Some(serde_json::json!({})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, -32003);
+    assert_eq!(
+        denied.message,
+        "request is not authorized for this principal"
+    );
+
+    let (operator_connection, _outbound_rx) = test_connection(app.clone()).await;
+    initialize_for_test(&operator_connection).await;
+    for params in [
+        serde_json::json!({ "fromSequence": 0 }),
+        serde_json::json!({ "toSequence": -1 }),
+    ] {
+        let invalid = app
+            .dispatch_request(&operator_connection, "journal/events/list", Some(params))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, -32602);
+        assert!(invalid.message.contains("sequence must be positive"));
+    }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     let root = unique_test_root("app-server-thread-events-query");
     let workspace = root.join("workspace");
@@ -11606,7 +11704,7 @@ async fn thread_events_list_pages_filters_and_reports_clear_errors() {
     assert!(
         export["backend"]["sessionStorePath"]
             .as_str()
-            .is_some_and(|path| path.ends_with("session_history.sqlite3"))
+            .is_some_and(|path| path.ends_with("session_history.turso"))
     );
     assert_eq!(
         export["ackClasses"].as_array().unwrap(),
@@ -12278,7 +12376,7 @@ streaming = false
     let tenant_id = config.tenant_id.clone();
     let user_id = config.user_id.clone();
     let metadata_path = config.metadata_store_path();
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let app = crate::adapters::app_server::VerletAppServer::new_local(config)
         .await
         .unwrap();
@@ -13142,7 +13240,7 @@ streaming = false
     config.runtime_home = root.join("runtime");
     config.state_home = root.join("state");
     config.agent_registry_root = agent_registry_root;
-    let session_path = config.state_home.join("session_history.sqlite3");
+    let session_path = config.state_home.join("session_history.turso");
     let mut runtime_config = crate::adapters::agent_loop::AgentLoopConfig::new(
         verlet_history::ProviderApi::OpenAIResponses,
         "openai",
@@ -13533,7 +13631,7 @@ fn apply_manifest_runtime_metadata_does_not_infer_tool_instruction_from_old_meta
 async fn catalog_provider_resolution_uses_openai_compatible_store_record_and_stored_auth() {
     let root =
         std::env::temp_dir().join(format!("verlet-provider-resolve-{}", uuid::Uuid::now_v7()));
-    let store_path = root.join("metadata.sqlite3");
+    let store_path = root.join("metadata.turso");
     let store = verlet_metadata::provider_store::SqliteMetadataStore::open(&store_path)
         .await
         .unwrap();
@@ -17742,7 +17840,7 @@ fn hosted_roots_reject_duplicate_and_nested_paths_before_sqlite_open() {
     let mut duplicate =
         crate::adapters::app_server::instance::InstanceRoots::under(&duplicate_root);
     duplicate.state_home = duplicate.runtime_home.clone();
-    let duplicate_db = duplicate.state_home.join("metadata.sqlite3");
+    let duplicate_db = duplicate.state_home.join("metadata.turso");
     let duplicate_path = duplicate.runtime_home.display().to_string();
 
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -17770,7 +17868,7 @@ fn hosted_roots_reject_duplicate_and_nested_paths_before_sqlite_open() {
     let nested_root = unique_test_root("hosted-nested-roots");
     let mut nested = crate::adapters::app_server::instance::InstanceRoots::under(&nested_root);
     nested.state_home = nested.runtime_home.join("nested-state");
-    let nested_db = nested.state_home.join("metadata.sqlite3");
+    let nested_db = nested.state_home.join("metadata.turso");
     let runtime_path = nested.runtime_home.display().to_string();
     let state_path = nested.state_home.display().to_string();
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -17872,7 +17970,7 @@ async fn hosted_config_rejects_environment_mutation_before_sqlite_open() {
     let environment_root = unique_test_root("hosted-mutated-environment");
     let environment_roots =
         crate::adapters::app_server::instance::InstanceRoots::under(&environment_root);
-    let environment_db = environment_roots.state_home.join("metadata.sqlite3");
+    let environment_db = environment_roots.state_home.join("metadata.turso");
     let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
         environment_roots,
         hosted_test_environment(),
@@ -17891,7 +17989,7 @@ async fn hosted_config_rejects_environment_mutation_before_sqlite_open() {
 
     let cwd_root = unique_test_root("hosted-mutated-cwd");
     let cwd_roots = crate::adapters::app_server::instance::InstanceRoots::under(&cwd_root);
-    let cwd_db = cwd_roots.state_home.join("metadata.sqlite3");
+    let cwd_db = cwd_roots.state_home.join("metadata.turso");
     let mut config = crate::adapters::app_server::VerletAppServerConfig::hosted(
         cwd_roots,
         hosted_test_environment(),
@@ -18030,8 +18128,8 @@ async fn hosted_config_rejects_root_mutation_before_sqlite_open() {
             .to_string()
             .contains(&reserved_state.display().to_string())
     );
-    assert!(!configured_state.join("metadata.sqlite3").exists());
-    assert!(!reserved_state.join("metadata.sqlite3").exists());
+    assert!(!configured_state.join("metadata.turso").exists());
+    assert!(!reserved_state.join("metadata.turso").exists());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -18096,7 +18194,7 @@ async fn live_hosted_instance_rejects_overlapping_root_and_releases_on_drop() {
             second_root.join(index.to_string()),
         );
         second_roots.skill_registry_root = reserved_root.clone();
-        let second_db = second_roots.state_home.join("metadata.sqlite3");
+        let second_db = second_roots.state_home.join("metadata.turso");
         let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
             second_roots,
             hosted_test_environment(),
@@ -18188,7 +18286,7 @@ async fn live_hosted_instance_rejects_symlinked_root_alias_before_sqlite_open() 
     let mut second_roots =
         crate::adapters::app_server::instance::InstanceRoots::under(&second_root);
     second_roots.blob_registry_root = alias_root.join("blobs");
-    let second_db = second_roots.state_home.join("metadata.sqlite3");
+    let second_db = second_roots.state_home.join("metadata.turso");
     let alias_path = second_roots.blob_registry_root.display().to_string();
     let reserved_path = first_roots.blob_registry_root.display().to_string();
     let error = crate::adapters::app_server::VerletAppServerConfig::hosted(
@@ -21381,7 +21479,7 @@ where
         None,
         Some(config.metadata_store_path()),
         None,
-        Some(config.state_home.join("session_history.sqlite3")),
+        Some(config.state_home.join("session_history.turso")),
         config.lease_epoch,
         None,
         None,

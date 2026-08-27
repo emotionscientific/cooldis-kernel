@@ -557,7 +557,7 @@ fn stream_schema_v1_contract_matches_fixture() {
             .unwrap();
     }
     let backend_capabilities = vec![verlet_history::StreamBackendCapabilitiesV1::sqlite_local(
-        "/tmp/verlet/session_history.sqlite3",
+        "/tmp/verlet/session_history.turso",
     )];
     for capabilities in &backend_capabilities {
         schema_registry
@@ -658,7 +658,7 @@ fn debug_thread_export_v1_contract_matches_fixture() {
         "generatedAtMs": 1_771_718_499_999i64,
         "backend": {
             "kind": "sqlite",
-            "sessionStorePath": "/tmp/verlet/session_history.sqlite3",
+            "sessionStorePath": "/tmp/verlet/session_history.turso",
             "ackClasses": ["local_committed", "query_projected"]
         },
         "ackClasses": ["local_committed", "query_projected"],
@@ -674,7 +674,7 @@ fn debug_thread_export_v1_contract_matches_fixture() {
             "streamId": stream_id.as_str(),
             "backend": {
                 "kind": "sqlite",
-                "sessionStorePath": "/tmp/verlet/session_history.sqlite3"
+                "sessionStorePath": "/tmp/verlet/session_history.turso"
             },
             "ackClasses": ["local_committed", "query_projected"],
             "range": {

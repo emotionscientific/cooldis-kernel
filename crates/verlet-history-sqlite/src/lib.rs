@@ -212,6 +212,46 @@ impl SqliteSessionStore {
         }
         Ok(events)
     }
+
+    pub async fn list_event_records(
+        &self,
+        thread_id: Option<verlet_runtime_contracts::ThreadId>,
+        kind: Option<verlet_history::EventKind>,
+        from_sequence: Option<verlet_history::EventSequence>,
+        to_sequence: Option<verlet_history::EventSequence>,
+    ) -> verlet_history::HistoryResult<Vec<verlet_history::EventRecord>> {
+        let connection = self.connect().await?;
+        let thread_id = thread_id
+            .map(|thread_id| thread_id.to_string())
+            .unwrap_or_default();
+        let kind = kind.map(|kind| kind.to_string()).unwrap_or_default();
+        let from_sequence = from_sequence
+            .map(verlet_history::EventSequence::get)
+            .unwrap_or(i64::MIN);
+        let to_sequence = to_sequence
+            .map(verlet_history::EventSequence::get)
+            .unwrap_or(i64::MAX);
+        let mut rows = connection
+            .query(
+                "SELECT event_id, schema, payload_schema, stream_id, sequence, thread_id,
+                        tenant_id, user_id, session_id, created_at_ms, kind, origin,
+                        provenance_json, payload_json
+                 FROM event_records
+                 WHERE (?1 = '' OR thread_id = ?1)
+                   AND (?2 = '' OR kind = ?2)
+                   AND sequence >= ?3
+                   AND sequence <= ?4
+                 ORDER BY rowid",
+                verlet_sqlite::params![thread_id, kind, from_sequence, to_sequence],
+            )
+            .await
+            .map_err(verlet_history::storage_error)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().await.map_err(verlet_history::storage_error)? {
+            events.push(sqlite_event_from_row(&row)?);
+        }
+        Ok(events)
+    }
 }
 
 #[async_trait::async_trait]

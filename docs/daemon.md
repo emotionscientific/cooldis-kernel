@@ -380,9 +380,11 @@ differ in who owns the process, the socket, and the state directories.
 
 The boundary rules for V1:
 
-- **One writer per state home.** Exactly one app-server process may own a
+- **One owner per state home.** Exactly one app-server process may own a
   given runtime/state home at a time. Running two shapes against the same
   state directories is refused with the existing process id and socket path.
+  Live readers also use the owner's RPC and never open its Turso files
+  directly. See [State Home Access Rules](app-server.md#state-home-access-rules).
 - **State outlives the process; subscriptions do not.** Threads, turns, and
   events persist in the state home (published agent records live in the
   separate agent registry root, `.verlet/agents` by default) and are
