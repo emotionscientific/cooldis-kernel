@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE="origin"
 FULL_GATE=0
 SKIP_LOCAL_GATE=0
+SKIP_AMD64=0
 DRY_RUN=0
 PUSH_MAIN=1
 
@@ -17,7 +18,8 @@ Usage:
 
 Options:
   --full-gate         Run scripts/release-v1-candidate.sh instead of the quick package smoke.
-  --skip-local-gate   Skip the local package/full-gate preflight.
+  --skip-local-gate   Skip the package/full-gate and x86_64 Linux preflight steps.
+  --skip-amd64        Skip the x86_64 Linux verification step.
   --no-push-main      Push only the tag, not the current branch.
   --remote NAME       Git remote to push. Default: origin.
   --dry-run           Print the actions without creating or pushing a tag.
@@ -25,11 +27,12 @@ Options:
 
 Default flow:
   1. Validate the release tag against crates/verlet-kernel/Cargo.toml.
-  2. Build the host-target release archive locally.
-  3. Smoke the archive and local installer.
-  4. Create an annotated tag at HEAD if it does not already exist.
-  5. Push the current branch and tag.
-  6. Print the GitHub Release workflow URL and exit without watching.
+  2. Run the full verification suite on x86_64 Linux.
+  3. Build the host-target release archive locally.
+  4. Smoke the archive and local installer.
+  5. Create an annotated tag at HEAD if it does not already exist.
+  6. Push the current branch and tag.
+  7. Print the GitHub Release workflow URL and exit without watching.
 
 Before tagging, refresh the checked-in models.dev catalog snapshot with
 scripts/update-model-catalog.sh and review the diff by hand: catalog base
@@ -130,6 +133,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_LOCAL_GATE=1
       shift
       ;;
+    --skip-amd64)
+      SKIP_AMD64=1
+      shift
+      ;;
     --no-push-main)
       PUSH_MAIN=0
       shift
@@ -188,8 +195,25 @@ if [[ "$PUSH_MAIN" == "1" && -z "$BRANCH" ]]; then
   die "--no-push-main is required from a detached HEAD"
 fi
 
+if [[ "$SKIP_LOCAL_GATE" != "1" && "$SKIP_AMD64" != "1" ]]; then
+  run "$ROOT/scripts/verify-linux.sh" --amd64
+fi
+
 if [[ "$DRY_RUN" == "1" ]]; then
-  printf '\nDry run only. Would run the local release preflight, ensure tag %s at HEAD, then push to %s.\n' "$TAG" "$REMOTE"
+  if [[ "$SKIP_LOCAL_GATE" == "1" ]]; then
+    LOCAL_PREFLIGHT_PLAN="skip the package/full-gate preflight"
+  elif [[ "$FULL_GATE" == "1" ]]; then
+    LOCAL_PREFLIGHT_PLAN="run $ROOT/scripts/release-v1-candidate.sh"
+  else
+    LOCAL_PREFLIGHT_PLAN="build and smoke the host-target release archive"
+  fi
+  if [[ "$PUSH_MAIN" == "1" ]]; then
+    PUSH_PLAN="push branch $BRANCH and tag $TAG to $REMOTE"
+  else
+    PUSH_PLAN="push tag $TAG to $REMOTE without pushing a branch"
+  fi
+  printf '\nDry run only. Would %s, ensure tag %s at HEAD, then %s.\n' \
+    "$LOCAL_PREFLIGHT_PLAN" "$TAG" "$PUSH_PLAN"
   exit 0
 fi
 

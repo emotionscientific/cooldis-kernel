@@ -74,6 +74,15 @@ the suite, and environmental excuses are not accepted grounds for a red lane:
 the build system provides bounded, reproducible build lanes precisely so
 that "it failed for unrelated reasons" stops being an available sentence.
 
+The architecture coverage separates fast routine feedback from slower local
+emulation. Local `scripts/verify.sh` runs natively on macOS arm64, and every
+pull request runs the suite remotely on x86_64 Linux. Linux arm64 is available
+locally through `scripts/verify-linux.sh` for OS-specific checks. A local
+x86_64 Linux run is also part of the default release preflight before tagging
+and is available on demand through `scripts/verify-linux.sh --amd64`. Run the
+on-demand lane for changes involving pointer width, atomics, SIMD,
+architecture-conditional dependencies, or Wasm runtime internals.
+
 ## The deterministic lane
 
 Concurrency bugs do not reproduce on demand, so a class of tests runs under

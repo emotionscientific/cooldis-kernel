@@ -164,6 +164,14 @@ Pull requests and pushes to `main` run `scripts/verify.sh`. The default CI lane
 checks formatting, runs the locked workspace test suite for all targets, and
 runs the virtual-bash and Wasm smoke binaries.
 
+Routine verification runs natively on macOS arm64 through `scripts/verify.sh`,
+and every pull request runs the suite remotely on x86_64 Linux. Linux arm64 is
+available locally through `scripts/verify-linux.sh` for OS-specific checks. The
+local x86_64 Linux lane runs by default during the release preflight before
+tagging and is available on demand with `scripts/verify-linux.sh --amd64`. Run
+the on-demand lane for changes involving pointer width, atomics, SIMD,
+architecture-conditional dependencies, or Wasm runtime internals.
+
 Two provider-backed lanes remain opt-in and are disabled in regular CI. Set
 `VERLET_VERIFY_LIVE_PLUGIN=1` to run the live plugin smoke, or set
 `VERLET_VERIFY_LIVE_S3=1` to run the ignored real-S3 object-store test.
