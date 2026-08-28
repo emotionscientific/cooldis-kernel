@@ -211,9 +211,10 @@ scripts/verify-linux.sh
 
 The default is native `linux/arm64` on Apple Silicon. It covers the Linux OS
 class of path, filesystem, glibc, epoll, signal, and timing bugs; CI's x86_64
-leg remains the architecture authority. Use `scripts/verify-linux.sh --amd64`
-only when reproducing an architecture-specific failure because emulation is
-substantially slower.
+leg remains the per-PR architecture backstop. The release preflight runs
+`scripts/verify-linux.sh --amd64` before tagging. Run that lane on demand for
+changes involving pointer width, atomics, SIMD, architecture-conditional
+dependencies, or Wasm runtime internals. Emulation is substantially slower.
 
 The first run downloads the Rust 1.97.1 Bookworm image (the stable toolchain
 used by CI when this lane was added), installs its toolchain, and builds the
