@@ -200,7 +200,20 @@ if [[ "$SKIP_LOCAL_GATE" != "1" && "$SKIP_AMD64" != "1" ]]; then
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  printf '\nDry run only. Would run the local release preflight, ensure tag %s at HEAD, then push to %s.\n' "$TAG" "$REMOTE"
+  if [[ "$SKIP_LOCAL_GATE" == "1" ]]; then
+    LOCAL_PREFLIGHT_PLAN="skip the package/full-gate preflight"
+  elif [[ "$FULL_GATE" == "1" ]]; then
+    LOCAL_PREFLIGHT_PLAN="run $ROOT/scripts/release-v1-candidate.sh"
+  else
+    LOCAL_PREFLIGHT_PLAN="build and smoke the host-target release archive"
+  fi
+  if [[ "$PUSH_MAIN" == "1" ]]; then
+    PUSH_PLAN="push branch $BRANCH and tag $TAG to $REMOTE"
+  else
+    PUSH_PLAN="push tag $TAG to $REMOTE without pushing a branch"
+  fi
+  printf '\nDry run only. Would %s, ensure tag %s at HEAD, then %s.\n' \
+    "$LOCAL_PREFLIGHT_PLAN" "$TAG" "$PUSH_PLAN"
   exit 0
 fi
 
