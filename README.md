@@ -46,10 +46,11 @@ Three questions come up the first time an agent does something expensive:
 
 Verlet's answer is to put the agent in version control. The agent's definition
 and its whole history live on one record. Acting is the same thing as
-committing. A tool the agent was never given does not exist for it. Every
-outside effect passes through one checkpoint, and the decision made there is
-written down before the effect happens. When the agent changes its own setup,
-that change goes through the same checkpoint as everything else.
+committing. A tool the agent was never given does not exist for it. Every tool
+call is written to the record before it runs, and a permission controller can
+allow, change, deny, or hold it, with the decision recorded next to the call.
+The same path is designed to govern the agent changing its own setup; the
+primer and the status section below say how far that is built.
 
 ## Start Here: The Primer
 
@@ -120,12 +121,14 @@ docs mark the parts that are still being built as reserved or partial.
 - **Receipt.** A recorded explanation of something the runtime resolved: which
   name resolved to which artifact, which attachment made a tool visible, which
   policy decision allowed an action, and what the model was shown.
-- **Checkpoint.** Every continuation, whether a model call, a tool call, a child
-  thread, or the end of a turn, passes one admission point. A policy decides
-  what is allowed next. A fixed script makes a workflow. Letting the model
-  choose makes an agent. Both run on the same record.
+- **Checkpoint.** Every turn passes one admission gate, and the decision is
+  recorded before the turn is scheduled. Tool calls are decided by a controller
+  bound to the thread, and the record keeps the decision next to the request.
+  Workflows and agents run on the same machinery and the same record.
 - **Placement.** Where a thread runs is a separate decision from what it may
-  do. A thread can move between machines without changing its authority.
+  do. Today a child thread can run in a separate local process without any
+  change to its authority; remote and sandbox placement are declared targets
+  whose backends are not built yet.
 
 The [kernel invariants](docs/kernel-invariants.md) page states these rules
 precisely. The [formalism](https://github.com/emotionscientific/verlet-formalism)
@@ -188,7 +191,8 @@ kernel can:
 - ship as `verlet`, `verlet-acp-agent`, and `verlet-mcp-server` binaries for
   macOS and Linux.
 
-In progress: a pluggable policy router with held approvals and resume, stable
+In progress: carrying a recorded approval through to an automatic release of a
+held tool call, a pluggable policy router behind an external service, stable
 evidence export for outside governance systems, and managed-cloud hardening.
 Verlet Cloud runs on this kernel and is concierge today. Self-serve cloud
 placement, a public package registry, and marketplace flows are future
