@@ -4,6 +4,8 @@
 
 ### Release tooling
 
+- The primer source and build script now live in the repository. Local verify
+  and CI check that the committed HTML matches the source.
 - Added `scripts/release.sh` and `just release <tag>` as the maintainer release
   button. It bumps the workspace version, rolls the changelog, runs the local
   gates, lands a release PR, tags the merge, waits for GitHub publishing,

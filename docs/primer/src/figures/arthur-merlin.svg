@@ -1,0 +1,25 @@
+<svg viewBox="0 0 840 240" role="img" aria-label="Merlin the model proposes, Arthur the runtime verifies, and the scribe keeps the transcript that everyone later reads">
+    <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- merlin -->
+    <path d="M90 150 l40 -90 l40 90 z" fill="var(--maybe-soft)" stroke="var(--maybe)" stroke-width="2.5"/>
+    <circle cx="130" cy="65" r="6" fill="var(--maybe)"/>
+    <text x="130" y="185" text-anchor="middle" font-weight="700">Merlin</text>
+    <text x="130" y="205" text-anchor="middle" fill="var(--pencil)">the model: powerful, untrusted</text>
+    <!-- arthur -->
+    <rect x="370" y="80" width="100" height="70" rx="6" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2.5"/>
+    <path d="M370 80 l20 -25 l20 25 l20 -25 l20 25 l20 -25 l20 25" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2.5"/>
+    <text x="420" y="185" text-anchor="middle" font-weight="700">Arthur</text>
+    <text x="420" y="205" text-anchor="middle" fill="var(--pencil)">the runtime: small, checks everything</text>
+    <!-- scribe -->
+    <rect x="660" y="65" width="120" height="90" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2.5"/>
+    <line x1="680" y1="90" x2="760" y2="90" stroke="var(--pencil)" stroke-width="2"/>
+    <line x1="680" y1="110" x2="760" y2="110" stroke="var(--pencil)" stroke-width="2"/>
+    <line x1="680" y1="130" x2="730" y2="130" stroke="var(--pencil)" stroke-width="2"/>
+    <text x="720" y="185" text-anchor="middle" font-weight="700">the transcript</text>
+    <text x="720" y="205" text-anchor="middle" fill="var(--pencil)">what anyone later reads</text>
+    <!-- arrows -->
+    <line x1="180" y1="115" x2="362" y2="115" stroke="currentColor" stroke-width="2.5" marker-end="url(#a4)"/>
+    <text x="270" y="103" text-anchor="middle">"refund them $400"</text>
+    <line x1="478" y1="115" x2="652" y2="115" stroke="currentColor" stroke-width="2.5" marker-end="url(#a4)"/>
+    <text x="565" y="103" text-anchor="middle">checked, then written</text>
+  </svg>

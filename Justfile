@@ -21,6 +21,12 @@ test:
 verify:
     scripts/verify.sh
 
+primer:
+    scripts/build-primer.py --pdf
+
+primer-check:
+    scripts/build-primer.py --check
+
 package-release:
     scripts/package-release-binary.sh
 

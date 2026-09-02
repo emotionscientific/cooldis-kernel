@@ -74,6 +74,10 @@ the suite, and environmental excuses are not accepted grounds for a red lane:
 the build system provides bounded, reproducible build lanes precisely so
 that "it failed for unrelated reasons" stops being an available sentence.
 
+The primer source lives under `docs/primer/src/`. `just primer` rebuilds its
+committed HTML and PDF. The HTML freshness check runs in `scripts/verify.sh`
+when pandoc is installed and in CI with the pinned pandoc version.
+
 The architecture coverage separates fast routine feedback from slower local
 emulation. Local `scripts/verify.sh` runs natively on macOS arm64, and every
 pull request runs the suite remotely on x86_64 Linux. Linux arm64 is available

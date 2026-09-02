@@ -1,0 +1,33 @@
+<svg viewBox="0 0 840 260" role="img" aria-label="Left: a camera watches an agent act on the world and reconstructs a log afterward. Right: the agent can only reach the world through the runtime, so the record exists before the action does">
+    <defs><marker id="a10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <text x="210" y="32" text-anchor="middle" font-weight="700" font-size="16">by observation</text>
+    <text x="630" y="32" text-anchor="middle" font-weight="700" font-size="16" fill="var(--sure)">by construction</text>
+    <!-- left -->
+    <circle cx="90" cy="130" r="30" fill="var(--card)" stroke="currentColor" stroke-width="2"/>
+    <text x="90" y="180" text-anchor="middle" font-size="12">agent</text>
+    <line x1="125" y1="130" x2="300" y2="130" stroke="currentColor" stroke-width="2.5" marker-end="url(#a10)"/>
+    <text x="210" y="118" text-anchor="middle" font-size="12">acts</text>
+    <circle cx="330" cy="130" r="25" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="330" y="175" text-anchor="middle" font-size="12">world</text>
+    <!-- camera -->
+    <rect x="180" y="190" width="60" height="36" rx="5" fill="var(--card)" stroke="currentColor" stroke-width="2"/>
+    <circle cx="210" cy="208" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
+    <path d="M200 186 l-60 -40 M220 186 l60 -40" stroke="var(--pencil)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="210" y="248" text-anchor="middle" font-size="12" fill="var(--pencil)">a sensor watches, then guesses a log</text>
+    <text x="210" y="75" text-anchor="middle" font-size="12" fill="var(--maybe)">can miss steps. can't say what it COULD have done.</text>
+    <!-- right -->
+    <circle cx="510" cy="130" r="30" fill="var(--sure-soft)" stroke="currentColor" stroke-width="2"/>
+    <text x="510" y="180" text-anchor="middle" font-size="12">agent</text>
+    <rect x="580" y="85" width="110" height="90" rx="6" fill="var(--card)" stroke="var(--sure)" stroke-width="3"/>
+    <line x1="600" y1="85" x2="600" y2="175" stroke="var(--sure)" stroke-width="2"/>
+    <text x="645" y="125" text-anchor="middle" font-size="12" font-weight="700">runtime +</text>
+    <text x="645" y="142" text-anchor="middle" font-size="12" font-weight="700">notebook</text>
+    <line x1="545" y1="130" x2="572" y2="130" stroke="var(--sure)" stroke-width="2.5" marker-end="url(#a10)" style="color:var(--sure)"/>
+    <line x1="695" y1="130" x2="745" y2="130" stroke="var(--sure)" stroke-width="2.5" marker-end="url(#a10)" style="color:var(--sure)"/>
+    <circle cx="775" cy="130" r="25" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="775" y="175" text-anchor="middle" font-size="12">world</text>
+    <!-- wall -->
+    <line x1="560" y1="60" x2="560" y2="200" stroke="currentColor" stroke-width="4"/><line x1="740" y1="60" x2="740" y2="200" stroke="currentColor" stroke-width="4"/>
+    <text x="630" y="75" text-anchor="middle" font-size="12" fill="var(--sure)">the record exists BEFORE the action can</text>
+    <text x="630" y="248" text-anchor="middle" font-size="12" fill="var(--pencil)">no other path from agent to world</text>
+  </svg>

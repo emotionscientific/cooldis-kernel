@@ -1,0 +1,19 @@
+<svg viewBox="0 0 840 250" role="img" aria-label="Four stacked responsibilities: authoring, governance, runtime, evidence. The top two say what should happen; the runtime says what did; evidence reads the runtime; the gap between should and did is the incident">
+    <defs><marker id="a13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <g font-weight="700" font-size="15">
+      <rect x="60" y="30" width="420" height="40" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2"/><text x="80" y="56">catalogs &amp; registries</text><text x="460" y="56" text-anchor="end" font-size="12" fill="var(--pencil)">what should exist</text>
+      <rect x="60" y="80" width="420" height="40" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2"/><text x="80" y="106">governance &amp; approvals</text><text x="460" y="106" text-anchor="end" font-size="12" fill="var(--pencil)">what should be allowed</text>
+      <rect x="60" y="130" width="420" height="40" rx="6" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="3"/><text x="80" y="156">the runtime (Verlet)</text><text x="460" y="156" text-anchor="end" font-size="12" fill="var(--sure)">what actually ran</text>
+      <rect x="60" y="180" width="420" height="40" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2"/><text x="80" y="206">audit &amp; compliance dashboards</text><text x="460" y="206" text-anchor="end" font-size="12" fill="var(--pencil)">what it means</text>
+    </g>
+    <!-- braces -->
+    <path d="M510 35 q15 0 15 15 v20 q0 10 10 10 q-10 0 -10 10 v20 q0 15 -15 15" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="550" y="85" font-weight="700">"should"</text>
+    <path d="M510 135 q15 0 15 15 v5 q0 15 -15 15" fill="none" stroke="var(--sure)" stroke-width="2"/>
+    <text x="550" y="157" font-weight="700" fill="var(--sure)">"did"</text>
+    <line x1="620" y1="85" x2="620" y2="140" stroke="var(--maybe)" stroke-width="3" marker-end="url(#a13)" style="color:var(--maybe)"/>
+    <line x1="620" y1="140" x2="620" y2="85" stroke="var(--maybe)" stroke-width="3" marker-end="url(#a13)" style="color:var(--maybe)"/>
+    <text x="640" y="118" fill="var(--maybe)" font-weight="700">the gap = the incident</text>
+    <line x1="300" y1="178" x2="300" y2="172" stroke="currentColor" stroke-width="2" marker-end="url(#a13)"/>
+    <text x="300" y="240" text-anchor="middle" font-size="12" fill="var(--pencil)">dashboards read the runtime's notebook; they are views, not a second truth</text>
+  </svg>

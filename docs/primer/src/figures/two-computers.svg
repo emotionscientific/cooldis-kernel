@@ -1,0 +1,25 @@
+<svg viewBox="0 0 840 300" role="img" aria-label="Two computers side by side: a deterministic one whose output can be recomputed and thrown away, and a model whose output must be written down">
+    <rect x="40" y="40" width="360" height="200" rx="10" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2.5"/>
+    <rect x="440" y="40" width="360" height="200" rx="10" fill="var(--maybe-soft)" stroke="var(--maybe)" stroke-width="2.5"/>
+    <text x="220" y="75" text-anchor="middle" font-size="20" font-weight="700" fill="var(--sure)">"I'm sure"</text>
+    <text x="620" y="75" text-anchor="middle" font-size="20" font-weight="700" fill="var(--maybe)">"maybe"</text>
+    <!-- same in same out -->
+    <text x="100" y="125" text-anchor="middle" font-size="26">2+2</text>
+    <text x="220" y="125" text-anchor="middle" font-size="22">→</text>
+    <text x="340" y="125" text-anchor="middle" font-size="26">4</text>
+    <text x="100" y="165" text-anchor="middle" font-size="26">2+2</text>
+    <text x="220" y="165" text-anchor="middle" font-size="22">→</text>
+    <text x="340" y="165" text-anchor="middle" font-size="26">4</text>
+    <text x="220" y="215" text-anchor="middle" font-weight="700">same in, same out. can rerun.</text>
+    <!-- dice -->
+    <text x="500" y="125" text-anchor="middle" font-size="26">"hi"</text>
+    <text x="620" y="125" text-anchor="middle" font-size="22">→</text>
+    <text x="740" y="125" text-anchor="middle" font-size="22">refund</text>
+    <text x="500" y="165" text-anchor="middle" font-size="26">"hi"</text>
+    <text x="620" y="165" text-anchor="middle" font-size="22">→</text>
+    <text x="740" y="165" text-anchor="middle" font-size="22">escalate</text>
+    <text x="620" y="215" text-anchor="middle" font-weight="700">same in, different out. cannot rerun.</text>
+    <!-- verdicts -->
+    <text x="220" y="275" text-anchor="middle" font-size="17" font-weight="700" fill="var(--sure)">may be thrown away and recomputed</text>
+    <text x="620" y="275" text-anchor="middle" font-size="17" font-weight="700" fill="var(--maybe)">must be written down the moment it happens</text>
+  </svg>

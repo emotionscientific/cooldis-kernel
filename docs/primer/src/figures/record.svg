@@ -1,0 +1,20 @@
+<svg viewBox="0 0 840 420" role="img" aria-label="Ten numbered events of one refund turn on a timeline, colored by whether the world did it or the system computed it">
+    <line x1="60" y1="30" x2="60" y2="400" stroke="currentColor" stroke-width="3"/>
+    <g class="mono" font-size="14">
+      <g transform="translate(0 50)"><circle cx="60" cy="0" r="8" fill="var(--maybe)"/><text x="90" y="5" font-weight="600">41 turn.submitted</text><text x="330" y="5" fill="var(--pencil)">"order 8812 broken, refund please"</text></g>
+      <g transform="translate(0 86)"><circle cx="60" cy="0" r="8" fill="var(--sure)"/><text x="90" y="5" font-weight="600">42 context.compiled</text><text x="330" y="5" fill="var(--pencil)">what the model got to see</text></g>
+      <g transform="translate(0 122)"><circle cx="60" cy="0" r="8" fill="var(--maybe)"/><text x="90" y="5" font-weight="600">43 session.entry.appended</text><text x="330" y="5" fill="var(--pencil)">wants: refund $400</text></g>
+      <g transform="translate(0 158)"><circle cx="60" cy="0" r="8" fill="var(--sure)"/><text x="90" y="5" font-weight="600">44 tool.call.requested</text><text x="330" y="5" fill="var(--pencil)">payments.refund@9f3c…</text></g>
+      <g transform="translate(0 194)"><circle cx="60" cy="0" r="8" fill="var(--hold)"/><text x="90" y="5" font-weight="600">45 tool.call.decision</text><text x="330" y="5" fill="var(--pencil)">HOLD: over $250</text></g>
+      <g transform="translate(0 230)"><circle cx="60" cy="0" r="8" fill="var(--hold)"/><text x="90" y="5" font-weight="600">46 approval.requested</text><text x="330" y="5" fill="var(--pencil)">asks finance on-call</text></g>
+      <g transform="translate(0 266)"><circle cx="60" cy="0" r="8" fill="var(--maybe)"/><text x="90" y="5" font-weight="600">47 approval.resolved</text><text x="330" y="5" fill="var(--pencil)">alice says yes (14 min later)</text></g>
+      <g transform="translate(0 302)"><circle cx="60" cy="0" r="8" fill="var(--maybe)"/><text x="90" y="5" font-weight="600">48 tool.call.completed</text><text x="330" y="5" fill="var(--pencil)">payment API: 200, txn pay_01J…</text></g>
+      <g transform="translate(0 338)"><circle cx="60" cy="0" r="8" fill="var(--maybe)"/><text x="90" y="5" font-weight="600">49 session.entry.appended</text><text x="330" y="5" fill="var(--pencil)">"Refunded $400 to your card"</text></g>
+      <g transform="translate(0 374)"><circle cx="60" cy="0" r="8" fill="var(--sure)"/><text x="90" y="5" font-weight="600">50 turn.completed</text><text x="330" y="5" fill="var(--pencil)">nothing left to do</text></g>
+    </g>
+    <g font-size="12" font-weight="700">
+      <circle cx="620" cy="30" r="6" fill="var(--maybe)"/><text x="632" y="34">the world / the model did it</text>
+      <circle cx="620" cy="50" r="6" fill="var(--sure)"/><text x="632" y="54">the system computed it (with sources)</text>
+      <circle cx="620" cy="70" r="6" fill="var(--hold)"/><text x="632" y="74">a decision, parked and resumed</text>
+    </g>
+  </svg>

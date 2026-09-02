@@ -31,6 +31,12 @@ jobs:
         run: scripts/guard-rails-test.sh
       - name: Release script test suite
         run: scripts/release-test.sh
+      - name: Install pandoc 3.10.1
+        run: |
+          curl -fsSL https://github.com/jgm/pandoc/releases/download/3.10.1/pandoc-3.10.1-1-amd64.deb -o /tmp/pandoc.deb
+          sudo dpkg -i /tmp/pandoc.deb
+      - name: Check primer HTML
+        run: scripts/build-primer.py --check
 
   tests:
     name: Workspace tests

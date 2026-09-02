@@ -1,0 +1,24 @@
+<svg viewBox="0 0 840 280" role="img" aria-label="The agent's tool set is not stored; it is the sum of attach and detach events on the record. At 3am the agent asks for a new tool; the request passes the same checkpoint, and the attach is one more line">
+    <defs><marker id="a11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <line x1="40" y1="80" x2="800" y2="80" stroke="currentColor" stroke-width="3"/>
+    <g class="mono" font-size="12" font-weight="600">
+      <circle cx="100" cy="80" r="9" fill="var(--sure)"/><text x="100" y="55" text-anchor="middle">attach lookup</text>
+      <circle cx="240" cy="80" r="9" fill="var(--sure)"/><text x="240" y="55" text-anchor="middle">attach refund</text>
+      <circle cx="380" cy="80" r="9" fill="var(--maybe)"/><text x="380" y="55" text-anchor="middle">detach lookup</text>
+      <circle cx="640" cy="80" r="9" fill="var(--sure)"/><text x="640" y="55" text-anchor="middle">attach translate</text>
+    </g>
+    <!-- fold results -->
+    <g font-size="12">
+      <text x="100" y="115" text-anchor="middle">{lookup}</text>
+      <text x="240" y="115" text-anchor="middle">{lookup, refund}</text>
+      <text x="380" y="115" text-anchor="middle">{refund}</text>
+      <text x="640" y="115" text-anchor="middle" font-weight="700" fill="var(--sure)">{refund, translate}</text>
+    </g>
+    <text x="420" y="145" text-anchor="middle" fill="var(--pencil)">the tool set is never stored. it is the running total of these lines.</text>
+    <!-- 3am scene -->
+    <text x="500" y="195" text-anchor="end" font-weight="700">3am: "I need a translate tool"</text>
+    <rect x="520" y="175" width="110" height="30" rx="8" fill="var(--hold-soft)" stroke="currentColor" stroke-width="2"/>
+    <text x="575" y="195" text-anchor="middle" font-size="12" font-weight="700">same checkpoint</text>
+    <line x1="635" y1="190" x2="640" y2="95" stroke="currentColor" stroke-width="2" marker-end="url(#a11)"/>
+    <text x="420" y="250" text-anchor="middle" font-weight="700">changing itself = one more recorded, permitted line.  undo = detach.</text>
+  </svg>
