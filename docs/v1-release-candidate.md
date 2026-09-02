@@ -62,25 +62,25 @@ legacy private lane flag or environment variable is used.
 
 ## Tag Gate
 
-Release tags must match the kernel crate version:
+Release tags must match the workspace package version:
 
 ```sh
-scripts/check-release-tag.sh v$(cargo metadata --format-version 1 --no-deps \
-  | jq -r '.packages[] | select(.name == "verlet-kernel") | .version')
+scripts/check-release-tag.sh v0.5.1
 ```
 
 GitHub Actions runs the tag check before publishing artifacts.
 
-For normal maintainer release iteration, use the async helper after local
-changes are committed:
+For a maintainer release, start the release button from a clean, up-to-date
+`main` branch:
 
 ```sh
-scripts/release-async.sh v0.1.0-rc.N
+just release v0.6.0-rc.1
 ```
 
-The helper performs a local host-target package smoke, pushes the tag, prints
-the Release workflow URL, and exits. Pass `--full-gate` to run this full V1 gate
-before the tag push.
+The button bumps the version, runs this full V1 gate, lands the release pull
+request, tags the merge, waits for GitHub publishing, verifies the installer,
+and updates the Homebrew tap. Pass `--quick` only when the shorter host package
+gate is intended.
 
 ## Binary Artifacts
 

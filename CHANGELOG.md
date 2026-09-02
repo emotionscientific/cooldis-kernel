@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Release tooling
+
+- Added `scripts/release.sh` and `just release <tag>` as the maintainer release
+  button. It bumps the workspace version, rolls the changelog, runs the local
+  gates, lands a release PR, tags the merge, waits for GitHub publishing,
+  verifies the published installer, updates Homebrew, and writes a receipt.
+- Removed `scripts/release-async.sh`. Releases now use the synchronous,
+  resumable release button.
+- Moved the Homebrew tap dispatch out of the GitHub release workflow and into
+  the maintainer release button, which uses the maintainer's `gh` login and
+  waits for the tap update.
+- The model catalog refresh script can write to a selected output path so the
+  release preflight can compare a temporary refresh without changing the
+  checked-in snapshot.
+- The installer and release manifest now default to the current
+  `emotionscientific/verlet-kernel` repository.
+
 ### State storage
 
 - State database filenames are now `session_history.turso` and

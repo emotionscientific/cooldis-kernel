@@ -2,8 +2,39 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-source_url=${1:-https://models.dev/api.json}
+source_url=https://models.dev/api.json
 snapshot="$repo_root/crates/verlet-kernel/data/model-catalog.json"
+
+usage() {
+  printf 'usage: scripts/update-model-catalog.sh [SOURCE_URL] [--output FILE]\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      snapshot=${2:?--output requires a value}
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf 'update-model-catalog: unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ "$source_url" != "https://models.dev/api.json" ]]; then
+        printf 'update-model-catalog: unexpected extra argument: %s\n' "$1" >&2
+        usage >&2
+        exit 2
+      fi
+      source_url=$1
+      shift
+      ;;
+  esac
+done
 
 for command_name in curl cargo; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -26,6 +57,7 @@ curl --fail --silent --show-error --location \
 # refresh uses, so the checked-in data cannot drift from the runtime rules.
 VERLET_MODEL_CATALOG_REGEN_INPUT="$upstream" \
   VERLET_MODEL_CATALOG_REGEN_OUTPUT="$snapshot" \
-  cargo test --manifest-path "$repo_root/Cargo.toml" -p verlet --lib \
+  "$repo_root/scripts/cargo-lane.sh" test \
+  --manifest-path "$repo_root/Cargo.toml" -p verlet --lib \
   adapters::app_server::model_catalog::tests::regenerate_built_in_snapshot_from_env \
   -- --ignored --exact
