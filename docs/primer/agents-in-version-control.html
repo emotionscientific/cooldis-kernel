@@ -118,86 +118,87 @@ nav.side { display: none; }
 <header class="title">
 <h1>Agents in Version Control</h1>
 <p class="subtitle">A plain primer on what an agent runtime has to get right, and how Verlet does it</p>
-<p class="byline">Emotion Scientific · 21 August 2026</p>
+<p class="byline">Emotion Scientific · 1 September 2026</p>
 <nav class="toc"><ol><li><a href="#the-thing-that-breaks">1. The thing that breaks</a></li><li><a href="#two-computers">2. Two computers</a></li><li><a href="#the-record-shown">3. The record, shown</a></li><li><a href="#the-propagator-or-where-the-name-comes-from">4. The propagator, or where the name comes from</a></li><li><a href="#one-checkpoint">5. One checkpoint</a></li><li><a href="#on-whose-authority">6. On whose authority?</a></li><li><a href="#the-harness-is-data">7. The harness is data</a></li><li><a href="#where-it-runs-changes-nothing-about-what-it-may-do">8. Where it runs changes nothing about what it may do</a></li><li><a href="#the-field">9. The field</a></li><li><a href="#status-and-receipts">10. Status and receipts</a></li><li><a href="#ten-questions-for-any-agent-system">11. Ten questions for any agent system</a></li><li><a href="#appendix-glossary">Appendix: glossary</a></li></ol></nav>
 </header>
 <h1 id="the-thing-that-breaks">1. The thing that breaks</h1>
-<p>Everyone wants agents that grow into the job instead of staying
-frozen. The market today offers two kinds. Personal agents that you let
-modify themselves, which regularly brick and need constant babysitting.
-And hosted agents that are safe precisely because they never change.</p>
-<p>The bricking is not because models are bad at self-modification. It
-is because these agents live in mutable state. The agent edits its own
-tools, prompts, or memory; nothing records what changed or why; and
-there is no undo. When it goes wrong, the only fix is to wipe it and
-start over, which is the same thing as admitting the agent never had a
-history.</p>
-<p>Nobody lets a junior developer, or a bot, touch a production codebase
-without version control. The same rule has to apply to an agent
-modifying itself: the agent has to be in version control. Two things go
-under history, not one. The agent’s definition (models, tools,
-permissions, prompts, procedures: the part that is like source code) and
-the agent’s experience (every run, every model output, every decision:
-the part that explains why a change was made), with each change pointing
-at the experience that motivated it.</p>
-<p>There is one way this differs from git. Committing cannot be manual,
-because the committer is the agent itself, and an agent editing its own
-memory cannot be trusted to journal the edit. So the runtime has to be
-built so that acting <em>is</em> committing. There is no way to act off
-the record.</p>
-<p>Once that holds, self-modification stops being scary. Every
-self-change is a commit with a reason attached: diffable, reviewable,
-revertible. Trying a change is a branch. A bad change is a revert, not a
-bricked agent.</p>
-<p>This primer explains what a runtime has to get right for that
-sentence to be true, and shows how Verlet, an experimental open-source
-runtime, does it. The reader it is written for is an engineer or product
-owner deciding what to build agents on, or what to trust an agent
-product’s claims against. It uses almost no special vocabulary. Where a
-term is unavoidable, it is introduced as the answer to a problem already
-on the table.</p>
+<p>Everyone wants an agent that gets better at its job over time. Today
+you can have one of two things. A personal agent that is allowed to
+change itself, which breaks often and needs constant repair. Or a hosted
+agent that never changes, which is safe for exactly that reason.</p>
+<p>The breakage does not come from models being bad at improving
+themselves. It comes from where the agent keeps its state. The agent
+edits its own tools, prompts, or memory in place. Nothing records what
+changed or why. There is no undo. When something goes wrong, the only
+repair is to wipe the agent and start over. An agent you have to wipe
+never really had a history.</p>
+<p>Software teams solved this problem for code a long time ago. Nobody
+lets a junior developer, or a bot, edit a production codebase without
+version control. An agent that edits itself needs the same protection.
+Two things go under version control, not one:</p>
+<ul>
+<li>The agent’s <strong>definition</strong>: its models, tools,
+permissions, prompts, and procedures. This is the part that works like
+source code.</li>
+<li>The agent’s <strong>experience</strong>: every run, every model
+output, every decision. This is the part that explains why a change was
+made.</li>
+</ul>
+<p>Each change to the definition should point at the experience that
+caused it.</p>
+<p>There is one place where the comparison to git does not hold. In git,
+a person decides when to commit. An agent cannot be given that choice.
+The agent is the one editing itself, and an agent that edits its own
+memory cannot be trusted to also write down that it did. So the runtime
+has to be built so that every action is automatically a commit. There
+must be no way to act without leaving a record.</p>
+<p>Once that holds, self-modification stops being frightening. Every
+change the agent makes to itself is a commit with a reason attached. You
+can diff it, review it, and revert it. Trying a change is a branch. A
+bad change is a revert, and the agent keeps running.</p>
+<p>This primer explains what a runtime has to get right for that to be
+true, and shows how Verlet, an experimental open-source runtime, does
+it. It is written for an engineer or product owner who is choosing what
+to build agents on, or who needs to check an agent product’s claims. It
+uses very little special vocabulary. When a term is needed, it is
+introduced as the answer to a problem you have already seen.</p>
 <div class="how-to-read">
-<p><strong>If any section does not make sense, ask an agent.</strong>
-Each section ends with a prompt. Clone the runtime
+<p><strong>If a section does not make sense, ask an agent.</strong> Each
+section ends with a prompt. Clone the runtime
 (<code>git clone https://github.com/emotionscientific/verlet-kernel</code>),
 open Claude Code or any coding agent in that directory, and paste the
-prompt. The agent answers from the code, not from this document, so what
-it says is checkable. Boxes marked <strong>Lineage</strong> are optional
-reading: where an idea came from in older computer science and where
-this design departs from it. Skip them on a first pass.</p>
+prompt. The agent answers from the code, not from this document, so you
+can check what it says. Boxes marked <strong>Lineage</strong> are
+optional. They say where an idea came from in older computer science and
+where this design departs from it. Skip them on a first read.</p>
 </div>
-<p>To keep everything concrete, one agent runs through the whole
-document: a customer support agent that reads incoming tickets, talks to
-customers, and can issue refunds through a payment API. Every piece of
-it exists in production somewhere today. It moves money, so every
-question that matters comes up on its own: what happened, why, can we
-rerun it, and who allowed it.</p>
+<p>One example agent runs through the whole document. It is a customer
+support agent. It reads incoming tickets, talks to customers, and can
+issue refunds through a payment API. Every piece of it exists in
+production somewhere today. Because it moves money, every question that
+matters comes up naturally: what happened, why, can we rerun it, and who
+allowed it.</p>
 <h2 id="discussion">Discussion</h2>
-<p>The version-control framing is doing real work, so it is worth saying
-what it claims and what it does not.</p>
-<p>It claims that an agent has two kinds of state that should be one
-history: its definition (tools, policy, model, sources) and its
-experience (what it did, what it saw, what it was told). Today these
-live in different places, under different tools, with no link between
-them. A config file says what the agent is. A log says what it did.
-Nothing records that this line in the config exists because of that
-episode in the log. Putting both on one record is the whole move;
-everything after this section is mechanism for doing it without
-lying.</p>
-<p>It does not claim that the model is under version control. Model
-weights live with the provider and change when the provider decides.
-What the record can pin is which model profile was bound, what was sent,
-and what came back. That is enough to replay the system faithfully; it
-is not enough to reproduce the model’s choice, and the next section is
-about taking that limit seriously instead of papering over it.</p>
-<p>Two words from git [25] carry over exactly. A <strong>commit</strong>
-is an event on the record with a reason attached. A
-<strong>branch</strong> is a replay from a sequence number with
-something changed. Two words do not carry over. There is no
-<strong>merge</strong>, because the record is append-only and the agent
-is one thread of history, not many; and there is no
-<strong>rebase</strong>, because rewriting the past is the one thing the
-design refuses.</p>
+<p>The version-control framing makes one claim and avoids another.</p>
+<p>The claim: an agent has two kinds of state, and they belong in one
+history. Today they live in different places. A config file says what
+the agent is. A log says what it did. Nothing records that a line in the
+config exists because of an episode in the log. Putting both on one
+record is the core idea. The rest of this document is the mechanism for
+doing that without cheating.</p>
+<p>What it does not claim: that the model is under version control.
+Model weights live with the provider, and the provider changes them on
+its own schedule. The record can pin three things: which model profile
+was used, what was sent to it, and what came back. That is enough to
+replay the system exactly. It is not enough to reproduce the model’s
+choice. Section 2 takes that limit seriously.</p>
+<p>Two git words carry over directly. A <strong>commit</strong> is an
+event on the record with a reason attached. A <strong>branch</strong> is
+a replay from some point in the record with one thing changed. Two git
+words do not carry over. There is no <strong>merge</strong>, because the
+record is append-only and the agent is one line of history rather than
+many. There is no <strong>rebase</strong>, because rewriting the past is
+the one thing this design refuses to do.</p>
 <figure class="primer-fig" id="fig-breaks"><svg viewBox="0 0 840 250" role="img" aria-label="A frozen agent in a glass box next to an agent that edits itself and falls apart, with no record of what changed">
     <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <!-- frozen agent -->
@@ -225,7 +226,7 @@ design refuses.</p>
     <text x="560" y="228" text-anchor="middle" fill="var(--maybe)" font-weight="700">= bricked</text>
     <text x="170" y="228" text-anchor="middle" fill="var(--pencil)" font-weight="700">= frozen</text>
   </svg><figcaption><span class="fignum">Figure 1.</span> <p>The fix for both: put the agent in <b>version control</b>. Its
-definition and its whole history, every change pointing at the
+definition and its whole history, with every change pointing at the
 reason.</p></figcaption></figure>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="I am reading a primer that claims this runtime puts “the agent in
 version control”: the agent’s definition and its whole history live in
@@ -246,98 +247,95 @@ paths.</p>
 <blockquote>
 <p>The “I’m sure” computer and the “maybe” computer.</p>
 </blockquote>
-<p>An agent system contains two kinds of computation that should never
+<p>An agent system contains two kinds of computation. They should never
 be confused.</p>
-<p>The first kind is ordinary software. Given the same inputs it
-produces the same outputs. It can be tested, replayed, and checked. Call
+<p>The first kind is ordinary software. Given the same inputs, it
+produces the same outputs. You can test it, rerun it, and check it. Call
 it the “I’m sure” computer.</p>
-<p>The second kind is the model. Given the same apparent input it may
-choose a different continuation. Its provider can change it underneath
-you. Its output depends on sampling, service state, and a model revision
+<p>The second kind is the model. Given the same input, it may choose a
+different answer. Its provider can change it underneath you. Its output
+depends on sampling, on the state of the service, and on a model version
 you do not control. Call it the “maybe” computer.</p>
-<p>Most agent frameworks blur the two. The model’s answer lands in a
-variable, the variable feeds some code, the code calls a tool, and the
-whole thing reads as one program. It is not one program. Half of it
+<p>Most agent frameworks mix the two together. The model’s answer lands
+in a variable. The variable feeds some code. The code calls a tool. The
+whole thing reads like one program. It is two programs, and half of it
 cannot be rerun.</p>
-<p>The right response is not to pretend the model is deterministic, and
-it is not to give up on guarantees because a model is involved. It is to
-draw the line between the two computers explicitly, and let the line
-decide what the runtime must remember and what it may recompute:</p>
+<p>The right response is to draw the line between the two computers on
+purpose, and to let that line decide what the runtime must remember and
+what it may recompute:</p>
 <ul>
 <li>Anything the “I’m sure” computer produced can be thrown away and
-recomputed from its inputs. Indexes, dashboards, search tables, the
-context window assembled for a model call.</li>
+rebuilt from its inputs. That covers indexes, dashboards, search tables,
+and the context window assembled for a model call.</li>
 <li>Anything the “maybe” computer produced, and anything the outside
-world did, cannot be reproduced and must be written down the moment it
-happens. Model outputs. The payment API’s reply. A user’s message. A
-process exiting.</li>
+world did, cannot be rebuilt. It must be written down the moment it
+happens. That covers model outputs, the payment API’s reply, a user’s
+message, and a process exiting.</li>
 </ul>
-<p>Every harness already follows half of this rule by instinct: everyone
-saves what they sent the model, because everyone has learned you cannot
-recompute a model’s answer. The rule generalizes that instinct to the
-whole system, and that is where the payoff is. Rerunning yesterday
-without re-paying for model calls only works if their outputs are part
-of the record the system runs from. Behavior <em>between</em> model
-calls (routing on a classification, retrieving against an index) is only
-explainable if the computed state it read is on the record too. A prompt
-log explains the model. It cannot explain the system, and you cannot
-restart a system from its prompt log.</p>
-<p>There is an older name for this arrangement. In interactive proof
-systems, Merlin is an all-powerful prover who cannot be trusted, and
-Arthur is a bounded verifier [1, 3] who can check Merlin’s claims but
-not produce them. The model is Merlin. The runtime is Arthur. The record
-is the transcript Arthur keeps, and anything the system can later attest
-about what the agent did is read from that transcript, never from asking
-Merlin again.</p>
-<p>That also keeps claims honest. A runtime built this way can prove
-things about ordering, authority, mediation, and whether the record is
-complete. It cannot prove that what the model said was good or true, and
-it should not pretend to.</p>
+<p>Every harness already follows half of this rule. Everyone saves what
+they sent to the model, because everyone has learned you cannot
+recompute a model’s answer. This rule extends that habit to the whole
+system. That extension is where the payoff is. You can only rerun
+yesterday without paying for model calls again if the model’s outputs
+are part of the record the system runs from. You can only explain what
+happened between model calls (routing on a classification, searching an
+index) if the computed state the code read is also on the record. A
+prompt log explains the model. It cannot explain the system, and you
+cannot restart a system from its prompt log.</p>
+<p>There is an older name for this arrangement. In the theory of
+interactive proofs, Merlin is a prover with unlimited power who cannot
+be trusted. Arthur is a verifier with limited power who can check
+Merlin’s claims but cannot produce them [1, 3]. The model is Merlin. The
+runtime is Arthur. The record is the transcript Arthur keeps. Anything
+the system later says about what the agent did is read from that
+transcript. Nobody asks Merlin again.</p>
+<p>This division also keeps claims honest. A runtime built this way can
+prove things about ordering, authority, mediation, and whether the
+record is complete. It cannot prove that what the model said was good or
+true, and it should not pretend to.</p>
 <h2 id="discussion-1">Discussion</h2>
-<p>The usual objection is that a model at temperature zero is
-deterministic, so the line is drawn in the wrong place. It is not.
-Sampling is only one source of drift. Provider-side revisions, batching,
-hardware, and the serving stack all move the output over time, and you
-control none of them. “Same input, same output” is a promise the runtime
-can make about code it ships. It is not a promise anyone can make about
-a hosted model, so the design does not depend on it.</p>
-<p>The second objection is cost: writing down every model output, every
+<p>One common objection: a model at temperature zero is deterministic,
+so the line is in the wrong place. It is not. Sampling is only one
+source of drift. Provider-side revisions, batching, hardware, and the
+serving stack all move the output over time, and you control none of
+them. “Same input, same output” is a promise the runtime can make about
+code it ships. It is not a promise anyone can make about a hosted model,
+so the design does not rely on it.</p>
+<p>A second objection is cost. Writing down every model output, every
 external reply, and every user message sounds like a lot of storage. It
-is less than it sounds. The things that cannot be recomputed are small
-(text in, text out, an API reply). The things that are large (indexes,
+is less than it sounds. The things that cannot be recomputed are small:
+text in, text out, an API reply. The things that are large (indexes,
 embeddings, assembled context windows) are exactly the things the rule
-says you may throw away and rebuild. The line between the two computers
-is also the line between what you must keep and what you are allowed to
-delete.</p>
-<p>The deepest consequence is about where judgment is allowed to sit.
-The “maybe” computer is permitted to propose anything. The “I’m sure”
-computer is the only one permitted to make something happen, and it does
-so only against a written proposal it can later show you. Every later
-section is a variation on this: the model proposes, the runtime
-disposes, and the disposal leaves a receipt.</p>
+lets you delete and rebuild. The line between the two computers is also
+the line between what you must keep and what you may throw away.</p>
+<p>The most important consequence is about where judgment sits. The
+“maybe” computer may propose anything. The “I’m sure” computer is the
+only one allowed to make something happen, and it acts only on a written
+proposal it can show you later. Every section after this one is a
+variation on that pattern. The model proposes. The runtime decides. The
+decision leaves a receipt.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Interactive proofs, and the thing none of the ancestors
 had.</strong> The prover-and-verifier split comes from complexity
 theory. Babai’s Arthur and Merlin games (1985) [1] describe a weak,
 honest verifier accepting claims from an unboundedly clever, untrusted
 prover, as long as each claim comes with a certificate that is cheap to
-check. Shamir’s 1992 result, IP = PSPACE [2], says such a verifier,
-given interaction, can check far more than it could ever compute itself.
-Read as a design claim: a small deterministic runtime can govern an
+check. Shamir’s 1992 result, IP = PSPACE [2], says that such a verifier,
+given interaction, can check far more than it could ever compute on its
+own. Read as a design claim: a small deterministic runtime can govern an
 arbitrarily strong model, provided every consequential step arrives as
-something checkable. A receipt is that certificate; proof-carrying code
-[4] makes the same move for untrusted programs. The analogy has a limit
-worth keeping in view. A theoretical prover finds the accepting path by
-definition; a model merely samples, and sometimes proves nothing. That
-is why budgets exist (there is no fixed point to wait for) and why the
-construction rests on the everyday gap between generating and checking,
-not on any unproven conjecture. Every older tool this design borrows
-from, type systems, effect handlers, partial evaluators, assumes its
-functions are deterministic. Verlet adds one typed slot for a function
-that is not, the model-backed step, and the rules in sections 3 through
-5 are precisely the conditions under which that slot can sit inside
-otherwise lawful machinery without the whole thing becoming
-folklore.</p>
+something checkable. A receipt is that certificate. Proof-carrying code
+[4] makes the same move for untrusted programs.</p>
+<p>The analogy has a limit. A theoretical prover finds the accepting
+path by definition. A model only samples, and sometimes proves nothing.
+That is why budgets exist (there is no fixed point to wait for), and why
+the construction rests on the everyday gap between generating and
+checking, not on any unproven conjecture. Every older tool this design
+borrows from (type systems, effect handlers, partial evaluators) assumes
+its functions are deterministic. Verlet adds one typed slot for a
+function that is not: the model-backed step. The rules in sections 3
+through 5 are the conditions under which that slot can sit inside
+otherwise lawful machinery.</p>
 </aside>
 <figure class="primer-fig" id="fig-two-computers"><svg viewBox="0 0 840 300" role="img" aria-label="Two computers side by side: a deterministic one whose output can be recomputed and thrown away, and a model whose output must be written down">
     <rect x="40" y="40" width="360" height="200" rx="10" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2.5"/>
@@ -390,8 +388,8 @@ cache.</i></p></figcaption></figure>
     <text x="270" y="103" text-anchor="middle">"refund them $400"</text>
     <line x1="478" y1="115" x2="652" y2="115" stroke="currentColor" stroke-width="2.5" marker-end="url(#a4)"/>
     <text x="565" y="103" text-anchor="middle">checked, then written</text>
-  </svg><figcaption><span class="fignum">Figure 3.</span> <p>Nobody ever asks the wizard again what he said. They read the
-transcript. That is what <b>attestation</b> means.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 3.</span> <p>Nobody asks the wizard again what he said. They read the transcript
+Arthur kept. That transcript is what <b>attestation</b> means.</p></figcaption></figure>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="This runtime distinguishes outputs that can be recomputed (indexes,
 views, assembled context) from outputs that cannot (model completions,
 external API replies, user messages). Find the type or enum that encodes
@@ -409,49 +407,51 @@ Explain the rule the code uses to decide which is which.</p>
 <blockquote>
 <p>Write it down.</p>
 </blockquote>
-<p>The commitment is the habit everyone was taught and no agent
-framework kept: everything the system witnesses and everything it
-concludes goes into one append-only record, and nothing is ever erased.
-Here is the precise form.</p>
+<p>The rule is one everyone was taught and no agent framework kept.
+Everything the system sees and everything it concludes goes into one
+append-only record, and nothing is ever erased. Here is the exact form
+that takes.</p>
 <h2 id="streams-and-events">Streams and events</h2>
 <p>A <strong>stream</strong> is an append-only, ordered sequence of
-events owned by one scope. The support agent’s conversation with one
-customer is a stream. So is the control channel that configures the
-agent, and the audit scope of the tenant that owns it. Streams are never
-edited. Everything else in the system (every index, every dashboard,
-every context window) is computed from streams, and nothing else is
-durable. Order within a stream is the sequence number, assigned on
-append; there is no clock to disagree with it, which is the old lesson
-about ordering in distributed systems [24].</p>
-<p>There is no session object, no scratchpad, no mutable “agent state”
-beside the record. An agent does not have state. It has a history, and
-state is a way of reading it.</p>
-<p>An <strong>event</strong> is one immutable fact on a stream, and it
-has one of two origins.</p>
+events that belongs to one scope. The support agent’s conversation with
+one customer is a stream. The control channel that configures the agent
+is another stream. The audit scope of the tenant that owns the agent is
+a third. Streams are never edited. Everything else in the system (every
+index, every dashboard, every context window) is computed from streams,
+and nothing else is kept permanently. Order within a stream is the
+sequence number, assigned when the event is appended. There is no clock
+to disagree with it. This is the old lesson about ordering in
+distributed systems [24].</p>
+<p>There is no session object, no scratchpad, and no mutable “agent
+state” sitting beside the record. The agent does not have state. It has
+a history, and state is one way of reading that history.</p>
+<p>An <strong>event</strong> is one permanent fact on a stream. Events
+have one of two origins.</p>
 <p>A <strong>witnessed</strong> event records something the world or the
 runtime did. A customer message arrived. The payment API returned. A
-process exited. A model call completed. The runtime saw it happen; that
-is the event’s authority. Witnessed events are the only way anything
-enters the system from outside.</p>
+process exited. A model call completed. The runtime saw it happen, and
+that is what gives the event its authority. Witnessed events are the
+only way anything enters the system from outside.</p>
 <p>A <strong>produced</strong> event records something a component
 computed. This ticket was classified as a refund request. This
 conversation was summarized as follows. Every produced event carries
-<strong>provenance</strong>: which events it was computed from, and by
-which function at which version. A produced record that cannot name its
-inputs does not get written.</p>
-<p>One rule binds the two: later events may supersede an interpretation;
-nothing supersedes history. When the classifier revises its judgment,
-the revision is a new event pointing at the old one. The original
-judgment, and the fact that the system acted on it for an hour, stay on
-the record forever.</p>
+<strong>provenance</strong>: the events it was computed from, and the
+function and version that computed it. A produced event that cannot name
+its inputs is not written.</p>
+<p>One rule connects the two kinds. A later event may replace an
+interpretation. No event replaces history. When the classifier changes
+its judgment, the change is a new event that points at the old one. The
+original judgment, and the fact that the system acted on it for an hour,
+stay on the record forever.</p>
 <h2 id="receipts">Receipts</h2>
 <p>A <strong>receipt</strong> is a recorded explanation of something the
 runtime resolved. Which human-readable tool name resolved to which
 immutable operation. Which attachment made a tool visible to this
 thread. Which policy decision authorized this action. Which sources went
 into the context the model saw. Receipts are written under the code and
-configuration present at the time, and they are never recomputed later
-under newer code. Recomputing would answer a different question.</p>
+configuration in force at the time. They are never recomputed later
+under newer code, because a recomputed receipt would answer a different
+question.</p>
 <figure class="primer-fig" id="fig-write-it-down"><svg viewBox="0 0 840 230" role="img" aria-label="The only path from the agent to the world goes through the notebook; a direct shortcut is crossed out">
     <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <circle cx="110" cy="115" r="40" fill="var(--sure-soft)" stroke="currentColor" stroke-width="2"/>
@@ -479,28 +479,28 @@ under newer code. Recomputing would answer a different question.</p>
     <path d="M140 40 q280 -70 560 40" fill="none" stroke="var(--maybe)" stroke-width="2.5" stroke-dasharray="8 6"/>
     <line x1="405" y1="0" x2="435" y2="30" stroke="var(--maybe)" stroke-width="4"/><line x1="435" y1="0" x2="405" y2="30" stroke="var(--maybe)" stroke-width="4"/>
     <text x="420" y="48" text-anchor="middle" fill="var(--maybe)" font-weight="700">no shortcut exists</text>
-  </svg><figcaption><span class="fignum">Figure 4.</span> <p>Not “please log it”. The notebook is the only door. Acting <b>is</b>
-writing it down, so the record cannot have holes.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 4.</span> <p>The notebook is the only door. Acting <b>is</b> writing it down, so
+the record cannot have holes.</p></figcaption></figure>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Algebraic effects and handlers.</strong> In the
-effect-systems tradition [12, 13] a function does not perform its side
-effects; it declares them, and a separate handler, chosen by the caller,
-decides how each one is carried out. A tool in Verlet is built the same
-way. The operation declares what it needs (an HTTP origin, a secret by
-name, a durable write) and cannot reach any of it directly. It asks
-through an opaque handle, the runtime is the handler, and the handler
-chooses at call time how the effect is discharged. This is why the same
-operation runs unchanged on a laptop and on a managed host: same
-program, different handler stack. Nested calls narrow rather than widen,
-since a child operation can use at most what its parent had and what the
-child itself declared. The departure from the textbook is the receipt.
-Academic effect systems handle effects; this runtime handles them and
-writes down that it did, with the evidence. An effect with no receipt
-did not lawfully happen.</p>
+effect-systems tradition [12, 13], a function does not perform its side
+effects. It declares them, and a separate handler chosen by the caller
+decides how each effect is carried out. A tool in Verlet is built the
+same way. The operation declares what it needs (an HTTP origin, a secret
+by name, a durable write) and cannot reach any of it directly. It asks
+through an opaque handle. The runtime is the handler, and it chooses at
+call time how the effect is carried out. This is why the same operation
+runs unchanged on a laptop and on a managed host: same program,
+different handler stack. Nested calls narrow rather than widen. A child
+operation can use at most what its parent had and what the child itself
+declared. The departure from the textbook is the receipt. Academic
+effect systems handle effects. This runtime handles them and writes down
+that it did, with the evidence. An effect with no receipt did not
+lawfully happen.</p>
 </aside>
 <h2 id="what-it-looks-like">What it looks like</h2>
-<p>Here is the refund, as the record has it. One customer thread, one
-turn, event kinds as the current runtime names them. Payloads are
+<p>Here is the refund as the record has it. One customer thread, one
+turn, event kinds named as the current runtime names them. Payloads are
 trimmed.</p>
 <pre class="text"><code>seq  kind                       payload (abridged)
 41   turn.submitted             principal=operator:support-queue
@@ -523,12 +523,13 @@ trimmed.</p>
 49   session.entry.appended     role=assistant
                                 output=&quot;Refunded $400 to your card…&quot;
 50   turn.completed             reason=quiescent</code></pre>
-<p>Read it top to bottom and every question from section 1 has an answer
-in the data. What happened: 48. Why: 43, with the context that produced
-it at 42. Who allowed it: 47, by name, against the rule at 45. What the
-agent could even see: the sources at 42 and the binding at 44. Nothing
-here was reconstructed after the fact from three databases and a log
-file. The runtime wrote each line in order to do the next thing.</p>
+<p>Read it top to bottom, and every question from section 1 has an
+answer in the data. What happened: line 48. Why: line 43, with the
+context that produced it at line 42. Who allowed it: line 47, by name,
+against the rule at line 45. What the agent could even see: the sources
+at line 42 and the binding at line 44. None of this was reconstructed
+afterward from three databases and a log file. The runtime wrote each
+line because it needed that line to do the next thing.</p>
 <figure class="primer-fig" id="fig-record"><svg viewBox="0 0 840 420" role="img" aria-label="Ten numbered events of one refund turn on a timeline, colored by whether the world did it or the system computed it">
     <line x1="60" y1="30" x2="60" y2="400" stroke="currentColor" stroke-width="3"/>
     <g class="mono" font-size="14">
@@ -548,27 +549,27 @@ file. The runtime wrote each line in order to do the next thing.</p>
       <circle cx="620" cy="50" r="6" fill="var(--sure)"/><text x="632" y="54">the system computed it (with sources)</text>
       <circle cx="620" cy="70" r="6" fill="var(--hold)"/><text x="632" y="74">a decision, parked and resumed</text>
     </g>
-  </svg><figcaption><span class="fignum">Figure 5.</span> <p>What happened? line 48. Why? line 43. Who allowed it? line 47, by
+  </svg><figcaption><span class="fignum">Figure 5.</span> <p>What happened? Line 48. Why? Line 43. Who allowed it? Line 47, by
 name. Nobody had to reconstruct anything.</p></figcaption></figure>
 <h2 id="why-recovery-is-free">Why recovery is free</h2>
-<p>When the authoritative state is a fold over immutable events, a
-restart is a read problem. Reopen the streams, rebuild the disposable
-views, restore the current attachments, continue from the next
-admissible step.</p>
-<p>Take the scene everyone dreads. The process dies between line 48’s
-payment call going out and its result being recorded. On restart the
-runtime finds a <code>tool.call.requested</code> at 44 with an allow at
-47 and no completion. The operation’s declared effect class is
-at-most-once. So the runtime does not retry. It queries the payment API
-for the transaction by the request’s fingerprint, records what it finds
-as a witnessed event, and either continues or fails loudly with an
-explicit interruption. It does not guess, and it does not refund
+<p>The true state of the system is computed by reading the events in
+order. So a restart is a reading problem. Reopen the streams. Rebuild
+the disposable views. Restore the current attachments. Continue from the
+next allowed step.</p>
+<p>Take the scene everyone dreads. The process dies after the payment
+call at line 48 goes out and before its result is recorded. On restart,
+the runtime finds a <code>tool.call.requested</code> at line 44, an
+allow at line 47, and no completion. The operation’s declared effect
+class is at-most-once. So the runtime does not retry. It asks the
+payment API for the transaction by the request’s fingerprint, records
+what it finds as a witnessed event, and then either continues or stops
+with an explicit interruption. It does not guess, and it does not refund
 twice.</p>
 <p>(In a real production system you should also make the refund API
 itself idempotent, keyed on the request fingerprint. Then the operation
 can be declared idempotent, and recovery becomes a safe retry instead of
-a lookup. The runtime’s job is to know which of the two it is dealing
-with, and to record which one it did.)</p>
+a lookup. The runtime’s job is to know which of the two cases it is in,
+and to record which one it did.)</p>
 <figure class="primer-fig" id="fig-crash"><svg viewBox="0 0 840 250" role="img" aria-label="A timeline breaks after the payment request; on restart the runtime reopens the notebook, sees no completion, and looks up the transaction instead of paying again">
     <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <line x1="40" y1="70" x2="380" y2="70" stroke="currentColor" stroke-width="3"/>
@@ -591,21 +592,21 @@ with, and to record which one it did.)</p>
     <text x="720" y="155" text-anchor="middle" font-size="12">"did pay_… go through?"</text>
     <line x1="720" y1="80" x2="720" y2="104" stroke="var(--sure)" stroke-width="2.5" marker-end="url(#a6)" style="color:var(--sure)"/>
     <text x="420" y="215" text-anchor="middle" fill="var(--pencil)">line 44 says "at most once". the runtime knows not to guess.</text>
-  </svg><figcaption><span class="fignum">Figure 6.</span> <p>Recovery is <b>reading</b>, not re-thinking. No model call, no double
-refund. (And yes: make the refund API idempotent too.)</p></figcaption></figure>
-<p>Compare that with a harness whose state is in memory and whose log is
-a side channel. After the crash it has a transcript and a hope. The
+  </svg><figcaption><span class="fignum">Figure 6.</span> <p>Recovery means <b>reading the record</b>. No model call, no double
+refund. (And make the refund API idempotent too.)</p></figcaption></figure>
+<p>Compare a harness whose state lives in memory and whose log is a side
+channel. After the crash it has a transcript and nothing else. Its
 honest options are to replay the whole conversation through the model
 again (paying again, and possibly getting a different decision) or to
 ask a human what happened.</p>
 <h2 id="why-replay-is-exact">Why replay is exact</h2>
-<p>Because every model output and every external reply is on the record,
-the deterministic parts of yesterday can be rerun against it exactly,
-with no model calls. You can branch at line 45, swap in
+<p>Every model output and every external reply is on the record. So the
+deterministic parts of yesterday can be rerun against it exactly, with
+no model calls. You can branch at line 45, swap in
 <code>finance-guard@v8</code>, and see whether it would have held the
-refund, for the cost of reading the stream. This is what makes a change
-to the agent testable before it ships, which is the whole point of
-putting the agent in version control.</p>
+refund. The cost is reading the stream. This is what makes a change to
+the agent testable before it ships, which is the point of putting the
+agent in version control.</p>
 <figure class="primer-fig" id="fig-branch"><svg viewBox="0 0 840 230" role="img" aria-label="A timeline forks at line 45: the original path with policy v7 and a branch with policy v8, both computed from the recorded model outputs without calling the model again">
     <line x1="40" y1="110" x2="330" y2="110" stroke="currentColor" stroke-width="3"/>
     <circle cx="100" cy="110" r="8" fill="var(--maybe)"/><circle cx="180" cy="110" r="8" fill="var(--sure)"/><circle cx="260" cy="110" r="8" fill="var(--maybe)"/>
@@ -622,43 +623,42 @@ putting the agent in version control.</p>
     <text x="40" y="50" font-weight="700">every model answer is already on the record…</text>
     <text x="40" y="72" fill="var(--pencil)">…so the green parts replay exactly, for the price of reading a file.</text>
   </svg><figcaption><span class="fignum">Figure 7.</span> <p>This is how a change to the agent gets <b>tested before it ships</b>.
-Version control needs branches; now the agent has them.</p></figcaption></figure>
+Version control needs branches, and now the agent has them.</p></figcaption></figure>
 <h2 id="why-observation-is-not-enough">Why observation is not
 enough</h2>
 <p>A monitoring product watches an agent from the side and infers what
-it did. That is useful, and it is not the same thing. Important steps
+it did. That is useful. It is also a different thing. Important steps
 may be missing, sampled, or disconnected from the state that governed
-them. The reconstruction is a best guess about the system.</p>
-<p>A runtime where acting is committing generates the evidence while
+them. The result is a best guess about the system.</p>
+<p>A runtime where acting is committing produces the evidence while
 doing the work, because it could not have done the work otherwise.
-Monitoring products stay useful as views over that record. They just
-start from a stronger source: the facts execution itself required.
-Section 6 returns to this line, because it is the one that matters most
+Monitoring products stay useful as views over that record. They simply
+start from a stronger source: the facts that execution itself required.
+Section 6 comes back to this, because it is the line that matters most
 when someone has to certify an agent.</p>
 <h2 id="discussion-2">Discussion</h2>
-<p>Three things people ask at this point.</p>
-<p><em>Can the record be wrong?</em> It can be incomplete if a process
-dies between a side effect and the witness for it; that is the crash
-scene above, and the answer is idempotent effects plus replay, not a
+<p>Three questions people ask at this point.</p>
+<p><em>Can the record be wrong?</em> It can be incomplete, if a process
+dies between a side effect and the event that witnesses it. That is the
+crash scene above. The answer is idempotent effects plus replay, not a
 promise that it never happens. What the record cannot be is silently
 edited. Events are appended under the authority of whoever produced
-them, and the runtime’s own attestations are marked as such. A wrong
-entry is corrected by a later entry that says so. Nothing is
-overwritten.</p>
+them, and the runtime’s own statements are marked as such. A wrong entry
+is corrected by a later entry that says so. Nothing is overwritten.</p>
 <p><em>Is this just logging with extra steps?</em> The pattern is event
-sourcing [23], and the difference is which way the dependency points. A
-log is written after the fact, from state that lives elsewhere; if the
-log is lost the system keeps running. Here the record is the state. A
-thread’s tool list, its budget position, its held actions, all of it is
-computed by reading the record forward. If the record were lost there
-would be nothing to run. That is what makes replay exact and recovery
-free, and it is the property that a log, however thorough, cannot
+sourcing [23]. The difference from logging is which way the dependency
+points. A log is written after the fact, from state that lives somewhere
+else. If the log is lost, the system keeps running. Here the record is
+the state. A thread’s tool list, its budget position, its held actions:
+all of it is computed by reading the record forward. If the record were
+lost, there would be nothing to run. That is what makes replay exact and
+recovery free, and it is a property that a log, however thorough, cannot
 offer.</p>
-<p><em>What is a receipt not?</em> It is not a proof that the decision
-was right. A receipt for a policy decision says which policy, which
-inputs, which outcome, under which code. Whether the policy was a good
-one is a question for the people who wrote it, and the receipt is what
-lets them ask it with the facts in hand.</p>
+<p><em>What is a receipt not?</em> It is not proof that the decision was
+right. A receipt for a policy decision says which policy, which inputs,
+which outcome, and under which code. Whether the policy was a good one
+is a question for the people who wrote it. The receipt is what lets them
+ask that question with the facts in hand.</p>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="Walk me through one turn of a thread in this runtime as a sequence of
 events: the kinds turn.submitted,
 context.compile.completed,
@@ -689,42 +689,43 @@ or where the name comes from</h1>
 <blockquote>
 <p>An agent is a loop wired into a record.</p>
 </blockquote>
-<p>Section 3 showed the record. This section says what runs around it,
-and the answer is smaller than most frameworks make it.</p>
-<p>Everything that acts on a thread is a <strong>coupling</strong>: a
-function with three declared legs. What it reads (a selector over
-streams). Where its output goes. What activates it. A coupling has no
-authority beyond those three declarations; it reads what its selector
-names, writes where its sink names, and fires when its trigger fires.
-Every piece of machinery in the runtime, the agent loop included, is one
-of these.</p>
-<p>Couplings come in exactly three kinds, and the kind is decided by one
+<p>Section 3 showed the record. This section describes what runs around
+it. The answer is smaller than most frameworks make it.</p>
+<p>Everything that acts on a thread is a <strong>coupling</strong>. A
+coupling is a function with three declared parts: what it reads (a
+selection of streams), where its output goes, and what triggers it. A
+coupling has no power beyond those three declarations. It reads what it
+named, writes where it named, and runs when its trigger fires. Every
+piece of machinery in the runtime, including the agent loop, is a
+coupling.</p>
+<p>Couplings come in exactly three kinds. The kind is decided by one
 question: where does the output go?</p>
 <ul>
-<li>If the output goes back into the stream it read, the coupling
-<strong>advances</strong> the system. It is a
-<strong>propagator</strong>. The agent loop is the privileged one: it
-reads the thread’s record, calls the model, and appends what came back
-to the same record, triggered by a turn being submitted. Thread, model,
-thread.</li>
+<li>If the output goes back into the stream the coupling read, the
+coupling <strong>advances</strong> the system. This kind is called a
+<strong>propagator</strong>. The agent loop is the main one. It reads
+the thread’s record, calls the model, and appends the model’s answer to
+the same record. It is triggered by a turn being submitted. Thread in,
+model, thread out.</li>
 <li>If the output goes somewhere else as a derived result, the coupling
-<strong>derives</strong>. It is a <strong>projection</strong>: a
-summary, an embedding, a classification, an index feed. Projections are
-allowed to lose information; that is their job. What they may not do is
-hide what they read, so every projection’s output names its inputs.</li>
-<li>If the output goes into a control stream, something that changes how
-future turns run, the coupling <strong>steers</strong>. It is a
-<strong>controller</strong>: switching to a more careful model when a
-conversation escalates, gating a tool, deciding when to compact context,
-routing an inbound message to a thread. Products call these hooks. They
-are feedback.</li>
+<strong>derives</strong>. This kind is called a
+<strong>projection</strong>. Examples: a summary, an embedding, a
+classification, an index feed. Projections are allowed to lose
+information. That is their job. What they may not do is hide what they
+read, so every projection’s output names its inputs.</li>
+<li>If the output goes into a control stream, meaning something that
+changes how future turns run, the coupling <strong>steers</strong>. This
+kind is called a <strong>controller</strong>. Examples: switching to a
+more careful model when a conversation escalates, gating a tool,
+deciding when to compact context, routing an inbound message to a
+thread. Products call these hooks. They are feedback loops.</li>
 </ul>
-<p>Advance, derive, steer. The three are exhaustive because the question
-is: output either returns to its source, or lands elsewhere as
-interpretation, or feeds forward into control. Try it on your own stack.
-The support agent decomposes with nothing left over: the loop is the
-propagator; the ticket classifier, the summarizer, and the embedding
-feed are projections; the escalation rule and the compaction trigger are
+<p>Advance, derive, steer. These three cover every case, because an
+output can only return to its source, land elsewhere as an
+interpretation, or feed forward into control. Try it on your own stack.
+The support agent breaks down with nothing left over. The loop is the
+propagator. The ticket classifier, the summarizer, and the embedding
+feed are projections. The escalation rule and the compaction trigger are
 controllers.</p>
 <figure class="primer-fig" id="fig-propagator"><svg viewBox="0 0 840 330" role="img" aria-label="A thread's record in the middle; the agent loop reads it and writes back to it (advance); projections read it and write elsewhere (derive); controllers read it and write into a control stream that changes how the loop runs next (steer)">
     <defs><marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
@@ -765,78 +766,79 @@ controllers.</p>
 what the loop does next. The agent is the loop and nothing more.</p></figcaption></figure>
 <h2 id="why-this-is-the-whole-runtime">Why this is the whole
 runtime</h2>
-<p>The payoff of having only one kind of thing is that nothing about the
-agent is special. An agent is a propagator wired into streams. A
-sub-agent is another propagator on another thread. A workflow is a
-propagator whose next step is chosen by a script instead of a model. A
-“memory system” is a projection that writes and a context source that
-reads. The runtime does not ship an agent abstraction, a workflow
-abstraction, and a memory abstraction that happen to interoperate; it
-ships streams and couplings, and those words are names for wiring
-patterns.</p>
-<p>It also says where the two computers from section 2 live. A coupling
-is either deterministic or <strong>chaotic</strong>, meaning its output
-cannot be reproduced from its inputs. Model-backed couplings are chaotic
-by definition. The rule from section 2 becomes a rule about couplings: a
-chaotic coupling’s output must land on a stream as an event, because
-there is nothing deterministic to regenerate it from; a deterministic
-coupling’s output may be a view instead, cacheable and deletable. The
-agent loop is chaotic, which is why its every output is on the record
-and why the checkpoint in the next section sits directly on its
-output.</p>
-<p>One more property falls out. Nothing in the system can start itself.
-Couplings fire on events; derived events trace, through provenance, to
-the events that produced them; and that chain only ends at a witnessed
-event, something that came from outside: a user’s message, a timer the
-operator set, an API reply. “The agent decided on its own to start doing
-something” is not a scenario the runtime can represent. Every activation
-chain begins with someone.</p>
+<p>Having only one kind of thing means nothing about the agent is
+special. An agent is a propagator wired into streams. A sub-agent is
+another propagator on another thread. A workflow is a propagator whose
+next step is chosen by a script instead of a model. A “memory system” is
+a projection that writes plus a context source that reads. The runtime
+does not ship an agent abstraction, a workflow abstraction, and a memory
+abstraction that happen to work together. It ships streams and
+couplings. The product words are names for wiring patterns.</p>
+<p>This also says where the two computers from section 2 live. A
+coupling is either deterministic or <strong>chaotic</strong>. Chaotic
+means its output cannot be reproduced from its inputs. Model-backed
+couplings are chaotic by definition. The rule from section 2 becomes a
+rule about couplings. A chaotic coupling’s output must land on a stream
+as an event, because nothing deterministic could regenerate it. A
+deterministic coupling’s output may be a view instead, which can be
+cached and deleted. The agent loop is chaotic. That is why every one of
+its outputs is on the record, and why the checkpoint in the next section
+sits directly on its output.</p>
+<p>One more property follows. Nothing in the system can start itself.
+Couplings fire on events. Derived events trace, through provenance, to
+the events that produced them. That chain only ends at a witnessed
+event, which came from outside: a user’s message, a timer the operator
+set, an API reply. “The agent decided on its own to start doing
+something” is not a scenario the runtime can represent. Every chain of
+activity begins with someone.</p>
 <h2 id="discussion-3">Discussion</h2>
-<p>The word propagator is borrowed from molecular dynamics, and the
-borrowing is the origin of the project’s name. In a molecular dynamics
-simulation, the <strong>integrator</strong> advances every particle one
-step from the current state; the Verlet integrator (Loup Verlet, 1967
-[17]; the velocity form in common use is from 1982 [18]) is the standard
-one, and it has a property that matters here: it is time-reversible and
-it conserves what it should conserve over long runs, because it is built
-around the trajectory rather than around a single force evaluation.
-<strong>Analysis functions</strong> are computed over the trajectory
-without touching it. <strong>Thermostats</strong> and biases read the
-trajectory’s history and feed back into the dynamics to steer them.
-Advance, derive, steer, one-to-one [20]. (The word is the integrator
-sense, not the propagator networks of Sussman and Radul [26], which are
-a different idea.)</p>
-<p>The creator’s training is in computational chemistry and physics, and
-Verlet was conceived by noticing that the abstractions that make a
-molecular simulation trustworthy (one trajectory as the truth, an
-integrator that only ever advances it, analysis that never writes into
-it, feedback that is itself a function of the history) are the same
-abstractions an agent runtime needs and usually lacks. The mapping is a
-mnemonic, not a proof; the definitions above stand on their own. But the
-name is a reminder of the discipline: the thing that advances the system
-is one small, well-understood function, and everything else either reads
-or steers.</p>
+<p>The word propagator is borrowed from molecular dynamics, and that
+borrowing is where the project’s name comes from. In a molecular
+dynamics simulation, the <strong>integrator</strong> advances every
+particle one step from the current state. The Verlet integrator (Loup
+Verlet, 1967 [17]; the velocity form in common use is from 1982 [18]) is
+the standard one. It has a property that matters here. It is
+time-reversible, and it conserves what it should conserve over long
+runs, because it is built around the trajectory rather than around a
+single force evaluation. <strong>Analysis functions</strong> are
+computed over the trajectory without touching it.
+<strong>Thermostats</strong> and biases read the trajectory’s history
+and feed back into the dynamics to steer them. Advance, derive, steer,
+one-to-one [20]. (The word is used in the integrator sense, not in the
+sense of the propagator networks of Sussman and Radul [26], which are a
+different idea.)</p>
+<p>The creator’s training is in computational chemistry and physics.
+Verlet began with the observation that the abstractions that make a
+molecular simulation trustworthy are the same ones an agent runtime
+needs and usually lacks: one trajectory as the truth, an integrator that
+only ever advances it, analysis that never writes into it, and feedback
+that is itself a function of the history. The mapping is a memory aid,
+not a proof. The definitions above stand on their own. But the name is a
+reminder of the discipline. The thing that advances the system is one
+small, well-understood function, and everything else either reads or
+steers.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Metadynamics, or why agent memory is a thermostat.</strong>
-Molecular simulations have a standard problem: the system gets stuck in
-a valley of its energy landscape and never visits the rest. Metadynamics
-(Laio and Parrinello, 2002 [19]) fixes this with a bias that is a
-function of the trajectory’s own history. Every so often it drops a
-small hill where the system currently is, so that places already visited
-become less attractive and the system is pushed toward what it has not
-yet seen. Two things about that construction carry over. First, the bias
-reads the history and writes into the dynamics; it is a controller in
-the sense above, and agent memory has exactly that shape: a projection
-over past turns whose output changes what the loop does next. Second,
-and this is the part most memory features miss, the bias is a
-deterministic function of the trajectory. Given the record, you can
-recompute what the memory was at any step, which is what makes its
-influence explainable after the fact. The lexicon’s line for this is
-short: agent memory is metadynamics, history-dependent bias shaping
-future evolution. The departure is the usual one. A thermostat does not
-need receipts, because the simulation has no adversary and no auditor.
-Here the feedback leaves events with provenance, so “why did it pick the
-careful model on turn 12” is a query rather than a guess.</p>
+Molecular simulations have a standard problem. The system gets stuck in
+one valley of its energy landscape and never visits the rest.
+Metadynamics (Laio and Parrinello, 2002 [19]) fixes this with a bias
+that is a function of the trajectory’s own history. Every so often it
+drops a small hill where the system currently is, so that places already
+visited become less attractive and the system is pushed toward what it
+has not yet seen.</p>
+<p>Two things about that construction carry over. First, the bias reads
+the history and writes into the dynamics. It is a controller in the
+sense above, and agent memory has exactly that shape: a projection over
+past turns whose output changes what the loop does next. Second, and
+this is the part most memory features miss, the bias is a deterministic
+function of the trajectory. Given the record, you can recompute what the
+memory was at any step. That is what makes its influence explainable
+after the fact. The lexicon’s line for this is short: agent memory is
+metadynamics, a history-dependent bias shaping future evolution. The
+departure is the usual one. A thermostat does not need receipts, because
+a simulation has no adversary and no auditor. Here the feedback leaves
+events with provenance, so “why did it pick the careful model on turn
+12” is a query rather than a guess.</p>
 </aside>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="This runtime classifies every function that acts on a thread as a
 coupling with declared reads, writes, and trigger, and sorts couplings
@@ -857,43 +859,45 @@ coupling is forced to write events rather than a view.</p>
 <blockquote>
 <p>What may happen next?</p>
 </blockquote>
-<p>The industry sells workflows and agents as different products. A
+<p>Workflows and agents are usually sold as different products. A
 workflow follows a graph someone drew. An agent lets the model decide.
 Teams end up running both, on two stacks, with two logs, and a hand-off
 between them that nobody can audit.</p>
-<p>Operationally they were never different things. Every step the system
-takes, whether a model call, a tool invocation, a spawned child, or the
-end of a turn, is a continuation of some thread. Put one checkpoint in
-front of all of them. At each step it asks one question: given this
-thread’s history, which continuations are admissible next? It picks one,
-and it writes the decision to the record as an event like any other.</p>
+<p>In operation they were never different things. Every step the system
+takes is a continuation of some thread. That holds for a model call, a
+tool call, a spawned child, and the end of a turn. Put one checkpoint in
+front of all of them. At each step, the checkpoint asks one question:
+given this thread’s history, which continuations are allowed next? It
+picks one, and it writes the decision to the record as an event like any
+other.</p>
 <p>Two properties make that checkpoint more than a dispatcher. First,
-there is no side door: every continuation the runtime executes passed
+there is no side door. Every continuation the runtime executes passed
 the checkpoint, because the checkpoint is where execution is obtained.
-Second, the decision itself is history. The record shows not only that
-the refund tool ran, but that at step 45, under
-<code>finance-guard@v7</code>, the admissible set was
-<code>{hold, deny}</code> and <code>hold</code> was selected.
-Post-mortems stop reconstructing what the system was choosing
+Second, the decision itself is history. The record shows more than the
+fact that the refund tool ran. It shows that at step 45, under
+<code>finance-guard@v7</code>, the allowed set was
+<code>{hold, deny}</code> and <code>hold</code> was chosen. A
+post-mortem no longer has to reconstruct what the system was choosing
 between.</p>
-<p>The checkpoint’s question is answered by a <strong>policy</strong>, a
-function from the thread’s history to the set of admissible next steps.
-Policies come in two modes, and the pair is the whole taxonomy.</p>
+<p>The checkpoint’s question is answered by a <strong>policy</strong>. A
+policy is a function from the thread’s history to the set of allowed
+next steps. Policies come in two modes, and the two modes are the whole
+taxonomy.</p>
 <p>In <strong>strict</strong> mode the policy is deterministic. Only the
-moves it names are admissible, and replaying the record re-derives every
+moves it names are allowed, and replaying the record re-derives every
 decision it ever made, exactly. A strict policy is what the industry
 calls a workflow.</p>
-<p>In <strong>adaptive</strong> mode the model selects the continuation,
-inside a declared envelope of tools and budgets, landing on the same
-record through the same checkpoint. An adaptive policy is what the
+<p>In <strong>adaptive</strong> mode the model chooses the continuation,
+inside a declared envelope of tools and budgets. The choice lands on the
+same record through the same checkpoint. An adaptive policy is what the
 industry calls an agent. The everyday agent loop (“the model decides
 what to do next, with its tools available”) is the simplest adaptive
-policy: admit the whole envelope at every step. It is the correct
-default and the weakest interesting setting.</p>
-<p>Made per step, the choice stops being an architecture and becomes a
-dial. The support agent’s refund path runs strict: verify the order,
-check the amount, hold above a threshold. The conversation around it
-runs adaptive. Same thread, same record, same runtime.</p>
+policy: allow the whole envelope at every step. It is the correct
+default and the least interesting setting.</p>
+<p>Because the choice is made per step, it stops being an architecture
+and becomes a dial. The support agent’s refund path runs strict: verify
+the order, check the amount, hold above a threshold. The conversation
+around it runs adaptive. Same thread, same record, same runtime.</p>
 <figure class="primer-fig" id="fig-checkpoint"><svg viewBox="0 0 840 270" role="img" aria-label="Every possible next step passes one checkpoint; a dial on the checkpoint selects between a fixed rule answering and the model choosing">
     <defs><marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <!-- candidates -->
@@ -922,43 +926,43 @@ runs adaptive. Same thread, same record, same runtime.</p>
     <text x="705" y="185" text-anchor="middle" fill="var(--pencil)">+ the decision is written down</text>
     <text x="420" y="40" text-anchor="middle" fill="var(--pencil)">no side door. everything that runs came through here.</text>
     <text x="420" y="255" text-anchor="middle" font-weight="700"><tspan fill="var(--sure)">dial left = "workflow"</tspan>   <tspan fill="var(--maybe)">dial right = "agent"</tspan>   same machine.</text>
-  </svg><figcaption><span class="fignum">Figure 9.</span> <p>Workflows and agents were never two products. It is one dial, turned
-<b>per step</b>: refund path strict, chit-chat loose, same notebook.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 9.</span> <p>A workflow and an agent are one dial, set <b>per step</b>. The refund
+path runs strict, the conversation runs adaptive, both on the same
+notebook.</p></figcaption></figure>
 <h2 id="budgets-instead-of-assumed-convergence">Budgets instead of
 assumed convergence</h2>
 <p>A deterministic workflow can often prove from its graph that it
 terminates. A model-backed loop cannot. So the runtime enforces explicit
-limits on turns, depth, time, cost, and triggered work, and a turn ends
-when the policy reaches quiescence or a budget stops it. Budgets are
-runtime mechanisms, not instructions in a prompt, and they leave
-evidence: the record says whether work completed, was stopped by policy,
-ran out of budget, or was canceled by a named person.</p>
+limits on turns, depth, time, cost, and triggered work. A turn ends when
+the policy reaches quiescence (nothing left to do) or a budget stops it.
+Budgets are runtime mechanisms, not instructions in a prompt, and they
+leave evidence. The record says whether work completed, was stopped by
+policy, ran out of budget, or was canceled by a named person.</p>
 <h2 id="discussion-4">Discussion</h2>
-<p>“Strict” and “adaptive” are often presented as two products: a
-workflow engine and an agent framework. Treating them as one dial, set
-per step, changes how a team builds. Nobody has to decide up front
-whether a task is “an agent problem” or “a workflow problem.” A support
-flow can be strict for the refund step (three checks, in order, no
-improvisation) and adaptive for the conversation around it. The mix is a
-property of the policy bound to the thread, and the record shows which
-setting governed each step.</p>
-<p>Budgets deserve their own sentence because they are easy to dismiss
-as configuration. They are the only honest answer to a loop with no
-fixed point. A deterministic workflow stops because its graph runs out.
-A model can always propose one more step, and “it will probably
-converge” is not a guarantee anyone should ship. A budget turns an open
-question into a bounded one, and the record saying <em>why</em> a turn
-ended (done, held, out of budget, canceled by whom) is what an operator
-reads first when something went wrong.</p>
+<p>Treating strict and adaptive as one dial, set per step, changes how a
+team builds. Nobody has to decide up front whether a task is “an agent
+problem” or “a workflow problem.” A support flow can be strict for the
+refund step (three checks, in order, no improvisation) and adaptive for
+the conversation around it. The mix is a property of the policy bound to
+the thread, and the record shows which setting governed each step.</p>
+<p>Budgets are easy to dismiss as configuration. They are the only
+honest answer to a loop with no fixed point. A deterministic workflow
+stops because its graph runs out. A model can always propose one more
+step, and “it will probably converge” is not a guarantee anyone should
+ship. A budget turns an open question into a bounded one. And the
+record’s statement of why a turn ended (done, held, out of budget,
+canceled by whom) is the first thing an operator reads when something
+went wrong.</p>
 <h2 id="improvisation-becomes-procedure">Improvisation becomes
 procedure</h2>
-<p>Because a policy is data, an agent can write one. After the support
+<p>A policy is data, so an agent can write one. Suppose the support
 agent has improvised the same three-step check on fifty broken-order
-tickets, the sequence can be published as a strict policy with
+tickets. That sequence can be published as a strict policy, with
 provenance pointing at the fifty episodes, and bound for future runs.
-The model stays available for the novel case; the repeated case gets
-cheaper, faster, and inspectable. This is the path from improvisation to
-procedure, and the record supplies the reasons behind the diff.</p>
+The model stays available for the novel case. The repeated case gets
+cheaper, faster, and easier to inspect. This is the path from
+improvisation to procedure, and the record supplies the reasons behind
+the diff.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Partial evaluation and the Futamura projections.</strong>
 Partial evaluation asks of every part of a program: when does this
@@ -966,24 +970,24 @@ become known? Anything known early can be specialized away, leaving a
 smaller residual program for what is still open. Futamura’s 1971
 observation [5] was that applying this to an interpreter and a program
 yields a compiled program, and applying it again yields a compiler.
-Improvisation becoming procedure is the same move one story up. The
-running agent is an interpreter; what it interprets is the task, in
+Improvisation becoming procedure is the same move one level up. The
+running agent is an interpreter. What it interprets is the task, in
 natural language. Repeated interpretive work (the same three checks on
 fifty tickets) is the part that has become known, and condensing it into
-a strict policy is specialization with a receipt. The deterministic
-machinery below (manifest in, bound harness out) is the first projection
-in the textbook sense; the specialization above it is chaotic, because a
-model proposed it, which is exactly why it lands as a proposal on the
-record and passes the checkpoint rather than being assumed. There is
-even a gauge. Jones optimality [6, 7] asks whether specialization
-removed the entire interpretive layer; here the share of a thread’s
-steps that still went to the model, per recurring task, is that
-overhead, readable straight off the record. Inference systems already do
-this by hand: prefix caching is the model specialized on a fixed
-context, and fine-tuning is weights specialized on history. The rule
-this ancestry leaves behind is that specialization must be auditable. A
-residual program with no receipt for how it was produced is
-folklore.</p>
+a strict policy is specialization with a receipt.</p>
+<p>The deterministic machinery below (manifest in, bound harness out) is
+the first Futamura projection in the textbook sense. The specialization
+above it is chaotic, because a model proposed it. That is exactly why it
+lands as a proposal on the record and passes the checkpoint instead of
+being assumed. There is even a gauge. Jones optimality [6, 7] asks
+whether specialization removed the entire interpretive layer. Here, the
+share of a thread’s steps that still went to the model, per recurring
+task, is that overhead, and it can be read straight off the record.
+Inference systems already do this by hand: prefix caching is the model
+specialized on a fixed context, and fine-tuning is weights specialized
+on history. The rule this ancestry leaves behind is that specialization
+must be auditable. A residual program with no receipt for how it was
+produced cannot be trusted.</p>
 </aside>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="The primer says every continuation (model call, tool call, child
 thread, end of turn) passes one admission checkpoint, and a policy
@@ -1004,100 +1008,99 @@ written when a budget stops a turn.</p>
 <blockquote>
 <p>A tool that is not attached does not exist.</p>
 </blockquote>
-<p>Here is the failure that governance products are sold to prevent. The
-model proposes a refund of $40,000. Nothing checked whether it could.
-The money moves. Afterward, the team discovers the refund tool was
-reachable from a prompt nobody had reviewed, through a path nobody had
-drawn.</p>
-<p>The dangerous property was never that the model proposed it. Models
-propose things constantly. The dangerous property is an unmediated route
-from the proposal to the world. Two laws close that route, and both are
-compiled into the runtime rather than configured on top of it.</p>
+<p>Here is the failure that governance products exist to prevent. The
+model proposes a refund of $40,000. Nothing checked whether it was
+allowed to. The money moves. Afterward, the team discovers that the
+refund tool was reachable from a prompt nobody had reviewed, through a
+path nobody had drawn.</p>
+<p>The dangerous part was never that the model proposed it. Models
+propose things constantly. The dangerous part is an unguarded route from
+the proposal to the world. Two laws close that route. Both are built
+into the runtime, not configured on top of it.</p>
 <p><strong>Attachment.</strong> An operation that has not been attached
-to a thread has no tool surface on that thread. Not “is denied”; does
-not exist, is not in the model’s tool list, cannot be named. Attaching
-is an event on the record (section 7 covers it). So the question “what
-could this agent have done?” is answered by folding the thread’s
-attachments, not by reading prompts and hoping every branch was
+to a thread has no tool surface on that thread. It is not “denied”. It
+does not exist. It is not in the model’s tool list and cannot be named.
+Attaching is an event on the record (section 7 covers it). So the
+question “what could this agent have done?” is answered by reading the
+thread’s attachments, not by reading prompts and hoping every branch was
 found.</p>
 <p><strong>Mediation.</strong> Every external effect passes through one
-runtime-mediated surface. That surface is where a configured policy can
-allow, deny, or hold the action, and where the decision is recorded and
-tied to the action it governed. A denial is visible to the agent so it
-can choose another path. An approval authorizes exactly one
-fingerprinted action, not a class of them.</p>
-<p>Behind both sits a <strong>principal</strong>: the human or service
-identity on whose authority the work entered. Line 41 of the excerpt
-names one. The agent is not itself a principal. It acts within authority
-that arrived from outside, and every effect traces back to the name that
-asked for it.</p>
+runtime-controlled surface. That surface is where a configured policy
+can allow, deny, or hold the action. It is also where the decision is
+recorded and tied to the action it governed. A denial is visible to the
+agent, so it can choose another path. An approval authorizes exactly one
+fingerprinted action, not a class of actions.</p>
+<p>Behind both laws sits a <strong>principal</strong>: the human or
+service identity on whose authority the work entered. Line 41 of the
+excerpt names one. The agent is not itself a principal. It acts within
+authority that arrived from outside, and every effect traces back to the
+name that asked for it.</p>
 <h2 id="why-rules-alone-cannot-do-this">Why rules alone cannot do
 this</h2>
-<p>There is a reason rules-first governance keeps failing at agents, and
-it is older than agents. Ashby’s law of requisite variety [8, 9] says a
+<p>Rules-first governance keeps failing at agents, and the reason is
+older than agents. Ashby’s law of requisite variety [8, 9] says a
 regulator can only control a system whose variety it can match. A policy
 written in advance cannot match the variety of what a model will
-propose; every team that has tried to enumerate allowed actions has
-watched the list go stale in a week.</p>
+propose. Every team that has tried to list the allowed actions in
+advance has watched the list go stale within a week.</p>
 <p>The regulator that can match model variety is not a longer list. It
 is the pair above: a complete record, and one choke point that every
-effect must pass, where a decision of any sophistication can be made, by
-a rule, a person, or another model, at the moment the specific action is
-known. The runtime supplies the choke point, the hold, the resume, and
-the record. The judgment is pluggable.</p>
+effect must pass. At that choke point, a decision of any sophistication
+can be made, by a rule, a person, or another model, at the moment the
+specific action is known. The runtime supplies the choke point, the
+hold, the resume, and the record. The judgment is pluggable.</p>
 <h2 id="discussion-5">Discussion</h2>
-<p>Attachment as the unit of authority takes some getting used to,
-because most systems make authority a property of the agent (“this agent
-is allowed to refund”). Here it is a property of the thread’s history:
-at sequence 12 a refund tool was attached, with this configuration, on
-this person’s authority, and it has not been detached since. The
-difference shows up the first time someone asks “since when could it do
-that, and who said so.” A role-based answer requires reconstructing who
-changed the role and when. An attachment-based answer is one query.</p>
-<p>Mediation is the other half. It is tempting to think of the
-checkpoint as a firewall that inspects traffic. It is closer to a
-notary. The action does not happen and then get checked; it is proposed,
-held, decided, and only then performed, and the decision is written
-before the effect. This ordering is what makes “every consequential
-action was decided” a claim about construction rather than a claim about
-coverage.</p>
+<p>Attachment as the unit of authority takes some getting used to. Most
+systems make authority a property of the agent: “this agent is allowed
+to refund.” Here it is a property of the thread’s history: at sequence
+12, a refund tool was attached, with this configuration, on this
+person’s authority, and it has not been detached since. The difference
+shows up the first time someone asks “since when could it do that, and
+who said so?” A role-based system has to reconstruct who changed the
+role and when. An attachment-based system answers with one query.</p>
+<p>Mediation is the other half. It is tempting to picture the checkpoint
+as a firewall that inspects traffic. It is closer to a notary. The
+action does not happen and then get checked. It is proposed, held,
+decided, and only then performed, and the decision is written before the
+effect. This ordering is what turns “every consequential action was
+decided” from a claim about coverage into a claim about
+construction.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Cybernetics.</strong> The regulation vocabulary here
 (controllers, feedback, budget-enforced quiescence) descends from
-cybernetics [10], and Ashby’s law of requisite variety is the one
-theorem doing load-bearing work: a regulator must have at least as much
-variety as the thing it regulates. A fixed checklist dies when the
-model’s behavior outgrows it; a checkpoint that sees the specific
-proposed action, with the whole record available, grows with the model
-it governs. The interesting part is what cybernetics lacks. It has no
-notion of truth (an authoritative, append-only account of what
-happened), none of attestation (who witnessed a fact versus who produced
-it), and none of permission (what a part <em>may</em> do, as opposed to
-what it <em>can</em> do).</p>
-<p>Every Verlet deployment is a cybernetic system; almost no cybernetic
-system is a lawful Verlet one, because those three commitments are what
-is left after the dynamics are accounted for. Even second-order
-cybernetics [11], which put the person doing the observing inside the
-system, left observation as a signal. Here the act of observing is
-itself a durable event with provenance. The regulator must leave
-receipts: Arthur, not merely a thermostat.</p>
+cybernetics [10]. Ashby’s law of requisite variety is the one theorem
+doing real work: a regulator must have at least as much variety as the
+thing it regulates. A fixed checklist dies when the model’s behavior
+outgrows it. A checkpoint that sees the specific proposed action, with
+the whole record available, grows with the model it governs.</p>
+<p>The interesting part is what cybernetics lacks. It has no notion of
+truth (an authoritative, append-only account of what happened), none of
+attestation (who witnessed a fact versus who produced it), and none of
+permission (what a part <em>may</em> do, as opposed to what it
+<em>can</em> do). Every Verlet deployment is a cybernetic system. Almost
+no cybernetic system is a lawful Verlet one, because those three
+commitments are what is left after the dynamics are accounted for. Even
+second-order cybernetics [11], which put the observer inside the system,
+left observation as a signal. Here the act of observing is itself a
+durable event with provenance. The regulator must leave receipts. It is
+Arthur, not merely a thermostat.</p>
 </aside>
 <h2 id="governance-should-keep-a-path-to-yes">Governance should keep a
 path to yes</h2>
-<p>A control that only blocks moves pressure into bypasses. Useful
-governance offers resolution: say why the action was denied and which
-rule applied; let a person approve with a bounded fact set; let the
-agent revise the action; detach a failing capability; record an
-authorized exception; resume held work after a decision. Line 46 through
-47 of the excerpt is that path in miniature: fourteen minutes of a human
+<p>A control that can only block pushes people toward bypasses. Useful
+governance offers a way forward. Say why the action was denied and which
+rule applied. Let a person approve with a bounded set of facts. Let the
+agent revise the action. Detach a failing capability. Record an
+authorized exception. Resume held work after a decision. Lines 46 and 47
+of the excerpt show that path in miniature: fourteen minutes of a human
 deciding, with the thread parked and nothing lost.</p>
 <h2 id="bounded-disclosure">Bounded disclosure</h2>
 <p>The person approving a refund rarely needs the whole transcript. A
 decision request carries a typed fact sheet: the action, its argument
 fingerprint, the principal, the binding, the rule, and a bounded slice
 of history. Any explanation the agent wrote is marked as untrusted
-content. Less private context leaves the thread, and model-generated
-text cannot quietly present itself as authority.</p>
+content. Less private context leaves the thread, and text the model
+generated cannot quietly present itself as authority.</p>
 <h2 id="by-construction-and-by-observation">By construction and by
 observation</h2>
 <p>This is where the two-computers cut pays off for anyone who has to
@@ -1105,14 +1108,14 @@ certify an agent. There are two ways to know what an agent did.</p>
 <p><em>By observation.</em> A sensor sits beside or in front of the
 agent, captures what it can see, and reconstructs a chain of custody.
 This is what most governance products do today. It works on any agent,
-which is its strength, and it is an inference, which is its limit. It
-cannot know what the agent could have done, only what it saw it do.</p>
+which is its strength. It is an inference, which is its limit. It cannot
+know what the agent could have done, only what it saw it do.</p>
 <p><em>By construction.</em> The runtime is the only way to act, so the
-record is not a reconstruction of the work; it is the work’s
+record is not a reconstruction of the work. It is the work’s
 precondition. The evidence exists because the action could not have
-happened without it. Attachment answers “what could it do,” mediation
-answers “who allowed it,” and the record answers “what did it do,” all
-from the same source.</p>
+happened without it. Attachment answers “what could it do.” Mediation
+answers “who allowed it.” The record answers “what did it do.” All three
+come from the same source.</p>
 <figure class="primer-fig" id="fig-authority"><svg viewBox="0 0 840 300" role="img" aria-label="The agent's tool belt holds only attached tools; an unattached tool is a ghost it cannot even see; every real-world action passes a mediation funnel that can allow, deny, or hold, and traces back to a named person">
     <defs><marker id="a9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <!-- principal -->
@@ -1151,21 +1154,20 @@ from the same source.</p>
     <line x1="705" y1="65" x2="815" y2="205" stroke="var(--maybe)" stroke-width="3"/>
     <text x="760" y="235" text-anchor="middle" font-size="12" fill="var(--maybe)" font-weight="700">a rulebook written</text>
     <text x="760" y="250" text-anchor="middle" font-size="12" fill="var(--maybe)" font-weight="700">in advance goes stale</text>
-  </svg><figcaption><span class="fignum">Figure 10.</span> <p>Two laws, built in: a tool not <b>attached</b> doesn’t exist, and
-every effect passes one <b>door</b>. The judgment at the door is
-pluggable; the door is not.</p></figcaption></figure>
-<p>The two compose. An observation product consumes a by-construction
-record as its strongest input, and maps it to the controls and
-frameworks its customers need. The integration is two seams: policy
-decisions in (the runtime sends a structured request and records the
-answer), and runtime evidence out (events and receipts exported with
-stable identities and links back to the source record). The runtime
-stays the place where a decision becomes an enforced and recorded
-action.</p>
-<p>Honest status: attachment and mediation are compiled into the shipped
+  </svg><figcaption><span class="fignum">Figure 10.</span> <p>Two laws, built in: a tool that is not <b>attached</b> does not
+exist, and every effect passes through one <b>door</b>. The judgment at
+the door can be swapped. The door cannot.</p></figcaption></figure>
+<p>The two compose. An observation product can consume a by-construction
+record as its strongest input, and map it to the controls and frameworks
+its customers need. The integration is two seams. Policy decisions come
+in: the runtime sends a structured request and records the answer.
+Runtime evidence goes out: events and receipts are exported with stable
+identities and links back to the source record. The runtime stays the
+place where a decision becomes an enforced and recorded action.</p>
+<p>Honest status: attachment and mediation are built into the shipped
 runtime. The pluggable policy router, with hold and resume behind an
-external service, is design-settled and not yet shipped. Section 10
-keeps the full ledger.</p>
+external service, is designed and not yet shipped. Section 10 keeps the
+full ledger.</p>
 <figure class="primer-fig" id="fig-observation"><svg viewBox="0 0 840 260" role="img" aria-label="Left: a camera watches an agent act on the world and reconstructs a log afterward. Right: the agent can only reach the world through the runtime, so the record exists before the action does">
     <defs><marker id="a10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <text x="210" y="32" text-anchor="middle" font-weight="700" font-size="16">by observation</text>
@@ -1198,8 +1200,9 @@ keeps the full ledger.</p>
     <line x1="560" y1="60" x2="560" y2="200" stroke="currentColor" stroke-width="4"/><line x1="740" y1="60" x2="740" y2="200" stroke="currentColor" stroke-width="4"/>
     <text x="630" y="75" text-anchor="middle" font-size="12" fill="var(--sure)">the record exists BEFORE the action can</text>
     <text x="630" y="248" text-anchor="middle" font-size="12" fill="var(--pencil)">no other path from agent to world</text>
-  </svg><figcaption><span class="fignum">Figure 11.</span> <p>A camera gives you a good guess. The only door gives you proof. The
-two stack: auditors read the proof through their camera’s dashboard.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 11.</span> <p>Watching from outside gives a good guess. The single door gives
+proof. The two stack: an auditor reads the proof through the monitoring
+dashboard.</p></figcaption></figure>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="Two claims to check. First: an operation that is not attached to a
 thread has no tool surface on that thread, meaning it does not appear in
 the model’s tool list at all. Show me where the tool list for a model
@@ -1228,43 +1231,43 @@ not.</p>
 <p>Section 1 promised the agent in version control. Sections 3 through 6
 built the record, the loop, the checkpoint, and the authority model.
 This section is where the promise is kept.</p>
-<p>Everything that makes up the agent’s harness (which tools it has,
-which policy governs it, which model profile it runs, which sources feed
-its context) is declared data, and every change to that data is an event
-on the thread’s record.</p>
+<p>Everything that makes up the agent’s harness is declared data: which
+tools it has, which policy governs it, which model profile it runs,
+which sources feed its context. Every change to that data is an event on
+the thread’s record.</p>
 <p>A tool becomes available through an <strong>attach</strong> event and
 unavailable through a <strong>detach</strong> event
 (<code>binding.attached</code> and <code>binding.detached</code> in the
 record). The set of tools the agent has at any moment is not stored
-anywhere; it is the fold of those events up to now. Configuration for a
-tool (which secret it may use, which network it may reach) rides on the
-attach event, so “what could it reach, and since when” is one query over
-the record.</p>
-<p>Changes are prospective and take effect at a turn boundary. A turn
-already in progress keeps the snapshot it started under. A registry
-entry changing tomorrow does not alter the contract a running turn
-started with today, because execution resolved the human name to an
-immutable, content-addressed operation and recorded the resolution.
-Rollback is a new recorded change, not a rewrite of the past.</p>
+anywhere. It is computed by reading those events up to now.
+Configuration for a tool (which secret it may use, which network it may
+reach) rides on the attach event. So “what could it reach, and since
+when” is one query over the record.</p>
+<p>Changes take effect at a turn boundary, going forward. A turn already
+in progress keeps the snapshot it started under. A registry entry
+changing tomorrow does not alter the contract a running turn started
+with today, because execution resolved the human name to an immutable,
+content-addressed operation and recorded that resolution. Rollback is a
+new recorded change, not a rewrite of the past.</p>
 <h2 id="self-extension-through-the-same-gate">Self-extension through the
 same gate</h2>
 <p>Now the 3am scene. The support agent, working a ticket, discovers it
 needs a lookup it does not have. It writes the operation (a small
-script, a published immutable package), and requests attachment.</p>
+script, published as an immutable package) and requests attachment.</p>
 <p>That request is an action like any other. It reaches the checkpoint.
 A policy decides whether the change widens the agent’s authority, merely
 adds structure inside authority it already has, or needs a human. The
 attach event records who requested the change, which decision authorized
 it, and which immutable operation became available. At the next turn
-boundary the agent’s tool list reflects it.</p>
+boundary, the agent’s tool list reflects it.</p>
 <p>Nothing new was needed for this. The same record, the same
-checkpoint, the same mediation, the same receipts that govern a refund
-govern the agent changing itself. That is the entire mechanism, and it
-is why the bricking story from section 1 stops: the change is a commit
-with a reason, the episodes that motivated it are on the record next to
-it, and detaching it is one more event.</p>
+checkpoint, the same mediation, and the same receipts that govern a
+refund also govern the agent changing itself. That is the entire
+mechanism. It is why the bricking story from section 1 stops. The change
+is a commit with a reason. The episodes that motivated it are on the
+record next to it. Detaching it is one more event.</p>
 <h2 id="version-control-finished">Version control, finished</h2>
-<p>Put the pieces together and the git analogy closes. The agent’s
+<p>Put the pieces together and the git analogy is complete. The agent’s
 definition is data under history. The agent’s experience is the same
 history. Each change points at the experience that motivated it. Trying
 a change is a branch at a sequence number with a different policy bound.
@@ -1272,22 +1275,23 @@ A bad change is a detach. Nothing is ever off the record, because the
 record is how anything happens.</p>
 <h2 id="discussion-6">Discussion</h2>
 <p>“The harness is data” can sound like “the harness is a config file,”
-which every framework already has. The difference is in three properties
-the config file lacks.</p>
-<p>First, the harness is never edited in place. It is the fold of attach
-and detach events, so every version of it that ever existed is still
-readable, and each change is next to the reason for it.</p>
-<p>Second, the harness is resolved, not declared. A manifest proposes
-tools by human-readable name; what the thread actually runs against is
-the set of immutable, content-addressed operations those names resolved
-to at bind time, with the resolution receipted. Exporting the harness
-means reading that resolved set, which is why two machines can compare
-harnesses and find the exact line that differs.</p>
-<p>Third, the agent can change it through the same gate that governs
-everything else. This is the property that makes self-extension safe
-enough to allow at all. There is no privileged “reconfigure” path that
-bypasses the checkpoint, and so there is no way for the agent to quietly
-become something other than what the record says it is.</p>
+which every framework already has. Three properties separate the
+two.</p>
+<p>First, the harness is never edited in place. It is computed from
+attach and detach events, so every version of it that ever existed is
+still readable, and each change sits next to the reason for it.</p>
+<p>Second, the harness is resolved as well as declared. A manifest
+proposes tools by human-readable name. What the thread actually runs
+against is the set of immutable, content-addressed operations those
+names resolved to at bind time, with the resolution receipted. Exporting
+the harness means reading that resolved set. That is why two machines
+can compare harnesses and find the exact line that differs.</p>
+<p>Third, the agent can change the harness only through the same gate
+that governs everything else. This is the property that makes
+self-extension safe enough to allow at all. There is no privileged
+“reconfigure” path that bypasses the checkpoint. So there is no way for
+the agent to quietly become something other than what the record says it
+is.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>The program is data; declarations select, they do not
 compute.</strong> Two older schools meet here. The first is the
@@ -1295,22 +1299,22 @@ initial-encoding school in functional programming [14, 15]: represent
 the computation as a value, keep the interpreter swappable, and enforce
 the laws in the constructors that build the value. The manifest is that
 value and the kernel is its interpreter. The constructors are the
-compile and bind steps: names resolve to immutable hashes, unknown
-references are rejected before anything runs, every resolution gets a
-receipt. Hot-swap works because reconfiguration hands the interpreter a
-new term; it never patches the interpreter. The rule this leaves behind
-is that if a behavior cannot be read off the declaration plus the
+compile and bind steps. Names resolve to immutable hashes, unknown
+references are rejected before anything runs, and every resolution gets
+a receipt. Hot-swap works because reconfiguration hands the interpreter
+a new term. It never patches the interpreter. The rule this leaves
+behind: if a behavior cannot be read off the declaration plus the
 receipts, it is hidden interpreter state, and a bug.</p>
 <p>The second school is template metaprogramming. Declarations are
-templates and bind is instantiation, done fully before any run; one
+templates and bind is instantiation, done fully before any run. One
 operation definition instantiates as a CLI command, an HTTP route, a
 model-visible tool, and an MCP export, each faithful to the same
-definition; and the exported harness is the expansion, the
+definition. The exported harness is the expansion, the
 post-instantiation artifact that shows what the declarations became. C++
 templates became an accidental programming language with no laws, no
 budget, and unreadable expansion errors. Verlet caps the declaration
 layer on purpose. Declarations select and arrange among registered
-pieces; anything that computes is an operation, where attachments,
+pieces. Anything that computes is an operation, where attachments,
 provenance, and budgets apply.</p>
 </aside>
 <figure class="primer-fig" id="fig-harness-data"><svg viewBox="0 0 840 280" role="img" aria-label="The agent's tool set is not stored; it is the sum of attach and detach events on the record. At 3am the agent asks for a new tool; the request passes the same checkpoint, and the attach is one more line">
@@ -1336,8 +1340,8 @@ provenance, and budgets apply.</p>
     <text x="575" y="195" text-anchor="middle" font-size="12" font-weight="700">same checkpoint</text>
     <line x1="635" y1="190" x2="640" y2="95" stroke="currentColor" stroke-width="2" marker-end="url(#a11)"/>
     <text x="420" y="250" text-anchor="middle" font-weight="700">changing itself = one more recorded, permitted line.  undo = detach.</text>
-  </svg><figcaption><span class="fignum">Figure 12.</span> <p>The agent’s harness is <b>data on the record</b>. Self-modification
-goes through the same door as a refund. That is the whole trick.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 12.</span> <p>The agent’s harness is <b>data on the record</b>. When the agent
+changes itself, the change goes through the same door as a refund.</p></figcaption></figure>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="Show me the attach and detach events for operations on a thread, and
 the code that folds them into the current tool set. Confirm the tool set
 is derived from the record rather than stored as mutable state. Then
@@ -1364,55 +1368,56 @@ runs changes nothing about what it may do</h1>
 </blockquote>
 <p>Authority lives in attachments on the record. Placement is a separate
 decision: which machine, which sandbox, which worker. Moving a thread
-from a laptop to a managed host, or from one worker to another after
-failure, does not change what it may do, because nothing about authority
-was ever stored in the machine.</p>
-<p>Two consequences. First, many customers’ agents can share one runtime
-host, each inside its own fence, with the fence defined by attachments
-and principals rather than by process boundaries. Second, a sandbox and
-a policy decision answer different questions, and the record says which
-guarantee applied. A strong sandbox does not decide whether an action
-was authorized. A strong policy decision does not confine arbitrary
-code. Agent systems need both.</p>
+from a laptop to a managed host, or from one worker to another after a
+failure, does not change what the thread may do. Nothing about its
+authority was ever stored in the machine.</p>
+<p>Two consequences follow. First, many customers’ agents can share one
+runtime host. Each sits inside its own fence, and the fence is defined
+by attachments and principals rather than by process boundaries. Second,
+a sandbox and a policy decision answer different questions, and the
+record says which guarantee applied. A strong sandbox does not decide
+whether an action was authorized. A strong policy decision does not
+confine arbitrary code. Agent systems need both.</p>
 <h2 id="discussion-7">Discussion</h2>
 <p>The split between placement and authority is what makes the rest of
-the document portable. If “what it may do” were a property of the
-machine (this container has the payment key, so whatever runs in it can
-refund), then moving the agent would mean re-deriving its authority, and
-a multi-tenant host would be one misconfiguration away from a
+this document portable. Suppose “what it may do” were a property of the
+machine: this container holds the payment key, so whatever runs in it
+can refund. Then moving the agent would mean re-deriving its authority,
+and a multi-tenant host would be one misconfiguration away from a
 cross-customer refund. Keeping authority in attachments means the
-machine is dumb on purpose. It runs what it is given, against the record
-it is handed, and the question “could this thread reach that system” is
-answered by the record regardless of which worker happened to be
-executing.</p>
-<p>The sandbox point is the one most often collapsed. A sandbox answers
-“what can this process physically touch.” A policy decision answers “was
-this action authorized, by whom, under which rule.” A system with only
-the first cannot explain its own behavior; a system with only the second
-cannot contain code it did not write. Both guarantees are worth having,
-and the record should say which one applied to each effect, because they
-fail in different ways.</p>
+machine can stay simple. It runs what it is given, against the record it
+is handed. The question “could this thread reach that system” is
+answered by the record, whichever worker happened to be executing.</p>
+<p>The sandbox point is the one people most often collapse. A sandbox
+answers “what can this process physically touch.” A policy decision
+answers “was this action authorized, by whom, under which rule.” A
+system with only the first cannot explain its own behavior. A system
+with only the second cannot contain code it did not write. Both
+guarantees are worth having, and the record should say which one applied
+to each effect, because they fail in different ways.</p>
 <h2 id="the-developer-loop">The developer loop</h2>
-<p>For the person building the agent, the whole thing reduces to one
-loop that uses the same contracts locally and managed.</p>
-<p><strong>Define.</strong> A folder: instructions, tools, resources,
-model profiles, the context policy, what secrets and networks are
-needed. Readable as a description of the runtime object, checked into
-git, handed to another runtime without a tutorial.</p>
+<p>For the person building the agent, all of this reduces to one loop.
+The same contracts apply locally and on a managed host.</p>
+<p><strong>Define.</strong> A folder holds the instructions, tools,
+resources, model profiles, context policy, and the secrets and networks
+the agent needs. It reads as a description of the runtime object. It is
+checked into git and can be handed to another runtime without a
+tutorial.</p>
 <p><strong>Plan.</strong> Resolve the proposed shape without running it.
-Which immutable operations, which secrets, which network origins, which
-resources, which policy decisions will be required, and which
-capabilities the chosen placement cannot honor. A system that cannot
-explain its requested powers before execution forces the reviewer to
-audit code and hope.</p>
-<p><strong>Run.</strong> Locally, through a CLI, terminal console, RPC
-client, MCP or ACP surface, all presenting the same operations and the
-same thread history. The local run produces the same categories of
-events and receipts a managed run will.</p>
-<p><strong>Publish.</strong> Operations by content identity. A mutable
-name may point at one, but execution resolves the name and records the
-resolution. Publishing a tool does not make it visible to any agent; a
-later attach does, within a scope, under policy.</p>
+The plan lists which immutable operations, which secrets, which network
+origins, which resources, and which policy decisions will be required,
+and which capabilities the chosen placement cannot honor. A system that
+cannot explain its requested powers before execution forces the reviewer
+to audit code and hope.</p>
+<p><strong>Run.</strong> Run locally through a CLI, a terminal console,
+an RPC client, or an MCP or ACP surface. All of them present the same
+operations and the same thread history. The local run produces the same
+kinds of events and receipts a managed run will.</p>
+<p><strong>Publish.</strong> Operations are published by content
+identity. A mutable name may point at one, but execution resolves the
+name and records the resolution. Publishing a tool does not make it
+visible to any agent. A later attach does, within a scope, under
+policy.</p>
 <p><strong>Promote.</strong> Pick a placement and the organization’s
 bindings. The managed host supplies identity, tenancy, secrets, quotas,
 and operations. The definition stays inspectable and exportable, which
@@ -1448,9 +1453,9 @@ is what avoiding lock-in means in practice.</p>
   </svg><figcaption><span class="fignum">Figure 13.</span> <p>What an agent <b>may</b> do lives in its notebook, never in the
 machine. So it can move, and many tenants can share one host, each
 inside its own fence.</p></figcaption></figure>
-<p><strong>Operate.</strong> Inspect current attachments, the hashes
+<p><strong>Operate.</strong> Inspect the current attachments, the hashes
 that produced them, outcomes, decisions, outstanding work, failures,
-placement, and the provenance of any change. Revise prospectively.
+placement, and the provenance of any change. Revise going forward.
 Revoke by detaching.</p>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="The primer says placement (which machine or sandbox runs a thread) is
 a separate decision from authority (what the thread may do), and that a
@@ -1470,7 +1475,7 @@ Also list the interfaces (CLI, daemon, RPC, MCP, ACP) and confirm they
 expose the same operations and thread history.</p>
 </aside>
 <h1 id="the-field">9. The field</h1>
-<p>Agent systems touch several product categories that claim the same
+<p>Agent systems touch several product categories that use the same
 nouns while owning different things. Four responsibilities keep them
 apart.</p>
 <table>
@@ -1509,13 +1514,13 @@ apart.</p>
 </tr>
 </tbody>
 </table>
-<p>The products may be bundled. The contracts stay distinct, and the
-most important line is between desired state and executed state. A
-catalog says version 3 is approved for the finance team. A policy
-service says this action is allowed. The runtime record says whether
-version 3 actually started, which attachments it received, whether the
-decision reached the mediated action, and what followed. Both matter;
-they should be joinable and never collapsed. When they differ, the
+<p>The products may be bundled. The contracts stay distinct. The most
+important line is between desired state and executed state. A catalog
+says version 3 is approved for the finance team. A policy service says
+this action is allowed. The runtime record says whether version 3
+actually started, which attachments it received, whether the decision
+reached the mediated action, and what followed. Both matter. They should
+be joinable and never collapsed into one. When they differ, the
 difference is the incident.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Traits, typeclasses, and components.</strong> The kernel
@@ -1524,14 +1529,14 @@ assembled, and the shape of a coupling. Product words such as “memory,”
 “skill,” “hook,” and “subagent” are never implemented against directly.
 Each is a name for a pattern over those contracts. Memory, for example,
 is anything with a writer that produces events and a reader that feeds
-context; nothing declares itself to be a memory, and anything with that
+context. Nothing declares itself to be a memory, and anything with that
 shape is one. This is the typeclass move [16] (one contract, many
 derived names, instances by structure rather than by inheritance) and
 the entity-component move from game engines, where “supports memory” is
-a query over components, not a subclass. The rule it leaves behind is
-what makes the four-responsibility table above stable: a new product
-word must lower to existing contracts, and a product word that needs a
-new kernel primitive is a design failure until proven otherwise.</p>
+a query over components rather than a subclass. The rule it leaves
+behind is what keeps the four-responsibility table above stable. A new
+product word must lower to existing contracts. A product word that needs
+a new kernel primitive is a design failure until proven otherwise.</p>
 </aside>
 <figure class="primer-fig" id="fig-should-did"><svg viewBox="0 0 840 250" role="img" aria-label="Four stacked responsibilities: authoring, governance, runtime, evidence. The top two say what should happen; the runtime says what did; evidence reads the runtime; the gap between should and did is the incident">
     <defs><marker id="a13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
@@ -1551,11 +1556,11 @@ new kernel primitive is a design failure until proven otherwise.</p>
     <text x="640" y="118" fill="var(--maybe)" font-weight="700">the gap = the incident</text>
     <line x1="300" y1="178" x2="300" y2="172" stroke="currentColor" stroke-width="2" marker-end="url(#a13)"/>
     <text x="300" y="240" text-anchor="middle" font-size="12" fill="var(--pencil)">dashboards read the runtime's notebook; they are views, not a second truth</text>
-  </svg><figcaption><span class="fignum">Figure 14.</span> <p>Keep “should” and “did” joinable but separate. When they disagree,
-you have found the incident, as data, not as a week of forensics.</p></figcaption></figure>
+  </svg><figcaption><span class="fignum">Figure 14.</span> <p>Keep “should” and “did” separate but joinable. When they disagree,
+the difference is the incident, and it is already data.</p></figcaption></figure>
 <h2 id="cordis-and-deepseek-harness">Cordis and DeepSeek Harness</h2>
-<p>Two recent systems show the field moving the same direction from a
-different starting point, and they deserve a fair page.</p>
+<p>Two recent systems are moving in the same direction from a different
+starting point. They deserve a fair page.</p>
 <p><a href="https://github.com/cordiverse/cordis">Cordis</a> [30, 31] is
 a TypeScript meta-framework for programs whose components arrive, leave,
 or change while the process is live. A component that changes shared
@@ -1563,30 +1568,31 @@ context supplies an inverse, and the runtime tracks what it would take
 to withdraw it. Components declare what they require and provide, and
 Cordis reacts when providers appear or disappear. Its <a
 href="https://github.com/cordiverse/paper">paper</a> develops this into
-a calculus of components and live instances, with results conditional on
-correct inverses, confinement, and its other stated premises. External
-emissions cross the boundary of what an inverse can restore, and
-untrusted code still needs a sandbox.</p>
+a calculus of components and live instances. Its results are conditional
+on correct inverses, confinement, and its other stated premises.
+External emissions cross the boundary of what an inverse can restore,
+and untrusted code still needs a sandbox.</p>
 <p><a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek
-Harness</a> [29] applies Cordis to an agent product: everything is a
-plugin, including model adapters, tools, skills, sessions, storage,
-sandboxes, workflows, the agent loop, and the interfaces. As of 21
-August 2026 it calls itself a developer preview and warns that
-compatibility-breaking changes will occur. Its session is event-sourced:
-model-visible context is reconstructed from recorded entries, and a
-trajectory interface can inspect, resume, fork, and replay that history
-without repeating model or tool calls.</p>
-<p>The honest contrast is scope and custody, not whether anyone keeps a
-record. Harness’s record covers the model-facing trajectory and session
-controls; its composition lives in layered configuration and the live
-Cordis assembly. Tenant identity, principal attribution, authority over
-attachments, placement across a fleet, and one execution model for
-strict and adaptive work need a wider runtime boundary. Cordis does have
-capability-style, proxy-mediated access; the narrower observation is
-that its formal center is component lifecycle, not a principal and an
-execution record. And neither system’s public materials make the tenant,
-principal, and placement guarantees Verlet is designed to make, which is
-a statement about what is claimed, not about what is impossible.</p>
+Harness</a> [29] applies Cordis to an agent product. Everything is a
+plugin: model adapters, tools, skills, sessions, storage, sandboxes,
+workflows, the agent loop, and the interfaces. As of 21 August 2026 it
+calls itself a developer preview and warns that compatibility-breaking
+changes will occur. Its session is event-sourced. Model-visible context
+is reconstructed from recorded entries, and a trajectory interface can
+inspect, resume, fork, and replay that history without repeating model
+or tool calls.</p>
+<p>The honest contrast is about scope and custody, not about whether
+anyone keeps a record. Harness’s record covers the model-facing
+trajectory and session controls. Its composition lives in layered
+configuration and the live Cordis assembly. Tenant identity, principal
+attribution, authority over attachments, placement across a fleet, and
+one execution model for strict and adaptive work all need a wider
+runtime boundary. Cordis does have capability-style, proxy-mediated
+access. The narrower observation is that its formal center is component
+lifecycle, not a principal and an execution record. Neither system’s
+public materials make the tenant, principal, and placement guarantees
+Verlet is designed to make. That is a statement about what is claimed,
+not about what is impossible.</p>
 <p>There is plenty to learn from them. Plugin boundaries have to be easy
 to use. The trajectory is a product surface, and fork, replay, and
 search make the record tangible in a way an audit API never will. The
@@ -1594,7 +1600,7 @@ harness itself must be inspectable and changeable without reading the
 whole application. And an integration should target a tagged, stable
 surface rather than chase a pre-release contract.</p>
 <h2 id="where-the-other-products-sit">Where the other products sit</h2>
-<p>Model providers supply the “maybe” computer; the runtime uses their
+<p>Model providers supply the “maybe” computer. The runtime uses their
 capabilities and keeps durable identity outside any one of them.
 Sandboxes supply isolation, which is a placement choice, not an
 authority decision. Tool vendors supply operations, published immutably
@@ -1603,7 +1609,7 @@ validation. Registries distribute definitions and resolve names, while
 the runtime still pins the immutable identity before running. Governance
 and compliance products supply organizational judgment and control
 mapping, through the two seams in section 6. Observability and
-evaluation products build views over the record; a model-backed
+evaluation products build views over the record. A model-backed
 evaluation is itself a produced event with provenance. Orchestrators
 decide when and why agents run across a fleet, and should be clients of
 the runtime record rather than a second source of truth.</p>
@@ -1621,8 +1627,9 @@ implemented, partly implemented, or only designed, and point at the code
 or docs that show the current state.</p>
 </aside>
 <h1 id="status-and-receipts">10. Status and receipts</h1>
-<p>Verlet is experimental and says so. Three registers, kept separately
-so the architecture story does not imply production maturity.</p>
+<p>Verlet is experimental and says so. Its status is kept in three
+separate registers, so that the architecture story does not imply
+production maturity.</p>
 <p><strong>Available in the current runtime (v0.4.0).</strong>
 Append-only event streams and receipts. Content-addressed operation
 publication. Journaled attach and detach with attachment-carried
@@ -1632,8 +1639,8 @@ shell and filesystem surfaces. CLI, daemon, RPC, MCP, and ACP interfaces
 over shared contracts. Durable process and child-thread handles. Remote
 child placement through authenticated store-backed queues.
 Multi-instance host primitives with instance-owned authentication.
-(Checked against the v0.4.0 tag [28], 21 August 2026; the vocabulary is
-the formalism’s [27].)</p>
+(Checked against the v0.4.0 tag [28] on 21 August 2026. The vocabulary
+is the formalism’s [27].)</p>
 <p><strong>In progress.</strong> The pluggable policy router with held
 approval and resume. Stable evidence-export profiles for external
 governance systems. The preset and opening-sequence authoring
@@ -1645,13 +1652,13 @@ mobility. Governed self-extension end to end, from proposal through
 evaluated deployment. Conformance batteries for the runtime and evidence
 guarantees. Stable bridges to external harness formats.</p>
 <h2 id="the-criteria">The criteria</h2>
-<p>The claims above are checkable. The companion paper states thirteen
-yes/no criteria that decide whether any system actually works the way
-this primer describes, answerable from its records and configuration
-alone, and scores ten shipping systems plus Verlet against them. Nobody
-passes all thirteen, including Verlet; the paper says exactly which are
-met, which are partial, and which are only specified. The current
-self-score:</p>
+<p>The claims above can be checked. The companion paper states thirteen
+yes/no criteria that decide whether any system works the way this primer
+describes. Each can be answered from a system’s records and
+configuration alone. The paper scores ten shipping systems plus Verlet
+against them. Nobody passes all thirteen, including Verlet. The paper
+says exactly which are met, which are partial, and which are only
+specified. The current self-score:</p>
 <table>
 <colgroup>
 <col style="width: 33%" />
@@ -1737,30 +1744,30 @@ absent</td>
 </table>
 <p>Six met, six partial, one specified. The runtime’s test suite is
 organized around the same criteria, so “the record cannot have holes”
-points at a battery rather than a sentence.</p>
+points at a battery of tests rather than at a sentence.</p>
 <h2 id="the-next-proof-is-end-to-end">The next proof is end to end</h2>
-<p>The next stage should be judged by one complete path rather than
-isolated primitives: author an agent locally, publish its operations,
-promote it to managed placement, hit an external policy service on a
-consequential action, record the decision and outcome, export the
-evidence, kill the runtime, and resume with the same identity and
+<p>The next stage should be judged by one complete path rather than by
+isolated primitives. Author an agent locally. Publish its operations.
+Promote it to managed placement. Hit an external policy service on a
+consequential action. Record the decision and outcome. Export the
+evidence. Kill the runtime, and resume with the same identity and
 attachments. That single path tests ergonomics, runtime truth,
 governance integration, portability, and recovery together.</p>
 <aside class="lineage"><div class="lineage-head">Lineage <span>optional reading</span></div>
 <p><strong>Between two failure modes.</strong> Self-modifying systems in
 the literature sit at two extremes. The Gödel machine (Schmidhuber, 2003
 [21]) requires a proof that a change is an improvement before applying
-it: formally clean, never built. Prompt-evolution loops such as GEPA
-[22] and fine-tuning loops modify themselves with no durable ground
-truth, no receipts, and no reproducible evaluation: practical, and
-unaccountable, because they cannot hill-climb a landscape they cannot
-stand still on. The design here is the middle: changes are proposals on
-the record, accepted through a checkpoint, with the episodes that
-motivated them attached and a detach always available. No proof of
-improvement, but a complete account of what was tried and why. The
-status table above should be read with that framing; what is listed as
-partial is mostly the acceptance machinery for that middle path, not the
-record it rests on.</p>
+it. It is formally clean and was never built. Prompt-evolution loops
+such as GEPA [22] and fine-tuning loops modify themselves with no
+durable ground truth, no receipts, and no reproducible evaluation. They
+are practical and unaccountable, because they cannot climb a landscape
+they cannot stand still on. The design here is the middle. Changes are
+proposals on the record, accepted through a checkpoint, with the
+episodes that motivated them attached, and a detach always available.
+There is no proof of improvement, but there is a complete account of
+what was tried and why. The status table above should be read with that
+framing. What is listed as partial is mostly the acceptance machinery
+for that middle path, not the record it rests on.</p>
 </aside>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="List the thirteen criteria this runtime says it measures itself
 against (look for the criteria in the docs or the test suite
