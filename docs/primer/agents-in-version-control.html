@@ -433,8 +433,9 @@ process exited. A model call completed. The runtime saw it happen, and
 that is what gives the event its authority. Witnessed events are the
 only way anything enters the system from outside.</p>
 <p>A <strong>produced</strong> event records something a component
-computed. This ticket was classified as a refund request. This
-conversation was summarized as follows. Every produced event carries
+computed. (The code spells this origin <code>discharged</code>.) This
+ticket was classified as a refund request. This conversation was
+summarized as follows. Every produced event carries
 <strong>provenance</strong>: the events it was computed from, and the
 function and version that computed it. A produced event that cannot name
 its inputs is not written.</p>
@@ -503,33 +504,49 @@ lawfully happen.</p>
 turn, event kinds named as the current runtime names them. Payloads are
 trimmed.</p>
 <pre class="text"><code>seq  kind                       payload (abridged)
-41   turn.submitted             principal=operator:support-queue
-                                message=&quot;Order 8812 arrived broken, refund please&quot;
-42   context.compile.completed  sources=[instructions@v3, thread:1-41,
-                                memory:customer-8812] tokens=2,114
+12   binding.attached           name=payments.refund artifact=sha256:9f3c…
+                                effect_class=at-most-once
+                                attachment_config={allowed_secrets:[stripe-key]}
+        …
+41   turn.submitted             turn_id=t-91 entry_id=e-408
+                                (entry e-408: &quot;Order 8812 arrived broken, refund please&quot;)
+42   context.compile.completed  strategy=naive_assembly/v1
+                                session_entry_ids=[e-1…e-408]
+                                static_context_segments=[instructions sha256:5a1d…,
+                                memory/customer-8812 sha256:c07e…]
+                                output_hash=b3f0…
 43   session.entry.appended     role=assistant profile=support-default
-                                output=tool_call(payments.refund,
-                                {order:8812, amount:400.00})
-44   tool.call.requested        op=payments.refund@sha256:9f3c…
-                                binding=b-201 args_fp=7e11…
-45   tool.call.decision         outcome=hold rule=refund-over-250
-                                policy=finance-guard@v7
-46   approval.requested         to=principal:finance-oncall
-                                facts={op, args_fp, principal, rule}
+                                tool_call(payments.refund, {order:8812, amount:400.00})
+44   tool.call.requested        tool=payments.refund attach_event_id=12
+                                snapshot_id=sha256:41aa… args_fingerprint=7e11…
+45   approval.requested         approval_id=apr-7 request_event_id=44
+                                reason=&quot;refund over 250&quot; resume_token=apr-7
+46   tool.call.suspended        approval_id=apr-7 reason=&quot;refund over 250&quot;
         … 14 minutes …
-47   approval.resolved          by=principal:alice outcome=allow
-48   tool.call.completed        witnessed: payment_api 200
-                                txn=pay_01J…  effect_class=at_most_once
-49   session.entry.appended     role=assistant
+47   approval.resolved          approved=true reason=&quot;order photo verified&quot;
+48   tool.call.decision         decision=allow admissible=[allow, deny]
+49   tool.call.completed        success=true args_fingerprint=7e11…
+                                duration_ms=812
+50   session.entry.appended     role=assistant
                                 output=&quot;Refunded $400 to your card…&quot;
-50   turn.completed             reason=quiescent</code></pre>
+51   turn.completed             turn_id=t-91</code></pre>
 <p>Read it top to bottom, and every question from section 1 has an
-answer in the data. What happened: line 48. Why: line 43, with the
-context that produced it at line 42. Who allowed it: line 47, by name,
-against the rule at line 45. What the agent could even see: the sources
-at line 42 and the binding at line 44. None of this was reconstructed
-afterward from three databases and a log file. The runtime wrote each
-line because it needed that line to do the next thing.</p>
+answer in the data. What happened: line 49. Why: line 43, with the
+context that produced it at line 42. Who allowed it: line 47 records the
+approval, and line 48 is the decision that released the call. What the
+agent could even use: line 44 points at line 12, the attach event that
+made the refund tool exist on this thread. None of this was
+reconstructed afterward from three databases and a log file. The runtime
+wrote each line because it needed that line to do the next thing.</p>
+<p>Two honest notes on this excerpt. The events are real and the fields
+are the shipped ones, but the hold path is not finished. Today a
+permission controller bound to the thread writes lines 45 and 46 and
+parks the call. Line 47 records the approval as a fact. Releasing the
+call (line 48) is a call the hosting program makes into the runtime
+after it sees the approval, and wiring the approval to that release
+automatically is open work. And the approver’s identity is on the
+authenticated connection that sent line 47, not yet on the event itself.
+Section 10 lists both.</p>
 <figure class="primer-fig" id="fig-record"><svg viewBox="0 0 840 420" role="img" aria-label="Ten numbered events of one refund turn on a timeline, colored by whether the world did it or the system computed it">
     <line x1="60" y1="30" x2="60" y2="400" stroke="currentColor" stroke-width="3"/>
     <g class="mono" font-size="14">
@@ -557,19 +574,20 @@ order. So a restart is a reading problem. Reopen the streams. Rebuild
 the disposable views. Restore the current attachments. Continue from the
 next allowed step.</p>
 <p>Take the scene everyone dreads. The process dies after the payment
-call at line 48 goes out and before its result is recorded. On restart,
-the runtime finds a <code>tool.call.requested</code> at line 44, an
-allow at line 47, and no completion. The operation’s declared effect
-class is at-most-once. So the runtime does not retry. It asks the
-payment API for the transaction by the request’s fingerprint, records
-what it finds as a witnessed event, and then either continues or stops
-with an explicit interruption. It does not guess, and it does not refund
+call goes out and before line 49 is recorded. On restart, the runtime
+finds a <code>tool.call.requested</code> at line 44, an allow at line
+48, and no completion. It first looks for a recorded outcome with the
+same argument fingerprint. There is none. Then it reads the operation’s
+effect class from the attach event at line 12: at-most-once. So the
+runtime does not retry. It fails the call closed, with an explicit
+record that says the call may or may not have landed, and the turn stops
+there for a person to resolve. It does not guess, and it does not refund
 twice.</p>
 <p>(In a real production system you should also make the refund API
 itself idempotent, keyed on the request fingerprint. Then the operation
-can be declared idempotent, and recovery becomes a safe retry instead of
-a lookup. The runtime’s job is to know which of the two cases it is in,
-and to record which one it did.)</p>
+can be declared idempotent, and on restart the runtime re-executes the
+call safely. The runtime’s job is to know which of the two cases it is
+in, and the effect class on the attach event is how it knows.)</p>
 <figure class="primer-fig" id="fig-crash"><svg viewBox="0 0 840 250" role="img" aria-label="A timeline breaks after the payment request; on restart the runtime reopens the notebook, sees no completion, and looks up the transaction instead of paying again">
     <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <line x1="40" y1="70" x2="380" y2="70" stroke="currentColor" stroke-width="3"/>
@@ -602,11 +620,11 @@ ask a human what happened.</p>
 <h2 id="why-replay-is-exact">Why replay is exact</h2>
 <p>Every model output and every external reply is on the record. So the
 deterministic parts of yesterday can be rerun against it exactly, with
-no model calls. You can branch at line 45, swap in
-<code>finance-guard@v8</code>, and see whether it would have held the
-refund. The cost is reading the stream. This is what makes a change to
-the agent testable before it ships, which is the point of putting the
-agent in version control.</p>
+no model calls. You can branch at line 44, bind a different permission
+controller, and see whether it would have parked the refund. The cost is
+reading the stream. This is what makes a change to the agent testable
+before it ships, which is the point of putting the agent in version
+control.</p>
 <figure class="primer-fig" id="fig-branch"><svg viewBox="0 0 840 230" role="img" aria-label="A timeline forks at line 45: the original path with policy v7 and a branch with policy v8, both computed from the recorded model outputs without calling the model again">
     <line x1="40" y1="110" x2="330" y2="110" stroke="currentColor" stroke-width="3"/>
     <circle cx="100" cy="110" r="8" fill="var(--maybe)"/><circle cx="180" cy="110" r="8" fill="var(--sure)"/><circle cx="260" cy="110" r="8" fill="var(--maybe)"/>
@@ -662,9 +680,9 @@ ask that question with the facts in hand.</p>
 <aside class="agent-prompt"><div class="prompt-head"><span>Ask your agent</span><button type="button" class="copy" data-copy="Walk me through one turn of a thread in this runtime as a sequence of
 events: the kinds turn.submitted,
 context.compile.completed,
-tool.call.requested, tool.call.decision,
-approval.requested, session.entry.appended,
-approval.resolved, tool.call.completed,
+tool.call.requested, approval.requested,
+tool.call.suspended, approval.resolved,
+tool.call.decision, tool.call.completed,
 turn.completed. For each, where is it appended, what is in
 the payload, and which ones carry provenance pointing at earlier events?
 Then show me what resume does after a crash: where does it reopen the
@@ -674,9 +692,9 @@ retried, looked up, or failed? Find the effect class concept
 <p>Walk me through one turn of a thread in this runtime as a sequence of
 events: the kinds <code>turn.submitted</code>,
 <code>context.compile.completed</code>,
-<code>tool.call.requested</code>, <code>tool.call.decision</code>,
-<code>approval.requested</code>, <code>session.entry.appended</code>,
-<code>approval.resolved</code>, <code>tool.call.completed</code>,
+<code>tool.call.requested</code>, <code>approval.requested</code>,
+<code>tool.call.suspended</code>, <code>approval.resolved</code>,
+<code>tool.call.decision</code>, <code>tool.call.completed</code>,
 <code>turn.completed</code>. For each, where is it appended, what is in
 the payload, and which ones carry provenance pointing at earlier events?
 Then show me what resume does after a crash: where does it reopen the
@@ -774,6 +792,11 @@ a projection that writes plus a context source that reads. The runtime
 does not ship an agent abstraction, a workflow abstraction, and a memory
 abstraction that happen to work together. It ships streams and
 couplings. The product words are names for wiring patterns.</p>
+<p>In the shipped code, the couplings you declare in a manifest come in
+two roles: projection and controller. The propagator is the agent loop
+itself, built into the kernel, and its output is tagged in provenance as
+coming from the agent-loop propagator. Declaring your own propagator is
+not something the manifest supports today.</p>
 <p>This also says where the two computers from section 2 live. A
 coupling is either deterministic or <strong>chaotic</strong>. Chaotic
 means its output cannot be reproduced from its inputs. Model-backed
@@ -783,7 +806,10 @@ as an event, because nothing deterministic could regenerate it. A
 deterministic coupling’s output may be a view instead, which can be
 cached and deleted. The agent loop is chaotic. That is why every one of
 its outputs is on the record, and why the checkpoint in the next section
-sits directly on its output.</p>
+sits directly on its output. (There is no separate “chaotic” flag in the
+code. The rule is enforced by the origin law from section 3: model
+output must exist as a discharged event with provenance before context
+assembly can read it.)</p>
 <p>One more property follows. Nothing in the system can start itself.
 Couplings fire on events. Derived events trace, through provenance, to
 the events that produced them. That chain only ends at a witnessed
@@ -874,11 +900,10 @@ other.</p>
 there is no side door. Every continuation the runtime executes passed
 the checkpoint, because the checkpoint is where execution is obtained.
 Second, the decision itself is history. The record shows more than the
-fact that the refund tool ran. It shows that at step 45, under
-<code>finance-guard@v7</code>, the allowed set was
-<code>{hold, deny}</code> and <code>hold</code> was chosen. A
-post-mortem no longer has to reconstruct what the system was choosing
-between.</p>
+fact that the refund tool ran. It shows, at line 48 of the excerpt, that
+the controller reported the allowed set as <code>[allow, deny]</code>
+and chose <code>allow</code>. A post-mortem no longer has to reconstruct
+what the system was choosing between.</p>
 <p>The checkpoint’s question is answered by a <strong>policy</strong>. A
 policy is a function from the thread’s history to the set of allowed
 next steps. Policies come in two modes, and the two modes are the whole
@@ -898,6 +923,16 @@ default and the least interesting setting.</p>
 and becomes a dial. The support agent’s refund path runs strict: verify
 the order, check the amount, hold above a threshold. The conversation
 around it runs adaptive. Same thread, same record, same runtime.</p>
+<p>What ships today is narrower than that picture. The kernel has one
+admission gate at turn entry: every surface that can start a turn
+registers with it, a coverage check keeps the list complete, and the
+admission decision (queue, steer, interrupt, fork, observe, reject, or
+coalesce) is recorded before the turn is scheduled. Tool calls are
+decided by a controller bound to the thread, the end of a turn by a
+continuation decision, and child threads by the spawn projector. Each of
+those is recorded. Folding them into one checkpoint, and the
+strict-or-adaptive setting as a per-step switch, is design work not yet
+in the code. Section 10 lists it.</p>
 <figure class="primer-fig" id="fig-checkpoint"><svg viewBox="0 0 840 270" role="img" aria-label="Every possible next step passes one checkpoint; a dial on the checkpoint selects between a fixed rule answering and the model choosing">
     <defs><marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <!-- candidates -->
@@ -933,11 +968,14 @@ notebook.</p></figcaption></figure>
 assumed convergence</h2>
 <p>A deterministic workflow can often prove from its graph that it
 terminates. A model-backed loop cannot. So the runtime enforces explicit
-limits on turns, depth, time, cost, and triggered work. A turn ends when
-the policy reaches quiescence (nothing left to do) or a budget stops it.
-Budgets are runtime mechanisms, not instructions in a prompt, and they
-leave evidence. The record says whether work completed, was stopped by
-policy, ran out of budget, or was canceled by a named person.</p>
+limits. Today those are a wall-clock timeout per turn, a cap on tool
+rounds within a turn, a cap on child threads, and quotas on how often
+couplings may fire and how much they may write. Token usage is recorded
+per model call and is not yet a budget. A turn ends when the loop has
+nothing left to do or a limit stops it. Budgets are runtime mechanisms,
+not instructions in a prompt, and they leave evidence. The record says
+whether the loop completed, was blocked, was denied, or ran out of
+budget, and a failed turn records its error class.</p>
 <h2 id="discussion-4">Discussion</h2>
 <p>Treating strict and adaptive as one dial, set per step, changes how a
 team builds. Nobody has to decide up front whether a task is “an agent
@@ -1024,17 +1062,22 @@ Attaching is an event on the record (section 7 covers it). So the
 question “what could this agent have done?” is answered by reading the
 thread’s attachments, not by reading prompts and hoping every branch was
 found.</p>
-<p><strong>Mediation.</strong> Every external effect passes through one
-runtime-controlled surface. That surface is where a configured policy
-can allow, deny, or hold the action. It is also where the decision is
-recorded and tied to the action it governed. A denial is visible to the
-agent, so it can choose another path. An approval authorizes exactly one
-fingerprinted action, not a class of actions.</p>
+<p><strong>Mediation.</strong> Every tool call is written to the record
+as a request before it runs. If a permission controller is bound to the
+thread, it decides at that point: allow, rewrite the arguments, deny, or
+wait for an approval. The decision is recorded and tied to the request
+it governed. A denial is visible to the agent, so it can choose another
+path. An approval authorizes exactly one fingerprinted action, not a
+class of actions. (With no controller bound, the call runs and the
+record shows the request and the result but no decision. Binding a
+controller is how you turn mediation on.)</p>
 <p>Behind both laws sits a <strong>principal</strong>: the human or
-service identity on whose authority the work entered. Line 41 of the
-excerpt names one. The agent is not itself a principal. It acts within
+service identity on whose authority the work entered. The runtime
+receives it at the boundary, where the daemon authenticates the
+connection, and every event on a thread carries the tenant and user the
+thread belongs to. The agent is not itself a principal. It acts within
 authority that arrived from outside, and every effect traces back to the
-name that asked for it.</p>
+identity that asked for it.</p>
 <h2 id="why-rules-alone-cannot-do-this">Why rules alone cannot do
 this</h2>
 <p>Rules-first governance keeps failing at agents, and the reason is
@@ -1096,11 +1139,14 @@ of the excerpt show that path in miniature: fourteen minutes of a human
 deciding, with the thread parked and nothing lost.</p>
 <h2 id="bounded-disclosure">Bounded disclosure</h2>
 <p>The person approving a refund rarely needs the whole transcript. A
-decision request carries a typed fact sheet: the action, its argument
-fingerprint, the principal, the binding, the rule, and a bounded slice
-of history. Any explanation the agent wrote is marked as untrusted
-content. Less private context leaves the thread, and text the model
-generated cannot quietly present itself as authority.</p>
+decision request carries a typed fact sheet: the action, its arguments
+and their fingerprint, the attach event that made the tool exist, the
+snapshot the thread is running under, and only the events the
+controller’s selectors named. Less private context leaves the thread.
+Two items are still missing from that sheet today: the principal and the
+rule text. And nothing yet marks text the model wrote as untrusted, so a
+reviewer should treat any agent-written explanation as a claim rather
+than a fact.</p>
 <h2 id="by-construction-and-by-observation">By construction and by
 observation</h2>
 <p>This is where the two-computers cut pays off for anyone who has to
@@ -1164,10 +1210,13 @@ in: the runtime sends a structured request and records the answer.
 Runtime evidence goes out: events and receipts are exported with stable
 identities and links back to the source record. The runtime stays the
 place where a decision becomes an enforced and recorded action.</p>
-<p>Honest status: attachment and mediation are built into the shipped
-runtime. The pluggable policy router, with hold and resume behind an
-external service, is designed and not yet shipped. Section 10 keeps the
-full ledger.</p>
+<p>Honest status: attachment is built into the shipped runtime.
+Mediation is partly built: every request is journaled before it runs, a
+bound controller can allow, rewrite, deny, or park a call, and an
+approval is recorded as a fact. Releasing a parked call after approval
+is a host call the embedding program makes, not yet driven from the
+approval itself. The pluggable policy router behind an external service
+is designed and not shipped. Section 10 keeps the full ledger.</p>
 <figure class="primer-fig" id="fig-observation"><svg viewBox="0 0 840 260" role="img" aria-label="Left: a camera watches an agent act on the world and reconstructs a log afterward. Right: the agent can only reach the world through the runtime, so the record exists before the action does">
     <defs><marker id="a10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
     <text x="210" y="32" text-anchor="middle" font-weight="700" font-size="16">by observation</text>
@@ -1243,12 +1292,15 @@ anywhere. It is computed by reading those events up to now.
 Configuration for a tool (which secret it may use, which network it may
 reach) rides on the attach event. So “what could it reach, and since
 when” is one query over the record.</p>
-<p>Changes take effect at a turn boundary, going forward. A turn already
-in progress keeps the snapshot it started under. A registry entry
-changing tomorrow does not alter the contract a running turn started
-with today, because execution resolved the human name to an immutable,
-content-addressed operation and recorded that resolution. Rollback is a
-new recorded change, not a rewrite of the past.</p>
+<p>A running turn never sees its tools change under it. Today the rule
+is stricter than a turn boundary: a thread’s attachment set is fixed
+when the thread starts. To change it, you fork the thread while it is
+idle with a new binding. The fork shares the history so far and records
+its own attach events. A registry entry changing tomorrow does not alter
+the contract a thread started with today, because binding resolved the
+human name to an immutable, content-addressed operation and recorded
+that resolution in the bind receipt. Rollback is a new recorded change,
+not a rewrite of the past.</p>
 <h2 id="self-extension-through-the-same-gate">Self-extension through the
 same gate</h2>
 <p>Now the 3am scene. The support agent, working a ticket, discovers it
@@ -1266,6 +1318,12 @@ refund also govern the agent changing itself. That is the entire
 mechanism. It is why the bricking story from section 1 stops. The change
 is a commit with a reason. The episodes that motivated it are on the
 record next to it. Detaching it is one more event.</p>
+<p>This scene is the design, not yet the code. The attach event already
+has the slots for it: who requested the change, who decided, and which
+decision event authorized it. But today every attach is made by the
+operator, and there is no operation an agent can call to publish or
+request a tool. Section 10 lists governed self-extension as
+direction.</p>
 <h2 id="version-control-finished">Version control, finished</h2>
 <p>Put the pieces together and the git analogy is complete. The agent’s
 definition is data under history. The agent’s experience is the same
@@ -1371,6 +1429,13 @@ decision: which machine, which sandbox, which worker. Moving a thread
 from a laptop to a managed host, or from one worker to another after a
 failure, does not change what the thread may do. Nothing about its
 authority was ever stored in the machine.</p>
+<p>Today the placement decision is recorded as its own event, and a
+child thread can be placed in a separate local process through the
+daemon’s authenticated, store-backed queue. What travels with it is the
+child’s coordinates, its input, its compile and bind receipts, and
+scoped credentials for its own streams. Placement on a remote machine,
+and sandbox placement, are declared targets that fail closed until their
+backends exist.</p>
 <p>Two consequences follow. First, many customers’ agents can share one
 runtime host. Each sits inside its own fence, and the fence is defined
 by attachments and principals rather than by process boundaries. Second,
@@ -1630,26 +1695,39 @@ or docs that show the current state.</p>
 <p>Verlet is experimental and says so. Its status is kept in three
 separate registers, so that the architecture story does not imply
 production maturity.</p>
-<p><strong>Available in the current runtime (v0.4.0).</strong>
-Append-only event streams and receipts. Content-addressed operation
-publication. Journaled attach and detach with attachment-carried
-configuration. Durable resume from the record. Agent manifest planning
-and publishing. Wasm operations and custom execution lanes. Virtual
-shell and filesystem surfaces. CLI, daemon, RPC, MCP, and ACP interfaces
-over shared contracts. Durable process and child-thread handles. Remote
-child placement through authenticated store-backed queues.
-Multi-instance host primitives with instance-owned authentication.
-(Checked against the v0.4.0 tag [28] on 21 August 2026. The vocabulary
-is the formalism’s [27].)</p>
-<p><strong>In progress.</strong> The pluggable policy router with held
-approval and resume. Stable evidence-export profiles for external
-governance systems. The preset and opening-sequence authoring
-experience. Managed-cloud operational hardening. Richer package and
-distribution surfaces. Stronger placement backends.</p>
-<p><strong>Direction.</strong> Self-serve local-to-managed promotion.
-Public and private package ecosystems. Fleet control and placement
-mobility. Governed self-extension end to end, from proposal through
-evaluated deployment. Conformance batteries for the runtime and evidence
+<p><strong>Available in the current runtime (v0.5.1).</strong>
+Append-only event streams with witnessed and discharged origins,
+provenance, and receipts. Content-addressed operation publication, with
+tool kits that install a set of operations under one removable record. A
+checked-in file-tools kit (read, write, edit, glob, grep) running as
+Wasm against a witnessed workspace mount. Journaled attach and detach
+with attachment-carried secret and private-network configuration.
+Durable resume from the record, with effect-class recovery for in-flight
+tool calls. Agent manifest planning, publishing, diffing, and local
+running. Custom Wasm couplings with offline replay. Virtual shell and
+filesystem surfaces. One admission gate at turn entry with recorded
+decisions. Permission controllers that can allow, rewrite, deny, or park
+a tool call, with approval requests and resolutions on the record. CLI,
+daemon, RPC, MCP, and ACP interfaces over shared contracts, with secret
+and identity management behind host-authority RPC. Durable process
+handles and child threads. Child placement in separate local processes
+through authenticated store-backed queues. A multi-instance host with
+one authenticated listener and instance-owned authentication. (Checked
+against the v0.5.1 tag [28] and the main branch on 1 September 2026. The
+vocabulary is the formalism’s [27].)</p>
+<p><strong>In progress.</strong> Carrying an approval through to an
+automatic release of the parked call, and the pluggable policy router
+behind an external service. Recording the approver’s identity on the
+approval event. Changing a live thread’s attachments without forking.
+Budgets for turn count and token cost. Stable evidence-export profiles
+for external governance systems. Managed-cloud operational hardening. A
+public package registry and marketplace flows. Remote-machine and
+sandbox placement backends.</p>
+<p><strong>Direction.</strong> One checkpoint for every continuation,
+with strict and adaptive as a per-step setting. Governed self-extension
+end to end: an agent publishes an operation, requests attachment, and a
+policy decides. Self-serve local-to-managed promotion. Fleet control and
+placement mobility. Conformance batteries for the runtime and evidence
 guarantees. Stable bridges to external harness formats.</p>
 <h2 id="the-criteria">The criteria</h2>
 <p>The claims above can be checked. The companion paper states thirteen
@@ -1718,7 +1796,8 @@ absent</td>
 <tr>
 <td>C9</td>
 <td>No side door: every continuation passed the checkpoint</td>
-<td>met</td>
+<td>partial (turn entry gated; tool calls gated when a controller is
+bound)</td>
 </tr>
 <tr>
 <td>C10</td>
@@ -1742,9 +1821,14 @@ absent</td>
 </tr>
 </tbody>
 </table>
-<p>Six met, six partial, one specified. The runtime’s test suite is
-organized around the same criteria, so “the record cannot have holes”
-points at a battery of tests rather than at a sentence.</p>
+<p>Five met, seven partial, one specified. The runtime’s test suite is
+organized by surface and by eight named invariants that its seeded
+scenario engine checks on every run: replay equivalence, one active
+topology, bounded queues, no duplicate projected output, terminal
+consistency, claims settle, one child per fork claim, and reserved
+before created. The criteria above map onto those invariants and the
+kernel-invariants page, though not one to one. So “the record cannot
+have holes” points at a battery of tests rather than at a sentence.</p>
 <h2 id="the-next-proof-is-end-to-end">The next proof is end to end</h2>
 <p>The next stage should be judged by one complete path rather than by
 isolated primitives. Author an agent locally. Publish its operations.
