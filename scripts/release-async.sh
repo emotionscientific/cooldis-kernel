@@ -89,7 +89,7 @@ print_release_run_url() {
 
   if ! command -v gh >/dev/null 2>&1; then
     printf '\nRelease workflow:\n'
-    printf '  https://github.com/emotionscientific/cooldis-kernel/actions/workflows/release.yml\n'
+    printf '  https://github.com/emotionscientific/verlet-kernel/actions/workflows/release.yml\n'
     return 0
   fi
 
@@ -116,7 +116,7 @@ print_release_run_url() {
     printf '  %s\n' "$url"
   else
     printf '\nRelease workflow should start shortly:\n'
-    printf '  https://github.com/emotionscientific/cooldis-kernel/actions/workflows/release.yml\n'
+    printf '  https://github.com/emotionscientific/verlet-kernel/actions/workflows/release.yml\n'
     printf 'Check with:\n'
     printf '  gh run list --workflow Release --commit %s --limit 5\n' "$head_sha"
   fi
