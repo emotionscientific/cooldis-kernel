@@ -466,7 +466,7 @@ EOF
   git -C "$ROOT" add .
   git -C "$ROOT" commit --no-gpg-sign -qm 'fixture release state'
   git -C "$ROOT" tag v0.5.1
-  git init -q --bare "$REMOTE_REPO"
+  git init -q --bare -b main "$REMOTE_REPO"
   git -C "$ROOT" remote add origin "$REMOTE_REPO"
   git -C "$ROOT" push -q -u origin main --tags
 
