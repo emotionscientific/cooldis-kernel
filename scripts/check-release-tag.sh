@@ -8,13 +8,13 @@ source "$ROOT/scripts/release-version.sh"
 
 usage() {
   cat <<'USAGE'
-check-release-tag.sh - validate a Verlet release tag against the kernel version.
+check-release-tag.sh - validate a Verlet release tag against the workspace version.
 
 Usage:
-  scripts/check-release-tag.sh v0.1.0
-  scripts/check-release-tag.sh v0.1.0-rc.1
+  scripts/check-release-tag.sh v0.5.1
+  scripts/check-release-tag.sh v0.6.0-rc.1
 
-The tag must be v<crates/verlet-kernel version>, optionally followed by a
+The tag must be v<workspace package version>, optionally followed by a
 SemVer prerelease suffix such as -rc.1.
 USAGE
 }
@@ -34,7 +34,7 @@ VERSION="$(
   read_verlet_workspace_version "$ROOT/Cargo.toml"
 )"
 if [[ -z "$VERSION" ]]; then
-  echo "could not read verlet version from crates/verlet-kernel/Cargo.toml" >&2
+  echo "could not read verlet version from the workspace Cargo.toml" >&2
   exit 1
 fi
 

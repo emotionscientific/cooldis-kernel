@@ -42,5 +42,8 @@ smoke-install archive:
 release-candidate:
     scripts/release-v1-candidate.sh
 
+release tag *args:
+    scripts/release.sh "{{tag}}" {{args}}
+
 ci:
     scripts/check-ci.sh
