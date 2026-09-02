@@ -1,0 +1,39 @@
+<svg viewBox="0 0 840 300" role="img" aria-label="The agent's tool belt holds only attached tools; an unattached tool is a ghost it cannot even see; every real-world action passes a mediation funnel that can allow, deny, or hold, and traces back to a named person">
+    <defs><marker id="a9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- principal -->
+    <circle cx="90" cy="60" r="22" fill="var(--card)" stroke="currentColor" stroke-width="2"/>
+    <path d="M60 110 q30 -35 60 0" fill="var(--card)" stroke="currentColor" stroke-width="2"/>
+    <text x="90" y="135" text-anchor="middle" font-weight="700">alice</text>
+    <text x="90" y="153" text-anchor="middle" fill="var(--pencil)" font-size="12">a named person asked</text>
+    <line x1="125" y1="80" x2="215" y2="110" stroke="currentColor" stroke-width="2" marker-end="url(#a9)"/>
+    <!-- agent + belt -->
+    <circle cx="280" cy="120" r="36" fill="var(--sure-soft)" stroke="currentColor" stroke-width="2"/>
+    <circle cx="268" cy="114" r="3" fill="currentColor"/><circle cx="292" cy="114" r="3" fill="currentColor"/>
+    <path d="M268 134 q12 8 24 0" fill="none" stroke="currentColor" stroke-width="2"/>
+    <rect x="210" y="175" width="140" height="28" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2.5"/>
+    <text x="280" y="194" text-anchor="middle" font-size="12" font-weight="700">tool belt</text>
+    <g font-size="11" font-weight="700">
+      <rect x="200" y="215" width="60" height="26" rx="5" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2"/><text x="230" y="232" text-anchor="middle">lookup</text>
+      <rect x="270" y="215" width="60" height="26" rx="5" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2"/><text x="300" y="232" text-anchor="middle">refund</text>
+      <rect x="340" y="215" width="70" height="26" rx="5" fill="none" stroke="var(--pencil)" stroke-width="2" stroke-dasharray="4 3"/><text x="375" y="232" text-anchor="middle" fill="var(--pencil)">delete db</text>
+    </g>
+    <text x="375" y="262" text-anchor="middle" font-size="12" fill="var(--pencil)">not attached = does not exist for it</text>
+    <text x="230" y="262" text-anchor="middle" font-size="12" fill="var(--sure)">attached (an event)</text>
+    <!-- funnel -->
+    <path d="M470 60 h200 l-60 80 v60 h-80 v-60 z" fill="var(--hold-soft)" stroke="currentColor" stroke-width="2.5"/>
+    <text x="570" y="95" text-anchor="middle" font-weight="700" font-size="14">every effect</text>
+    <text x="570" y="112" text-anchor="middle" font-weight="700" font-size="14">passes here</text>
+    <text x="570" y="178" text-anchor="middle" font-size="12" font-weight="700"><tspan fill="var(--sure)">allow</tspan> · <tspan fill="var(--maybe)">deny</tspan> · <tspan fill="var(--hold)">hold</tspan></text>
+    <line x1="322" y1="110" x2="462" y2="80" stroke="currentColor" stroke-width="2" marker-end="url(#a9)"/>
+    <text x="392" y="80" text-anchor="middle" font-size="12">"refund $400"</text>
+    <!-- world -->
+    <line x1="570" y1="205" x2="570" y2="245" stroke="currentColor" stroke-width="2.5" marker-end="url(#a9)"/>
+    <circle cx="570" cy="272" r="18" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="610" y="277" font-weight="700">the world</text>
+    <!-- why not a rulebook -->
+    <rect x="700" y="60" width="120" height="150" rx="6" fill="var(--card)" stroke="var(--maybe)" stroke-width="2"/>
+    <g stroke="var(--pencil)" stroke-width="2"><line x1="715" y1="85" x2="805" y2="85"/><line x1="715" y1="105" x2="805" y2="105"/><line x1="715" y1="125" x2="805" y2="125"/><line x1="715" y1="145" x2="805" y2="145"/><line x1="715" y1="165" x2="790" y2="165"/><line x1="715" y1="185" x2="770" y2="185"/></g>
+    <line x1="705" y1="65" x2="815" y2="205" stroke="var(--maybe)" stroke-width="3"/>
+    <text x="760" y="235" text-anchor="middle" font-size="12" fill="var(--maybe)" font-weight="700">a rulebook written</text>
+    <text x="760" y="250" text-anchor="middle" font-size="12" fill="var(--maybe)" font-weight="700">in advance goes stale</text>
+  </svg>

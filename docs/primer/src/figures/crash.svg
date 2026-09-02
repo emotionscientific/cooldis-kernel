@@ -1,0 +1,23 @@
+<svg viewBox="0 0 840 250" role="img" aria-label="A timeline breaks after the payment request; on restart the runtime reopens the notebook, sees no completion, and looks up the transaction instead of paying again">
+    <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <line x1="40" y1="70" x2="380" y2="70" stroke="currentColor" stroke-width="3"/>
+    <circle cx="120" cy="70" r="9" fill="var(--sure)"/><text x="120" y="45" text-anchor="middle" class="mono" font-size="13">44 requested</text>
+    <circle cx="240" cy="70" r="9" fill="var(--maybe)"/><text x="240" y="45" text-anchor="middle" class="mono" font-size="13">47 allowed</text>
+    <circle cx="350" cy="70" r="9" fill="none" stroke="var(--pencil)" stroke-width="2" stroke-dasharray="3 3"/><text x="350" y="45" text-anchor="middle" class="mono" font-size="13" fill="var(--pencil)">48 ???</text>
+    <!-- lightning -->
+    <path d="M400 30 l-14 40 h18 l-14 45" fill="none" stroke="var(--maybe)" stroke-width="4" stroke-linejoin="round"/>
+    <text x="400" y="135" text-anchor="middle" fill="var(--maybe)" font-weight="700">crash</text>
+    <!-- restart -->
+    <line x1="460" y1="70" x2="800" y2="70" stroke="currentColor" stroke-width="3"/>
+    <text x="480" y="45" font-weight="700">restart = reopen the notebook</text>
+    <!-- two options -->
+    <rect x="470" y="110" width="150" height="60" rx="6" fill="var(--maybe-soft)" stroke="var(--maybe)" stroke-width="2"/>
+    <text x="545" y="135" text-anchor="middle" font-weight="700" fill="var(--maybe)">retry the refund</text>
+    <text x="545" y="155" text-anchor="middle" font-size="12">pays twice</text>
+    <line x1="480" y1="118" x2="610" y2="162" stroke="var(--maybe)" stroke-width="3"/>
+    <rect x="640" y="110" width="160" height="60" rx="6" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2"/>
+    <text x="720" y="135" text-anchor="middle" font-weight="700" fill="var(--sure)">ask the bank</text>
+    <text x="720" y="155" text-anchor="middle" font-size="12">"did pay_… go through?"</text>
+    <line x1="720" y1="80" x2="720" y2="104" stroke="var(--sure)" stroke-width="2.5" marker-end="url(#a6)" style="color:var(--sure)"/>
+    <text x="420" y="215" text-anchor="middle" fill="var(--pencil)">line 44 says "at most once". the runtime knows not to guess.</text>
+  </svg>

@@ -1,0 +1,16 @@
+<svg viewBox="0 0 840 230" role="img" aria-label="A timeline forks at line 45: the original path with policy v7 and a branch with policy v8, both computed from the recorded model outputs without calling the model again">
+    <line x1="40" y1="110" x2="330" y2="110" stroke="currentColor" stroke-width="3"/>
+    <circle cx="100" cy="110" r="8" fill="var(--maybe)"/><circle cx="180" cy="110" r="8" fill="var(--sure)"/><circle cx="260" cy="110" r="8" fill="var(--maybe)"/>
+    <circle cx="330" cy="110" r="10" fill="var(--card)" stroke="currentColor" stroke-width="3"/>
+    <text x="330" y="85" text-anchor="middle" class="mono" font-size="13">45</text>
+    <!-- original -->
+    <path d="M340 110 h200" stroke="currentColor" stroke-width="3" fill="none"/>
+    <circle cx="420" cy="110" r="8" fill="var(--hold)"/><circle cx="500" cy="110" r="8" fill="var(--maybe)"/>
+    <text x="560" y="115" font-weight="700">what happened (v7): held, then paid</text>
+    <!-- branch -->
+    <path d="M338 118 q40 60 100 60 h100" stroke="var(--sure)" stroke-width="3" fill="none" stroke-dasharray="7 5"/>
+    <circle cx="440" cy="178" r="8" fill="var(--sure)"/><circle cx="520" cy="178" r="8" fill="var(--sure)"/>
+    <text x="560" y="183" font-weight="700" fill="var(--sure)">what if (v8): would it have denied?</text>
+    <text x="40" y="50" font-weight="700">every model answer is already on the record…</text>
+    <text x="40" y="72" fill="var(--pencil)">…so the green parts replay exactly, for the price of reading a file.</text>
+  </svg>

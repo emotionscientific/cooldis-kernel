@@ -1,0 +1,28 @@
+<svg viewBox="0 0 840 230" role="img" aria-label="The only path from the agent to the world goes through the notebook; a direct shortcut is crossed out">
+    <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <circle cx="110" cy="115" r="40" fill="var(--sure-soft)" stroke="currentColor" stroke-width="2"/>
+    <circle cx="96" cy="108" r="3" fill="currentColor"/><circle cx="124" cy="108" r="3" fill="currentColor"/>
+    <path d="M96 128 q14 10 28 0" fill="none" stroke="currentColor" stroke-width="2"/>
+    <text x="110" y="180" text-anchor="middle" font-weight="700">agent</text>
+    <!-- notebook -->
+    <rect x="330" y="50" width="180" height="130" rx="6" fill="var(--card)" stroke="currentColor" stroke-width="2.5"/>
+    <line x1="360" y1="50" x2="360" y2="180" stroke="currentColor" stroke-width="2"/>
+    <line x1="380" y1="80" x2="490" y2="80" stroke="var(--pencil)" stroke-width="2"/>
+    <line x1="380" y1="105" x2="490" y2="105" stroke="var(--pencil)" stroke-width="2"/>
+    <line x1="380" y1="130" x2="470" y2="130" stroke="var(--pencil)" stroke-width="2"/>
+    <line x1="380" y1="155" x2="440" y2="155" stroke="var(--sure)" stroke-width="3"/>
+    <text x="420" y="205" text-anchor="middle" font-weight="700">the notebook (the record)</text>
+    <!-- world -->
+    <circle cx="730" cy="115" r="40" fill="none" stroke="currentColor" stroke-width="2"/>
+    <path d="M700 100 q30 -18 60 0 M700 130 q30 18 60 0 M730 75 v80" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <text x="730" y="180" text-anchor="middle" font-weight="700">the world</text>
+    <!-- arrows via notebook -->
+    <line x1="155" y1="115" x2="322" y2="115" stroke="var(--sure)" stroke-width="3" marker-end="url(#a2)" style="color:var(--sure)"/>
+    <text x="238" y="102" text-anchor="middle" fill="var(--sure)" font-weight="700">writes first</text>
+    <line x1="515" y1="115" x2="682" y2="115" stroke="var(--sure)" stroke-width="3" marker-end="url(#a2)" style="color:var(--sure)"/>
+    <text x="598" y="102" text-anchor="middle" fill="var(--sure)" font-weight="700">then acts</text>
+    <!-- shortcut crossed out -->
+    <path d="M140 40 q280 -70 560 40" fill="none" stroke="var(--maybe)" stroke-width="2.5" stroke-dasharray="8 6"/>
+    <line x1="405" y1="0" x2="435" y2="30" stroke="var(--maybe)" stroke-width="4"/><line x1="435" y1="0" x2="405" y2="30" stroke="var(--maybe)" stroke-width="4"/>
+    <text x="420" y="48" text-anchor="middle" fill="var(--maybe)" font-weight="700">no shortcut exists</text>
+  </svg>

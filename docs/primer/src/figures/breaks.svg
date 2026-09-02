@@ -1,0 +1,27 @@
+<svg viewBox="0 0 840 250" role="img" aria-label="A frozen agent in a glass box next to an agent that edits itself and falls apart, with no record of what changed">
+    <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- frozen agent -->
+    <rect x="60" y="40" width="220" height="160" rx="8" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="6 5"/>
+    <circle cx="170" cy="105" r="34" fill="var(--sure-soft)" stroke="currentColor" stroke-width="2"/>
+    <circle cx="158" cy="100" r="3" fill="currentColor"/><circle cx="182" cy="100" r="3" fill="currentColor"/>
+    <line x1="158" y1="118" x2="182" y2="118" stroke="currentColor" stroke-width="2"/>
+    <text x="170" y="170" text-anchor="middle" font-weight="700">hosted agent</text>
+    <text x="170" y="188" text-anchor="middle" fill="var(--pencil)">safe: it cannot touch itself</text>
+    <text x="170" y="28" text-anchor="middle" fill="var(--pencil)">glass box</text>
+    <!-- self-editing agent -->
+    <circle cx="560" cy="105" r="34" fill="var(--maybe-soft)" stroke="currentColor" stroke-width="2"/>
+    <circle cx="548" cy="100" r="3" fill="currentColor"/><circle cx="572" cy="100" r="3" fill="currentColor"/>
+    <path d="M546 122 q14 -12 28 0" fill="none" stroke="currentColor" stroke-width="2"/>
+    <!-- arrows editing itself -->
+    <path d="M600 80 q60 -50 0 -20" fill="none" stroke="var(--maybe)" stroke-width="2.5" marker-end="url(#a1)" style="color:var(--maybe)"/>
+    <path d="M520 80 q-60 -50 0 -20" fill="none" stroke="var(--maybe)" stroke-width="2.5" marker-end="url(#a1)" style="color:var(--maybe)"/>
+    <text x="560" y="28" text-anchor="middle" fill="var(--maybe)" font-weight="700">edits its own tools, prompts, memory</text>
+    <!-- falling pieces -->
+    <rect x="640" y="150" width="26" height="26" rx="4" fill="none" stroke="var(--maybe)" stroke-width="2" transform="rotate(20 653 163)"/>
+    <rect x="470" y="160" width="22" height="22" rx="4" fill="none" stroke="var(--maybe)" stroke-width="2" transform="rotate(-30 481 171)"/>
+    <rect x="690" y="110" width="18" height="18" rx="4" fill="none" stroke="var(--maybe)" stroke-width="2" transform="rotate(45 699 119)"/>
+    <text x="560" y="170" text-anchor="middle" font-weight="700">personal agent</text>
+    <text x="560" y="188" text-anchor="middle" fill="var(--pencil)">nothing wrote down what changed. no undo.</text>
+    <text x="560" y="228" text-anchor="middle" fill="var(--maybe)" font-weight="700">= bricked</text>
+    <text x="170" y="228" text-anchor="middle" fill="var(--pencil)" font-weight="700">= frozen</text>
+  </svg>

@@ -1,0 +1,35 @@
+<svg viewBox="0 0 840 330" role="img" aria-label="A thread's record in the middle; the agent loop reads it and writes back to it (advance); projections read it and write elsewhere (derive); controllers read it and write into a control stream that changes how the loop runs next (steer)">
+    <defs><marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+    <!-- the record -->
+    <rect x="300" y="120" width="240" height="90" rx="8" fill="var(--card)" stroke="currentColor" stroke-width="2.5"/>
+    <text x="420" y="150" text-anchor="middle" font-size="18" font-weight="700">the thread's record</text>
+    <text x="420" y="178" text-anchor="middle" class="mono" font-size="13">41 42 43 44 45 46 47 …</text>
+    <text x="420" y="198" text-anchor="middle" font-size="12" fill="var(--pencil)">append-only</text>
+    <!-- propagator: loop above -->
+    <rect x="330" y="20" width="180" height="52" rx="8" fill="var(--maybe-soft)" stroke="var(--maybe)" stroke-width="2.5"/>
+    <text x="420" y="42" text-anchor="middle" font-weight="700" fill="var(--maybe)">agent loop</text>
+    <text x="420" y="61" text-anchor="middle" font-size="12" fill="var(--maybe)">propagator · "maybe"</text>
+    <path d="M360,120 C360,95 360,85 360,72" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#ap)"/>
+    <path d="M480,72 C480,85 480,95 480,120" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#ap)"/>
+    <text x="335" y="100" text-anchor="end" font-size="12">reads</text>
+    <text x="505" y="100" font-size="12">appends</text>
+    <text x="420" y="100" text-anchor="middle" font-size="13" font-weight="700">advance</text>
+    <!-- projection: right -->
+    <rect x="640" y="140" width="170" height="52" rx="8" fill="var(--sure-soft)" stroke="var(--sure)" stroke-width="2.5"/>
+    <text x="725" y="162" text-anchor="middle" font-weight="700" fill="var(--sure)">summary, index</text>
+    <text x="725" y="181" text-anchor="middle" font-size="12" fill="var(--sure)">projection · writes elsewhere</text>
+    <line x1="540" y1="166" x2="638" y2="166" stroke="currentColor" stroke-width="2" marker-end="url(#ap)"/>
+    <text x="589" y="156" text-anchor="middle" font-size="13" font-weight="700">derive</text>
+    <!-- controller: left, feeds a control stream that feeds the loop -->
+    <rect x="30" y="140" width="170" height="52" rx="8" fill="var(--hold-soft)" stroke="var(--hold)" stroke-width="2.5"/>
+    <text x="115" y="162" text-anchor="middle" font-weight="700" fill="var(--hold)">escalation rule</text>
+    <text x="115" y="181" text-anchor="middle" font-size="12" fill="var(--hold)">controller · feeds back</text>
+    <line x1="298" y1="166" x2="202" y2="166" stroke="currentColor" stroke-width="2" marker-end="url(#ap)"/>
+    <text x="250" y="156" text-anchor="middle" font-size="13" font-weight="700">steer</text>
+    <path d="M115,140 C115,40 200,40 328,46" fill="none" stroke="var(--hold)" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ap)"/>
+    <text x="190" y="30" text-anchor="middle" font-size="12" fill="var(--hold)">"use the careful model next turn"</text>
+    <!-- bottom line -->
+    <text x="420" y="260" text-anchor="middle" font-size="15" font-weight="700">every one of these is a coupling: reads declared, writes declared, trigger declared.</text>
+    <text x="420" y="290" text-anchor="middle" font-size="14" fill="var(--pencil)">only the loop writes back into its own source. that is what makes it the propagator.</text>
+    <text x="420" y="312" text-anchor="middle" font-size="14" fill="var(--pencil)">integrator · analysis · thermostat, in molecular dynamics words.</text>
+</svg>

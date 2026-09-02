@@ -37,6 +37,11 @@ run "$ROOT/scripts/threat-model-lint.sh"
 run "$ROOT/scripts/verlet-name-lint.sh"
 run "$ROOT/scripts/test-timeout-lint.sh"
 run "$ROOT/scripts/guard-rails-test.sh"
+if command -v pandoc >/dev/null 2>&1; then
+  run "$ROOT/scripts/build-primer.py" --check
+else
+  printf '\n==> primer check skipped: pandoc not installed (brew install pandoc)\n'
+fi
 run_cargo fmt --all -- --check
 # Same lint set as scripts/release-v1-candidate.sh so the everyday lane
 # cannot drift green while the release gate fails (EMO-459).
