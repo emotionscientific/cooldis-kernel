@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${VERLET_RELEASE_OUT_DIR:-$ROOT/dist}"
-REPO="${GITHUB_REPOSITORY:-emotionscientific/cooldis-kernel}"
+REPO="${GITHUB_REPOSITORY:-emotionscientific/verlet-kernel}"
 TAG="${GITHUB_REF_NAME:-}"
 CHANNEL="${VERLET_RELEASE_CHANNEL:-stable}"
 BASE_URL=""

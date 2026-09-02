@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${VERLET_REPO:-emotionscientific/cooldis-kernel}"
+REPO="${VERLET_REPO:-emotionscientific/verlet-kernel}"
 VERSION="${VERLET_VERSION:-}"
 TARGET="${VERLET_TARGET:-}"
 BASE_URL="${VERLET_BASE_URL:-}"
@@ -18,12 +18,12 @@ install.sh - install or update the Verlet CLI/kernel runtime.
 
 Usage:
   sh install.sh [options]
-  curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/latest/download/install.sh | sh
+  curl -fsSL https://github.com/emotionscientific/verlet-kernel/releases/latest/download/install.sh | sh
 
 Options:
   --version VERSION       Install a specific release version, for example 0.1.0.
   --target TARGET         Override target triple detection.
-  --repo OWNER/REPO       GitHub repository. Default: emotionscientific/cooldis-kernel.
+  --repo OWNER/REPO       GitHub repository. Default: emotionscientific/verlet-kernel.
   --base-url URL          Release asset base URL.
   --install-root DIR      Versioned install root. Default: ~/.verlet.
   --bin-dir DIR           Symlink directory. Default: ~/.local/bin.

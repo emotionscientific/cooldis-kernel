@@ -41,13 +41,13 @@ links the binaries into `~/.local/bin`.
 Install the latest stable release:
 
 ```sh
-curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/emotionscientific/verlet-kernel/releases/latest/download/install.sh | sh
 ```
 
 Install a release candidate directly:
 
 ```sh
-curl -fsSL https://github.com/emotionscientific/cooldis-kernel/releases/download/v0.1.0-rc.N/install.sh \
+curl -fsSL https://github.com/emotionscientific/verlet-kernel/releases/download/v0.1.0-rc.N/install.sh \
   | sh -s -- --version 0.1.0-rc.N
 ```
 
